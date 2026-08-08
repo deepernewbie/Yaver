@@ -308,29 +308,255 @@ object Store {
         return dropped
     }
 
+    // ── routines ─────────────────────────────────────────────────────────────
+
+    data class Routine(
+        val id: String,
+        var name: String,
+        var prompt: String,
+        var every: String,        // daily | weekdays | weekly
+        var hour: Int,
+        var minute: Int,
+        var lastRun: Long
+    ) {
+        fun toJson(): JSONObject = JSONObject()
+            .put("id", id).put("name", name).put("prompt", prompt)
+            .put("every", every).put("hour", hour).put("minute", minute)
+            .put("lastRun", lastRun)
+
+        /**
+         * When this should next fire, in epoch millis.
+         *
+         * Walks forward a day at a time rather than doing calendar arithmetic:
+         * fourteen iterations is nothing, and it handles weekday-only rules and
+         * "already past today" without a special case for either.
+         */
+        fun nextFireAt(from: Long = System.currentTimeMillis()): Long? {
+            val cal = java.util.Calendar.getInstance()
+            cal.timeInMillis = from
+            for (day in 0..14) {
+                val c = cal.clone() as java.util.Calendar
+                c.add(java.util.Calendar.DAY_OF_YEAR, day)
+                c.set(java.util.Calendar.HOUR_OF_DAY, hour)
+                c.set(java.util.Calendar.MINUTE, minute)
+                c.set(java.util.Calendar.SECOND, 0)
+                c.set(java.util.Calendar.MILLISECOND, 0)
+                if (c.timeInMillis <= from) continue
+
+                val dow = c.get(java.util.Calendar.DAY_OF_WEEK)
+                val weekday = dow >= java.util.Calendar.MONDAY && dow <= java.util.Calendar.FRIDAY
+                val ok = when (every) {
+                    "weekdays" -> weekday
+                    "weekly" -> c.timeInMillis - lastRun >= 7 * 86_400_000L
+                    else -> true
+                }
+                if (ok) return c.timeInMillis
+            }
+            return null
+        }
+
+        companion object {
+            fun from(o: JSONObject) = Routine(
+                id = o.optString("id"),
+                name = o.optString("name"),
+                prompt = o.optString("prompt"),
+                every = o.optString("every", "daily"),
+                hour = o.optInt("hour", 8),
+                minute = o.optInt("minute", 0),
+                lastRun = o.optLong("lastRun")
+            )
+        }
+    }
+
+    private const val ROUTINES = "routines.json"
+
+    fun routines(): MutableList<Routine> {
+        val arr = readJson(ROUTINES).optJSONArray("routines") ?: JSONArray()
+        return (0 until arr.length()).map { Routine.from(arr.getJSONObject(it)) }.toMutableList()
+    }
+
+    fun saveRoutines(list: List<Routine>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(it.toJson()) }
+        writeText(ROUTINES, JSONObject().put("routines", arr).toString(2))
+    }
+
+    // ── the user profile ─────────────────────────────────────────────────────
+    //
+    // Memories are scattered facts; the profile is the coherent picture. It is
+    // loaded into every conversation, which makes it the most valuable thing
+    // the agent maintains.
+
+    private const val PROFILE = "profile.md"
+
+    fun profile(): String = readText(PROFILE) ?: ""
+
+    fun saveProfile(text: String) { writeText(PROFILE, text.take(8000)) }
+
+    // ── skills: procedural memory ────────────────────────────────────────────
+    //
+    // Memory is what happened; a skill is how this person likes a job done.
+    // Written after finishing something non-trivial, read before doing it
+    // again, so the second time starts where the first one ended.
+
+    private const val SKILL_DIR = "skills"
+
+    data class Skill(val name: String, val title: String, val useWhen: String, val body: String)
+
+    private fun slug(s: String) = s.lowercase(Locale.ROOT)
+        .map { if (it.isLetterOrDigit()) it else '-' }
+        .joinToString("")
+        .replace(Regex("-+"), "-").trim('-').take(48).ifEmpty { "skill" }
+
+    fun skills(): List<Skill> = listFiles(SKILL_DIR).filter { it.endsWith(".md") }.mapNotNull { file ->
+        val raw = readText("$SKILL_DIR/$file") ?: return@mapNotNull null
+        Skill(
+            name = file.removeSuffix(".md"),
+            title = Regex("(?m)^#\\s+(.+)$").find(raw)?.groupValues?.get(1)?.trim()
+                ?: file.removeSuffix(".md"),
+            useWhen = Regex("(?mi)^when:\\s*(.+)$").find(raw)?.groupValues?.get(1)?.trim() ?: "",
+            body = raw
+        )
+    }
+
+    fun readSkill(name: String): Skill? = skills().firstOrNull { it.name == slug(name) || it.name == name }
+
+    fun saveSkill(name: String, title: String, useWhen: String, body: String): String {
+        val file = "$SKILL_DIR/${slug(name.ifBlank { title })}.md"
+        val doc = buildString {
+            append("# ").append(title.ifBlank { name }).append('\n')
+            if (useWhen.isNotBlank()) append("when: ").append(useWhen).append('\n')
+            append('\n').append(body.trim()).append('\n')
+        }
+        writeText(file, doc)
+        return file
+    }
+
+    fun deleteSkill(name: String): Boolean = delete("$SKILL_DIR/${slug(name)}.md")
+
+    /** Titles and triggers only — bodies are read on demand, not carried around. */
+    fun skillIndex(): String = skills().joinToString("\n") { sk ->
+        "- ${sk.name}: ${sk.title}" + if (sk.useWhen.isNotBlank()) " — use when ${sk.useWhen}" else ""
+    }
+
+    // ── usage ────────────────────────────────────────────────────────────────
+
+    private const val USAGE = "usage.json"
+
+    fun recordUsage(model: String, prompt: Int, completion: Int, cost: Double) {
+        val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val data = readJson(USAGE)
+        val days = data.optJSONObject("days") ?: JSONObject()
+        val bucket = days.optJSONObject(day) ?: JSONObject()
+        bucket.put("calls", bucket.optInt("calls") + 1)
+        bucket.put("prompt", bucket.optInt("prompt") + prompt)
+        bucket.put("completion", bucket.optInt("completion") + completion)
+        bucket.put("cost", bucket.optDouble("cost", 0.0) + cost)
+        bucket.put("model", model)
+        days.put(day, bucket)
+
+        // Thirty days answers "what am I spending" without growing forever.
+        val cutoff = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+            .format(Date(System.currentTimeMillis() - 30L * 86_400_000L))
+        val keys = days.keys().asSequence().toList()
+        keys.filter { it < cutoff }.forEach { days.remove(it) }
+
+        writeText(USAGE, JSONObject().put("days", days).toString())
+    }
+
+    data class UsageDay(val day: String, val calls: Int, val tokens: Int, val cost: Double)
+
+    fun usage(days: Int = 7): List<UsageDay> {
+        val data = readJson(USAGE).optJSONObject("days") ?: return emptyList()
+        val since = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+            .format(Date(System.currentTimeMillis() - days * 86_400_000L))
+        return data.keys().asSequence().filter { it >= since }.map { key ->
+            val o = data.getJSONObject(key)
+            UsageDay(key, o.optInt("calls"), o.optInt("prompt") + o.optInt("completion"), o.optDouble("cost"))
+        }.sortedByDescending { it.day }.toList()
+    }
+
     // ── conversation ─────────────────────────────────────────────────────────
 
     data class Turn(val role: String, val content: String, val ts: Long = System.currentTimeMillis())
 
-    private const val SESSION = "session.json"
+    data class SessionInfo(val id: String, val title: String, val updated: Long, val turns: Int)
 
-    fun loadSession(): MutableList<Turn> {
-        val arr = readJson(SESSION).optJSONArray("turns") ?: JSONArray()
+    private const val SESSION_DIR = "sessions"
+    private const val CURRENT = "currentSession"
+
+    fun currentSessionId(): String {
+        val existing = setting(CURRENT)
+        if (existing.isNotBlank()) return existing
+        val fresh = newId()
+        setSetting(CURRENT, fresh)
+        return fresh
+    }
+
+    fun switchSession(id: String) { setSetting(CURRENT, id) }
+
+    fun newSession(): String {
+        val id = newId()
+        setSetting(CURRENT, id)
+        return id
+    }
+
+    fun loadSession(id: String = currentSessionId()): MutableList<Turn> {
+        val arr = readJson("$SESSION_DIR/$id.json").optJSONArray("turns") ?: JSONArray()
         return (0 until arr.length()).map {
             val o = arr.getJSONObject(it)
             Turn(o.optString("role"), o.optString("content"), o.optLong("ts"))
         }.toMutableList()
     }
 
-    fun saveSession(turns: List<Turn>) {
+    fun saveSession(turns: List<Turn>, id: String = currentSessionId()) {
+        if (turns.isEmpty()) return
         val arr = JSONArray()
-        turns.takeLast(200).forEach {
+        turns.takeLast(300).forEach {
             arr.put(JSONObject().put("role", it.role).put("content", it.content).put("ts", it.ts))
         }
-        writeText(SESSION, JSONObject().put("turns", arr).toString())
+        // The title is the opening line of the first thing the user said —
+        // cheap, stable, and good enough to recognise a conversation by.
+        val title = turns.firstOrNull { it.role == "user" }?.content
+            ?.lineSequence()?.firstOrNull()?.take(60) ?: "New session"
+        writeText("$SESSION_DIR/$id.json", JSONObject()
+            .put("id", id).put("title", title)
+            .put("updated", System.currentTimeMillis())
+            .put("turns", arr).toString())
     }
 
-    fun clearSession() { delete(SESSION) }
+    fun sessions(): List<SessionInfo> =
+        listFiles(SESSION_DIR).filter { it.endsWith(".json") }.mapNotNull { name ->
+            val o = try { JSONObject(readText("$SESSION_DIR/$name") ?: return@mapNotNull null) }
+                    catch (e: Exception) { return@mapNotNull null }
+            SessionInfo(
+                id = o.optString("id", name.removeSuffix(".json")),
+                title = o.optString("title", "Session"),
+                updated = o.optLong("updated"),
+                turns = o.optJSONArray("turns")?.length() ?: 0
+            )
+        }.sortedByDescending { it.updated }
+
+    fun deleteSession(id: String) { delete("$SESSION_DIR/$id.json") }
+
+    /** Everything the user ever said, searched for a phrase. */
+    fun searchSessions(query: String, limit: Int = 6): List<Pair<SessionInfo, String>> {
+        val terms = tokenise(query)
+        if (terms.isEmpty()) return emptyList()
+        val out = mutableListOf<Triple<SessionInfo, String, Int>>()
+        for (info in sessions().take(80)) {
+            val turns = loadSession(info.id)
+            val hay = turns.joinToString("\n") { it.content }
+            val lower = hay.lowercase(Locale.ROOT)
+            var score = 0
+            terms.forEach { t -> if (lower.contains(t)) score++ }
+            if (score == 0) continue
+            val at = lower.indexOf(terms.first())
+            val excerpt = hay.substring(maxOf(0, at - 80), minOf(hay.length, at + 240)).trim()
+            out.add(Triple(info, excerpt, score))
+        }
+        return out.sortedByDescending { it.third }.take(limit).map { it.first to it.second }
+    }
 
     // ── things shared to the agent ───────────────────────────────────────────
 

@@ -64,7 +64,7 @@ object Agent {
         }
     }
 
-    private fun systemPrompt(context: Context, userText: String): String {
+    private fun systemPrompt(context: Context, userText: String, nudge: String): String {
         val name = Store.setting(Store.USER_NAME)
         val persona = Store.setting(Store.PERSONA)
         val memories = Store.recall(userText, 10)
@@ -115,8 +115,18 @@ object Agent {
             append("- Search for anything current or verifiable; your training data is stale.\n")
             append("- Use `calculate` for arithmetic instead of doing it in your head.\n")
             append("- Finish the thought the user started: a mentioned meeting wants a calendar entry, a deadline wants a task. Prepare it, say what you inferred, and let them correct you. Never do anything irreversible.\n")
+            append("- Keep a profile: `read_profile` then `update_profile` whenever you learn something structural about who they are. It is loaded into every future conversation.\n")
+            append("- After finishing anything non-trivial you could be asked for again, write a `create_skill`: the format that worked, the steps, what surprised you. Next time, read it and start where you left off.\n")
+            append("- When they refer to something from before, call `search_history` rather than saying you don't remember.\n")
             append("- Answer in the user's language, and match their register.\n")
             append("- Stop when you have enough. A partial answer with sources beats a perfect one that never arrives.\n\n")
+
+            val profile = Store.profile()
+            if (profile.isNotBlank()) {
+                append("## Who this person is\n\n")
+                append(profile)
+                append("\n\n")
+            }
 
             append("## What you know about this person\n\n")
             if (memories.isEmpty()) append("(nothing saved yet)\n")
@@ -125,10 +135,17 @@ object Agent {
                 append("\n($allMemories memories stored in total; those above are the ones relevant to this message. Use `recall` for the rest.)\n")
             }
 
+            val skills = Store.skillIndex()
+            if (skills.isNotBlank()) {
+                append("\n## Skills you have written\n\n")
+                append(skills)
+                append("\n\nRead one in full with `read_skill` before following it.\n")
+            }
+
             append("\n## Their open tasks\n\n$taskSummary\n")
 
             if (persona.isNotBlank()) append("\n## Standing instructions from the user\n\n$persona\n")
-            if (pendingNudge.isNotBlank()) append("\n$pendingNudge\n")
+                if (nudge.isNotBlank()) append("\n$nudge\n")
         }
     }
 
@@ -229,7 +246,7 @@ object Agent {
         if (deliveredNudge.isNotBlank()) Log.info("memory nudge delivered with this turn")
 
         val convo = mutableListOf<Pair<String, String>>()
-        convo.add("system" to systemPrompt(context, userText))
+        convo.add("system" to systemPrompt(context, userText, deliveredNudge))
         history.filter { it.role == "user" || it.role == "assistant" }
             .takeLast(20)
             .forEach { convo.add(it.role to it.content) }
@@ -375,6 +392,33 @@ object Agent {
         pendingNudge = "[You have gone several exchanges without recording anything. " +
             "If this conversation revealed a durable fact, a preference or a commitment, " +
             "write it with `remember` next turn. If it genuinely revealed nothing worth keeping, ignore this.]"
+    }
+
+    /**
+     * Compress a long conversation into a dense summary.
+     *
+     * Context is the scarcest resource on a phone: a long session quietly makes
+     * every turn slower and dearer. Keep the decisions and the open threads,
+     * drop the retries and the dead ends.
+     */
+    fun compress(history: List<Store.Turn>): String {
+        val transcript = history
+            .filter { it.role == "user" || it.role == "assistant" }
+            .joinToString("\n\n") { "${it.role}: ${it.content}" }
+            .takeLast(30000)
+        if (transcript.length < 500) return ""
+        return try {
+            Llm.complete(listOf(
+                "system" to ("Compress this conversation so it can replace the original as context. " +
+                    "Keep every decision, every fact established, every open thread, every file or link " +
+                    "produced, and the user's stated preferences. Drop pleasantries, retries and dead ends. " +
+                    "Write it as notes to yourself, not as a report to the user."),
+                "user" to transcript
+            ), temperature = 0.2)
+        } catch (e: Exception) {
+            Log.error("compression failed: ${e.message}")
+            ""
+        }
     }
 
     /** Pulls durable facts out of a finished conversation. Runs in the background. */

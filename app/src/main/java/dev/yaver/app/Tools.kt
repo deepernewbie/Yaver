@@ -53,7 +53,7 @@ object Tools {
                 "notes" to "Optional detail.",
                 "priority" to "low | normal | high"
             )
-        ) { _, args ->
+        ) { ctx, args ->
             val title = args.str("title")
             if (title.isBlank()) throw ToolError("title is required")
             val due = Store.parseLocal(args.str("due").ifBlank { null })
@@ -61,6 +61,7 @@ object Tools {
                 title, due, args.optInt("remind", 30),
                 args.str("notes"), args.str("priority", "normal")
             )
+            Reminders.scheduleTask(ctx, task)
             ok("added" to true, "id" to task.id,
                 "due" to (task.due?.let { Store.localIso(it) }),
                 "note" to (task.due?.let { "Saved for ${Store.localIso(it)} — check that is the time meant." }))
@@ -93,7 +94,7 @@ object Tools {
                 "due" to "New local datetime.", "remind" to "Minutes before.",
                 "title" to "New title.", "notes" to "New notes.", "priority" to "low | normal | high"
             )
-        ) { _, args ->
+        ) { ctx, args ->
             val list = Store.tasks()
             val t = list.firstOrNull { it.id == args.str("id") }
                 ?: throw ToolError("No task with that id. Call list_tasks first.")
@@ -103,27 +104,30 @@ object Tools {
             if (args.has("remind")) t.remind = args.optInt("remind", t.remind)
             if (args.has("due")) t.due = Store.parseLocal(args.str("due").ifBlank { null })
             Store.saveTasks(list)
+            Reminders.scheduleTask(ctx, t)
             ok("updated" to true, "title" to t.title, "due" to (t.due?.let { Store.localIso(it) }))
         },
 
         Tool("complete_task", "Mark a task done.", mapOf("id" to "Task id from list_tasks.")
-        ) { _, args ->
+        ) { ctx, args ->
             val list = Store.tasks()
             val t = list.firstOrNull { it.id == args.str("id") }
                 ?: throw ToolError("No task with that id.")
             t.done = true
             Store.saveTasks(list)
+            Reminders.cancelTask(ctx, t.id)
             ok("done" to true, "title" to t.title)
         },
 
         Tool("delete_task",
             "Remove a task entirely. Prefer complete_task for something finished — deleting loses the record.",
             mapOf("id" to "Task id from list_tasks.")
-        ) { _, args ->
+        ) { ctx, args ->
             val list = Store.tasks()
             val t = list.firstOrNull { it.id == args.str("id") }
                 ?: throw ToolError("No task with that id.")
             Store.saveTasks(list - t)
+            Reminders.cancelTask(ctx, t.id)
             ok("deleted" to true, "title" to t.title)
         },
 
@@ -236,6 +240,195 @@ object Tools {
         ) { ctx, args ->
             val id = args.optLong("id").takeIf { it > 0 } ?: throw ToolError("id is required")
             ok("deleted" to Calendar.delete(ctx, id), "id" to id)
+        },
+
+        // ── who this person is ───────────────────────────────────────────────
+
+        Tool("read_profile",
+            "Read your working description of the user before rewriting it.",
+            mapOf()
+        ) { _, _ ->
+            val text = Store.profile()
+            ok("profile" to text.ifBlank { "(empty — nothing recorded about this person yet)" })
+        },
+
+        Tool("update_profile",
+            "Rewrite your description of this person: who they are, what they are working on, how they like things done. Read it first, then return the whole improved version. It is loaded into every conversation, so it is the most valuable thing you maintain — but keep it short and factual.",
+            mapOf("content" to "The complete profile in markdown. Replaces the old one entirely.")
+        ) { _, args ->
+            val content = args.str("content")
+            if (content.trim().length < 10) throw ToolError("content is required")
+            Store.saveProfile(content)
+            ok("saved" to true, "chars" to content.length)
+        },
+
+        Tool("search_history",
+            "Search past conversations. Use this when the user refers to something you discussed before rather than admitting you don't remember.",
+            mapOf("query" to "Words that would have appeared in that conversation.", "limit" to "Default 6.")
+        ) { _, args ->
+            val hits = Store.searchSessions(args.str("query"), args.optInt("limit", 6))
+            if (hits.isEmpty()) {
+                ok("found" to 0, "note" to "Nothing in past conversations matched.")
+            } else {
+                val arr = JSONArray()
+                hits.forEach { (info, excerpt) ->
+                    arr.put(JSONObject()
+                        .put("when", Store.localIso(info.updated).replace("T", " ").take(16))
+                        .put("title", info.title)
+                        .put("excerpt", excerpt))
+                }
+                ok("found" to hits.size, "conversations" to arr)
+            }
+        },
+
+        // ── skills: how this person likes a job done ─────────────────────────
+
+        Tool("create_skill",
+            "Write down how to do a job the way this user wants it done, so you do it the same way next time. Create one after finishing anything non-trivial you might be asked for again — a report format they liked, a checklist, a routine they follow. Reuse the same name to rewrite an existing skill.",
+            mapOf(
+                "name" to "Short identifier, e.g. \"weekly-review\".",
+                "title" to "One line: what this skill does.",
+                "when" to "One line: when to use it. This is what you match against later.",
+                "body" to "The procedure in markdown — steps, format, preferences, anything that surprised you."
+            )
+        ) { _, args ->
+            val body = args.str("body")
+            if (body.isBlank()) throw ToolError("body is required")
+            val name = args.str("name").ifBlank { args.str("title") }
+            if (name.isBlank()) throw ToolError("name or title is required")
+            val file = Store.saveSkill(name, args.str("title", name), args.str("when"), body)
+            ok("saved" to true, "file" to file,
+                "note" to "It is listed in your instructions from now on.")
+        },
+
+        Tool("list_skills", "List the skills you have written, with what each is for.", mapOf()
+        ) { _, _ ->
+            val list = Store.skills()
+            val arr = JSONArray()
+            list.forEach {
+                arr.put(JSONObject().put("name", it.name).put("title", it.title).put("when", it.useWhen))
+            }
+            ok("count" to list.size, "skills" to arr)
+        },
+
+        Tool("read_skill",
+            "Read a skill in full before following it. The index in your instructions carries only titles.",
+            mapOf("name" to "Skill name from list_skills.")
+        ) { _, args ->
+            val skill = Store.readSkill(args.str("name"))
+                ?: throw ToolError("No skill by that name. Call list_skills.")
+            ok("name" to skill.name, "content" to skill.body)
+        },
+
+        Tool("delete_skill", "Remove a skill that turned out wrong or is no longer wanted.",
+            mapOf("name" to "Skill name.")
+        ) { _, args ->
+            ok("deleted" to Store.deleteSkill(args.str("name")))
+        },
+
+        // ── tending the memory store ─────────────────────────────────────────
+
+        Tool("memory_status",
+            "See how memory is doing: how much is stored, and what is about to be forgotten through disuse.",
+            mapOf()
+        ) { _, _ ->
+            val all = Store.memories()
+            val fading = all.filter {
+                !Store.memoryProtected(it) && Store.memoryIdleDays(it) >= Store.MEMORY_WARN_DAYS
+            }.sortedByDescending { Store.memoryIdleDays(it) }
+            val arr = JSONArray()
+            fading.take(10).forEach { m ->
+                arr.put(JSONObject()
+                    .put("text", m.text)
+                    .put("unused_days", Store.memoryIdleDays(m))
+                    .put("deleted_in_days", Store.MEMORY_TTL_DAYS - Store.memoryIdleDays(m)))
+            }
+            ok("stored" to all.size,
+                "pinned" to all.count { it.pinned },
+                "fading" to fading.size,
+                "about_to_go" to arr,
+                "note" to if (fading.isEmpty()) "Nothing is fading."
+                          else "Tell the user which of these are worth keeping — recalling one keeps it alive.")
+        },
+
+        Tool("consolidate_memory",
+            "Tidy the memory store: merge duplicates, correct anything now out of date, note connections. Do this when memory looks messy or contradictory, or when asked.",
+            mapOf("topic" to "Optional — only consolidate memories about this.")
+        ) { _, args ->
+            val topic = args.str("topic")
+            val list = if (topic.isBlank()) Store.memories().take(60)
+                       else Store.recall(topic, 60, touch = false)
+            if (list.size < 2) {
+                ok("note" to "Not enough memories to consolidate.")
+            } else {
+                val arr = JSONArray()
+                list.forEach { m ->
+                    arr.put(JSONObject()
+                        .put("id", m.id).put("text", m.text)
+                        .put("entities", JSONArray(m.entities))
+                        .put("importance", m.importance).put("uses", m.uses)
+                        .put("age_days", (System.currentTimeMillis() - m.created) / 86_400_000L))
+                }
+                ok("count" to list.size, "memories" to arr,
+                    "instruction" to "Review these. For anything duplicated or superseded, call `forget` on the weaker one and `remember` a single merged version. For anything now wrong, forget it. Leave good memories alone — churn is worse than clutter. Report briefly what you changed.")
+            }
+        },
+
+        // ── recurring work ───────────────────────────────────────────────────
+
+        Tool("add_routine",
+            "Set something to run regularly — a morning brief, a weekly review. At the given time a notification appears; tapping it opens Yaver and runs the prompt. It does not run silently in the background: waking to find an agent has spent your tokens unasked is not a pleasant surprise.",
+            mapOf(
+                "name" to "Short name.",
+                "prompt" to "Exactly what to do, written as if the user had just asked you.",
+                "every" to "daily | weekdays | weekly",
+                "hour" to "Hour of day, 0-23, local time.",
+                "minute" to "Minute, default 0."
+            )
+        ) { ctx, args ->
+            val prompt = args.str("prompt")
+            if (prompt.isBlank()) throw ToolError("prompt is required")
+            val list = Store.routines()
+            val routine = Store.Routine(
+                id = Store.newId(),
+                name = args.str("name").ifBlank { prompt.take(40) },
+                prompt = prompt,
+                every = args.str("every", "daily"),
+                hour = args.optInt("hour", 8).coerceIn(0, 23),
+                minute = args.optInt("minute", 0).coerceIn(0, 59),
+                lastRun = 0
+            )
+            list.add(routine)
+            Store.saveRoutines(list)
+            Reminders.scheduleRoutine(ctx, routine)
+            val next = routine.nextFireAt()
+            ok("added" to true, "id" to routine.id,
+                "next" to (next?.let { Store.localIso(it) }),
+                "note" to "You will be notified; tapping the notification runs it.")
+        },
+
+        Tool("list_routines", "List the recurring jobs that are set up.", mapOf()
+        ) { _, _ ->
+            val list = Store.routines()
+            val arr = JSONArray()
+            list.forEach { r ->
+                arr.put(JSONObject()
+                    .put("id", r.id).put("name", r.name)
+                    .put("every", r.every)
+                    .put("at", String.format(Locale.US, "%02d:%02d", r.hour, r.minute))
+                    .put("next", r.nextFireAt()?.let { Store.localIso(it) } ?: "never"))
+            }
+            ok("count" to list.size, "routines" to arr)
+        },
+
+        Tool("delete_routine", "Remove a recurring job.", mapOf("id" to "Routine id from list_routines.")
+        ) { ctx, args ->
+            val id = args.str("id")
+            val list = Store.routines()
+            val r = list.firstOrNull { it.id == id } ?: throw ToolError("No routine with that id.")
+            Store.saveRoutines(list - r)
+            Reminders.cancelRoutine(ctx, id)
+            ok("deleted" to true, "name" to r.name)
         },
 
         // ── the web ──────────────────────────────────────────────────────────

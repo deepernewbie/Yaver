@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -41,6 +42,9 @@ class MainActivity : Activity() {
     private lateinit var dueBar: TextView
 
     private var turns = mutableListOf<Store.Turn>()
+    private var sessionId = ""
+    private var harvesting = false
+
     private var busy = false
 
     private var currentBubble: TextView? = null
@@ -108,10 +112,14 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        turns = Store.loadSession()
+        sessionId = Store.currentSessionId()
+        turns = Store.loadSession(sessionId)
         if (turns.isEmpty()) showWelcome() else replay()
         refreshDueBar()
         showLastCrash()
+        askNotificationPermission()
+        io.execute { Reminders.rescheduleAll(this) }
+        handleLaunchPrompt(intent)
 
         io.execute {
             val dropped = Store.pruneMemories()
@@ -123,7 +131,45 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
-        Store.saveSession(turns)
+        Store.saveSession(turns, sessionId)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Leaving is the last chance to keep what this conversation taught.
+        if (turns.size >= 2 && !harvesting) {
+            harvesting = true
+            val snapshot = turns.toList()
+            io.execute {
+                try { Agent.harvest(snapshot) } finally { harvesting = false }
+            }
+        }
+    }
+
+    /** A routine notification carries the prompt to run. */
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        handleLaunchPrompt(intent)
+    }
+
+    private fun handleLaunchPrompt(intent: Intent?) {
+        val prompt = intent?.getStringExtra(Reminders.EXTRA_PROMPT) ?: return
+        intent.removeExtra(Reminders.EXTRA_PROMPT)
+        if (busy) return
+        input.setText(prompt)
+        toast("Running your routine")
+        ui.postDelayed({ send() }, 400)
+    }
+
+    /**
+     * Android 13 made notifications opt-in, and reminders are most of why this
+     * app is native — silently having none would gut it.
+     */
+    private fun askNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 5150)
     }
 
     override fun onRequestPermissionsResult(
@@ -163,6 +209,14 @@ class MainActivity : Activity() {
             setPadding(0, 0, dp(10), 0)
         })
 
+        bar.addView(Button(this).apply {
+            text = "☰"
+            isAllCaps = false
+            textSize = 16f
+            setTextColor(soft)
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnClickListener { showSessions() }
+        })
         bar.addView(Button(this).apply {
             text = "New"
             isAllCaps = false
@@ -227,8 +281,8 @@ class MainActivity : Activity() {
         bar.addView(tab("Tasks") { showTasks() })
         bar.addView(tab("Calendar") { showCalendar() })
         bar.addView(tab("Memory") { showMemory() })
-        bar.addView(tab("Settings") { showSettings() })
-        bar.addView(tab("Debug") { showDebug() })
+        bar.addView(tab("Routines") { showRoutines() })
+        bar.addView(tab("More") { showMore() })
         return bar
     }
 
@@ -452,15 +506,19 @@ class MainActivity : Activity() {
                     } else {
                         currentBubble?.text = render(Agent.stripCalls(reply))
                     }
-                    Store.saveSession(turns)
+                    Store.saveSession(turns, sessionId)
                     setBusy(false)
                     refreshDueBar()
                     scrollDown()
 
                     // Harvesting only when someone taps "New" means it almost
                     // never runs; every few exchanges is what makes memory real.
-                    if (turns.count { it.role == "user" } % 3 == 0) {
-                        io.execute { Agent.harvest(turns) }
+                    if (turns.count { it.role == "user" } % 3 == 0 && !harvesting) {
+                        harvesting = true
+                        val snapshot = turns.toList()
+                        io.execute {
+                            try { Agent.harvest(snapshot) } finally { harvesting = false }
+                        }
                     }
                 }
 
@@ -488,26 +546,118 @@ class MainActivity : Activity() {
     private fun newSession() {
         if (turns.isNotEmpty()) {
             val snapshot = turns.toList()
+            Store.saveSession(snapshot, sessionId)
             io.execute { Agent.harvest(snapshot) }
         }
+        sessionId = Store.newSession()
         turns = mutableListOf()
-        Store.clearSession()
         showWelcome()
+    }
+
+    private fun showSessions() {
+        val list = Store.sessions()
+        if (list.isEmpty()) { toast("No past conversations yet"); return }
+        val labels = list.map { info ->
+            val when_ = SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(Date(info.updated))
+            "${info.title}\n     $when_  ·  ${info.turns} messages"
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Conversations")
+            .setItems(labels) { _, index ->
+                val chosen = list[index]
+                if (turns.isNotEmpty()) Store.saveSession(turns, sessionId)
+                sessionId = chosen.id
+                Store.switchSession(chosen.id)
+                turns = Store.loadSession(chosen.id)
+                if (turns.isEmpty()) showWelcome() else replay()
+                toast(chosen.title.take(40))
+            }
+            .setNeutralButton("Delete all") { _, _ ->
+                AlertDialog.Builder(this)
+                    .setTitle("Delete every conversation?")
+                    .setMessage("Memories and tasks are kept. Only the transcripts go.")
+                    .setPositiveButton("Delete") { _, _ ->
+                        list.forEach { Store.deleteSession(it.id) }
+                        sessionId = Store.newSession()
+                        turns = mutableListOf()
+                        showWelcome()
+                        toast("Conversations deleted")
+                    }
+                    .setNegativeButton("Keep", null)
+                    .show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showRoutines() {
+        val list = Store.routines()
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+        }
+        if (list.isEmpty()) {
+            content.addView(rowLabel("Nothing recurring yet.", faint))
+            content.addView(rowLabel(
+                "Ask me: \"her sabah 8'de günün özetini çıkar\" — I'll set it up.", faint, 12f))
+        }
+        list.forEach { r ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val main = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            main.addView(rowLabel(r.name))
+            val next = r.nextFireAt()?.let {
+                SimpleDateFormat("EEE d MMM HH:mm", Locale.getDefault()).format(Date(it))
+            } ?: "never"
+            main.addView(rowLabel(
+                "${r.every} at ${String.format(Locale.US, "%02d:%02d", r.hour, r.minute)}  ·  next $next",
+                faint, 11f))
+            row.addView(main)
+            row.addView(Button(this).apply {
+                text = "▶"
+                isAllCaps = false
+                setTextColor(signal)
+                setBackgroundColor(Color.TRANSPARENT)
+                setOnClickListener { input.setText(r.prompt); send() }
+            })
+            row.addView(Button(this).apply {
+                text = "×"
+                isAllCaps = false
+                setTextColor(faint)
+                setBackgroundColor(Color.TRANSPARENT)
+                setOnClickListener {
+                    Store.saveRoutines(Store.routines().filter { it.id != r.id })
+                    Reminders.cancelRoutine(this@MainActivity, r.id)
+                    toast("Removed")
+                }
+            })
+            content.addView(row)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Routines")
+            .setView(ScrollView(this).apply { addView(content) })
+            .setPositiveButton("Done", null)
+            .show()
     }
 
     // ── panels ───────────────────────────────────────────────────────────────
 
-    private fun sheet(title: String, build: (LinearLayout) -> Unit) {
+    private fun sheet(title: String, build: (LinearLayout) -> Unit): AlertDialog {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(16), dp(20), dp(16))
         }
         build(content)
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle(title)
             .setView(ScrollView(this).apply { addView(content) })
             .setPositiveButton("Done", null)
-            .show()
+            .create()
+        dialog.show()
+        return dialog
     }
 
     private fun rowLabel(text: String, colour: Int = ink, size: Float = 14f) = TextView(this).apply {
@@ -515,6 +665,110 @@ class MainActivity : Activity() {
         setTextColor(colour)
         textSize = size
         setPadding(0, dp(4), 0, dp(4))
+    }
+
+    /** Settings, past conversations and the log — the things you reach for rarely. */
+    private fun showMore() {
+        AlertDialog.Builder(this)
+            .setTitle("More")
+            .setItems(arrayOf(
+                "Conversations", "Skills", "Usage",
+                "Compress this conversation", "Settings", "Debug log"
+            )) { _, index ->
+                when (index) {
+                    0 -> showSessions()
+                    1 -> showSkills()
+                    2 -> showUsage()
+                    3 -> compressConversation()
+                    4 -> showSettings()
+                    5 -> showDebug()
+                }
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showSkills() = sheet("Skills") { box ->
+        val list = Store.skills()
+        if (list.isEmpty()) {
+            box.addView(rowLabel("Nothing written yet.", faint))
+            box.addView(rowLabel(
+                "I write these after finishing something worth repeating, so I do it your way next time.",
+                faint, 12f))
+            return@sheet
+        }
+        list.forEach { sk ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val main = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            main.addView(rowLabel(sk.title))
+            if (sk.useWhen.isNotBlank()) main.addView(rowLabel("when ${sk.useWhen}", faint, 11f))
+            main.setOnClickListener {
+                AlertDialog.Builder(this)
+                    .setTitle(sk.title)
+                    .setMessage(sk.body.take(4000))
+                    .setPositiveButton("Close", null)
+                    .show()
+            }
+            row.addView(main)
+            row.addView(Button(this).apply {
+                text = "×"
+                isAllCaps = false
+                setTextColor(faint)
+                setBackgroundColor(Color.TRANSPARENT)
+                setOnClickListener { Store.deleteSkill(sk.name); toast("Deleted") }
+            })
+            box.addView(row)
+        }
+    }
+
+    /**
+     * Dialogs cannot rebuild themselves in place, so filtering means closing
+     * and reopening. Cheap, and it keeps the panel code a single function.
+     */
+    private var memorySheet: AlertDialog? = null
+
+    private fun closeAndReopenMemory() {
+        memorySheet?.dismiss()
+        ui.postDelayed({ showMemory() }, 120)
+    }
+
+    private fun showUsage() = sheet("Usage · last 7 days") { box ->
+        val days = Store.usage(7)
+        if (days.isEmpty()) { box.addView(rowLabel("Nothing recorded yet.", faint)); return@sheet }
+        var calls = 0; var tokens = 0; var cost = 0.0
+        days.forEach { d ->
+            calls += d.calls; tokens += d.tokens; cost += d.cost
+            box.addView(rowLabel(
+                "${d.day}   ${d.calls} calls   ${d.tokens} tokens" +
+                if (d.cost > 0) "   $${String.format(Locale.US, "%.4f", d.cost)}" else "",
+                ink, 12f))
+        }
+        box.addView(rowLabel(
+            "Total  $calls calls, $tokens tokens" +
+            if (cost > 0) ", $${String.format(Locale.US, "%.4f", cost)}" else "",
+            signal, 13f))
+    }
+
+    private fun compressConversation() {
+        if (turns.size < 6) { toast("Not much to compress yet"); return }
+        toast("Compressing…")
+        val snapshot = turns.toList()
+        io.execute {
+            val summary = Agent.compress(snapshot)
+            post {
+                if (summary.isBlank()) { toast("Could not compress"); return@post }
+                turns = mutableListOf(
+                    Store.Turn("user", "(earlier conversation)"),
+                    Store.Turn("assistant", summary)
+                )
+                Store.saveSession(turns, sessionId)
+                replay()
+                toast("History compressed")
+            }
+        }
     }
 
     private fun showTasks() = sheet("Tasks") { box ->
@@ -555,8 +809,13 @@ class MainActivity : Activity() {
                 setBackgroundColor(Color.TRANSPARENT)
                 setOnClickListener {
                     val all = Store.tasks()
-                    all.firstOrNull { it.id == t.id }?.let { it.done = !it.done }
-                    Store.saveTasks(all)
+                    val target = all.firstOrNull { it.id == t.id }
+                    if (target != null) {
+                        target.done = !target.done
+                        Store.saveTasks(all)
+                        if (target.done) Reminders.cancelTask(this@MainActivity, target.id)
+                        else Reminders.scheduleTask(this@MainActivity, target)
+                    }
                     refreshDueBar()
                     toast(if (t.done) "Reopened" else "Done")
                 }
@@ -568,6 +827,7 @@ class MainActivity : Activity() {
                 setBackgroundColor(Color.TRANSPARENT)
                 setOnClickListener {
                     Store.saveTasks(Store.tasks().filter { it.id != t.id })
+                    Reminders.cancelTask(this@MainActivity, t.id)
                     refreshDueBar()
                     toast("Deleted")
                 }
@@ -624,12 +884,37 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showMemory() = sheet("Memory") { box ->
-        val all = Store.memories()
+    private var memoryFilter = ""
+
+    private fun showMemory() { memorySheet = sheet("Memory") { box ->
+        val everything = Store.memories()
+        val all = if (memoryFilter.isBlank()) everything else everything.filter { m ->
+            val hay = (m.text + " " + m.entities.joinToString(" ") + " " +
+                       m.topics.joinToString(" ")).lowercase(Locale.ROOT)
+            hay.contains(memoryFilter.lowercase(Locale.ROOT))
+        }
         val fading = all.filter { !Store.memoryProtected(it) && Store.memoryIdleDays(it) >= Store.MEMORY_WARN_DAYS }
         box.addView(rowLabel(
             "${all.size} stored · ${all.count { it.pinned }} pinned · ${fading.size} fading",
             if (fading.isEmpty()) soft else brass, 12f))
+
+        val search = EditText(this).apply {
+            hint = "Search memories"
+            setText(memoryFilter)
+            setBackgroundColor(surface)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+        }
+        box.addView(search)
+        box.addView(Button(this).apply {
+            text = "Filter"
+            isAllCaps = false
+            setTextColor(soft)
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnClickListener {
+                memoryFilter = search.text.toString().trim()
+                closeAndReopenMemory()
+            }
+        })
 
         val field = EditText(this).apply {
             hint = "Something I should know about you…"
@@ -650,6 +935,7 @@ class MainActivity : Activity() {
                 Store.addMemory(text, importance = 0.9, pinned = true)
                 field.setText("")
                 toast("Remembered")
+                closeAndReopenMemory()
             }
         })
 
@@ -698,7 +984,7 @@ class MainActivity : Activity() {
             })
             box.addView(row)
         }
-    }
+    } }
 
     private fun showSettings() {
         val content = LinearLayout(this).apply {

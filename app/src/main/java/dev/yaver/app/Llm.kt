@@ -40,6 +40,18 @@ object Llm {
         return conn
     }
 
+    /** Cost tracking must never delay or break a reply. */
+    private fun noteUsage(model: String, usage: JSONObject) {
+        try {
+            Store.recordUsage(
+                model,
+                usage.optInt("prompt_tokens"),
+                usage.optInt("completion_tokens"),
+                usage.optDouble("cost", 0.0)
+            )
+        } catch (e: Exception) { /* accounting is not worth an exception */ }
+    }
+
     private fun failure(conn: HttpURLConnection): LlmError {
         val status = conn.responseCode
         val text = try {
@@ -93,6 +105,7 @@ object Llm {
             .put("messages", msgs)
             .put("temperature", temperature)
             .put("stream", true)
+            .put("stream_options", JSONObject().put("include_usage", true))
 
         val conn = connect(body)
         if (conn.responseCode !in 200..299) throw failure(conn)
@@ -107,13 +120,15 @@ object Llm {
                     val payload = line.substring(5).trim()
                     if (payload == "[DONE]") break
                     try {
-                        val delta = JSONObject(payload)
-                            .optJSONArray("choices")?.optJSONObject(0)
+                        val frame = JSONObject(payload)
+                        val delta = frame.optJSONArray("choices")?.optJSONObject(0)
                             ?.optJSONObject("delta")?.optString("content")
                         if (!delta.isNullOrEmpty()) {
                             out.append(delta)
                             onToken(delta)
                         }
+                        // The last frame carries token counts when asked for.
+                        frame.optJSONObject("usage")?.let { noteUsage(model, it) }
                     } catch (e: Exception) { /* keep-alive or a split frame */ }
                 }
             }
@@ -141,7 +156,9 @@ object Llm {
         if (conn.responseCode !in 200..299) throw failure(conn)
         val text = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
         conn.disconnect()
-        JSONObject(text).optJSONArray("choices")?.optJSONObject(0)
+        val parsed = JSONObject(text)
+        parsed.optJSONObject("usage")?.let { noteUsage(model, it) }
+        parsed.optJSONArray("choices")?.optJSONObject(0)
             ?.optJSONObject("message")?.optString("content") ?: ""
     }
 }
