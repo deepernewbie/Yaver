@@ -433,7 +433,7 @@ class MainActivity : Activity() {
                         "permission" -> addCard(
                             "Permission needed",
                             "I need access to your phone calendar to read or change events. Android asks you directly — nothing is shared anywhere.",
-                            true, "Grant calendar access" to { Calendar.request(this@MainActivity) }
+                            true, Pair("Grant calendar access", { Calendar.request(this@MainActivity) })
                         )
                         "event" -> addCard(
                             "Added to your calendar",
@@ -447,8 +447,11 @@ class MainActivity : Activity() {
 
                 override fun onFinished(reply: String) = post {
                     turns.add(Store.Turn("assistant", reply))
-                    if (currentBubble == null && reply.isNotBlank()) addAgentBubble(reply)
-                    else currentBubble?.text = render(Agent.stripCalls(reply))
+                    if (currentBubble == null && reply.isNotBlank()) {
+                        addAgentBubble(reply)
+                    } else {
+                        currentBubble?.text = render(Agent.stripCalls(reply))
+                    }
                     Store.saveSession(turns)
                     setBusy(false)
                     refreshDueBar()
@@ -516,7 +519,7 @@ class MainActivity : Activity() {
 
     private fun showTasks() = sheet("Tasks") { box ->
         val now = System.currentTimeMillis()
-        val list = Store.tasks().sortedWith(compareBy(
+        val list = Store.tasks().sortedWith(compareBy<Store.Task>(
             { it.done },
             { when (Store.urgency(it, now)) { "overdue" -> 0; "soon" -> 1; "later" -> 2; else -> 3 } },
             { it.due ?: Long.MAX_VALUE }
@@ -779,7 +782,10 @@ class MainActivity : Activity() {
 
     private fun refreshDueBar() {
         val now = System.currentTimeMillis()
-        val urgent = Store.tasks().filter { Store.urgency(it, now) in listOf("overdue", "soon") }
+        val urgent = Store.tasks().filter {
+            val u = Store.urgency(it, now)
+            u == "overdue" || u == "soon"
+        }
         if (urgent.isEmpty()) { dueBar.visibility = View.GONE; return }
         val overdue = urgent.count { Store.urgency(it, now) == "overdue" }
         dueBar.visibility = View.VISIBLE

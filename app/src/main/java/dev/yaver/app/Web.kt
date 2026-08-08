@@ -144,22 +144,22 @@ object Web {
         // Direct first because it is fast when it works; reader-proxied second
         // because in practice the phone is blocked more often than not.
         val engines: List<Pair<String, () -> List<Result>>> = listOf(
-            "duckduckgo" to {
+            Pair("duckduckgo", {
                 fetch("https://html.duckduckgo.com/html/", post = "q=${enc(query)}")
                     ?.let { fromHtml(it, limit) } ?: emptyList()
-            },
-            "mojeek" to {
+            }),
+            Pair("mojeek", {
                 fetch("https://www.mojeek.com/search?q=${enc(query)}")
                     ?.let { fromHtml(it, limit) } ?: emptyList()
-            },
-            "duckduckgo-reader" to {
+            }),
+            Pair("duckduckgo-reader", {
                 viaReader("https://lite.duckduckgo.com/lite/?q=${enc(query)}")
                     ?.let { fromMarkdown(it, limit) } ?: emptyList()
-            },
-            "mojeek-reader" to {
+            }),
+            Pair("mojeek-reader", {
                 viaReader("https://www.mojeek.com/search?q=${enc(query)}")
                     ?.let { fromMarkdown(it, limit) } ?: emptyList()
-            }
+            })
         )
 
         for ((name, attempt) in engines) {
