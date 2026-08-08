@@ -15,6 +15,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
@@ -115,10 +116,6 @@ class MainActivity : Activity() {
         root.addView(buildPanelBar())
 
         setContentView(root)
-
-        if (Backup.restoreIfEmpty(this)) {
-            toast("Settings restored from Downloads")
-        }
 
         sessionId = Store.currentSessionId()
         turns = Store.loadSession(sessionId)
@@ -1610,29 +1607,6 @@ class MainActivity : Activity() {
         val personaField = labelled("Standing instructions", Store.setting(Store.PERSONA),
             "e.g. Reply in Turkish. Keep summaries short.")
 
-        content.addView(rowLabel("Surviving a reinstall", soft, 12f))
-        content.addView(rowLabel(
-            "Settings are copied to Downloads/yaver-settings.json and read back " +
-            "automatically if this app is ever reinstalled with an empty key. " +
-            "The key is in plain text in that file.", faint, 11f))
-        content.addView(Button(this).apply {
-            text = if (Backup.exists(this@MainActivity)) "Restore from backup now" else "Write backup now"
-            isAllCaps = false
-            setTextColor(soft)
-            setBackgroundColor(Color.TRANSPARENT)
-            setOnClickListener {
-                io.execute {
-                    if (Backup.exists(this@MainActivity)) {
-                        val n = Backup.restoreNow(this@MainActivity)
-                        post { toast(if (n > 0) "Restored $n setting(s)" else "Nothing to restore"); recreate() }
-                    } else {
-                        val where = Backup.write(this@MainActivity)
-                        post { toast(where?.let { "Written to $it" } ?: "Could not write the backup") }
-                    }
-                }
-            }
-        })
-
         content.addView(rowLabel("Calendar access", soft, 12f))
         content.addView(rowLabel(
             if (Calendar.canRead(this)) "Granted" else "Not granted",
@@ -1656,10 +1630,7 @@ class MainActivity : Activity() {
                     .ifBlank { "anthropic/claude-sonnet-4.5" })
                 Store.setSetting(Store.USER_NAME, nameField.text.toString().trim())
                 Store.setSetting(Store.PERSONA, personaField.text.toString().trim())
-                io.execute {
-                    val where = Backup.write(this)
-                    post { toast(if (where != null) "Saved · backed up to $where" else "Saved") }
-                }
+                toast("Saved")
                 recreate()
             }
             .setNegativeButton("Cancel", null)
