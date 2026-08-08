@@ -44,6 +44,7 @@ class MainActivity : Activity() {
     private var turns = mutableListOf<Store.Turn>()
     private var sessionId = ""
     private var harvesting = false
+    private val DICTATE = 7301
 
     private var busy = false
 
@@ -90,6 +91,7 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(12), dp(16), dp(20))
         }
         scroll = ScrollView(this).apply {
+            isFocusable = false
             addView(transcript, ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             layoutParams = LinearLayout.LayoutParams(
@@ -250,6 +252,19 @@ class MainActivity : Activity() {
         }
         row.addView(input)
 
+        val micButton = Button(this).apply {
+            text = "🎙"
+            textSize = 17f
+            setTextColor(soft)
+            setBackgroundColor(Color.TRANSPARENT)
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(dp(6), 0, dp(6), 0)
+            layoutParams = LinearLayout.LayoutParams(dp(42), dp(46))
+            setOnClickListener { startDictation() }
+        }
+        row.addView(micButton)
+
         sendButton = Button(this).apply {
             text = "→"
             textSize = 18f
@@ -358,8 +373,14 @@ class MainActivity : Activity() {
             this.text = render(text)
             setTextColor(ink)
             textSize = 15f
-            setTextIsSelectable(true)
             setPadding(0, dp(2), 0, dp(10))
+            isFocusable = false
+            setOnLongClickListener {
+                val clip = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clip.setPrimaryClip(android.content.ClipData.newPlainText("Yaver", this.text))
+                toast("Copied")
+                true
+            }
         }
         transcript.addView(tv)
         return tv
@@ -426,7 +447,12 @@ class MainActivity : Activity() {
         transcript.addView(card)
     }
 
-    private fun scrollDown() = ui.post { scroll.fullScroll(View.FOCUS_DOWN) }
+    private fun scrollDown() {
+        ui.post {
+            val child = scroll.getChildAt(0) ?: return@post
+            scroll.scrollTo(0, maxOf(0, child.height - scroll.height))
+        }
+    }
 
     // ── sending ──────────────────────────────────────────────────────────────
 
@@ -529,6 +555,37 @@ class MainActivity : Activity() {
                 }
             })
         }
+    }
+
+    /**
+     * Hand off to whatever speech recogniser the phone already has. A bundled
+     * model would mean a 40 MB download and worse Turkish; this is one intent.
+     */
+    private fun startDictation() {
+        val intent = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, java.util.Locale.getDefault())
+            putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Söyleyin")
+        }
+        try {
+            startActivityForResult(intent, DICTATE)
+        } catch (e: Exception) {
+            toast("No speech recogniser on this phone")
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != DICTATE || resultCode != Activity.RESULT_OK) return
+        val spoken = data
+            ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull() ?: return
+        // Append rather than replace: dictating a second sentence should add to
+        // the first, not throw it away.
+        val existing = input.text.toString()
+        input.setText(if (existing.isBlank()) spoken else "$existing $spoken")
+        input.setSelection(input.text.length)
     }
 
     private fun stop() {
@@ -636,15 +693,43 @@ class MainActivity : Activity() {
     private fun sheet(title: String, build: (LinearLayout) -> Unit): AlertDialog {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(16), dp(20), dp(16))
+            setPadding(dp(16), dp(12), dp(16), dp(16))
         }
         build(content)
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(ScrollView(this).apply { addView(content) })
-            .setPositiveButton("Done", null)
-            .create()
+
+        val frame = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(paper)
+        }
+        frame.addView(TextView(this).apply {
+            text = title
+            setTextColor(ink)
+            textSize = 20f
+            typeface = Typeface.SERIF
+            setPadding(dp(18), dp(18), dp(18), dp(6))
+        })
+        frame.addView(ScrollView(this).apply {
+            addView(content)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        })
+        frame.addView(TextView(this).apply {
+            text = "Close"
+            setTextColor(signal)
+            textSize = 15f
+            gravity = Gravity.END
+            setPadding(dp(18), dp(12), dp(20), dp(18))
+            isClickable = true
+        })
+
+        val dialog = AlertDialog.Builder(this).setView(frame).create()
+        (frame.getChildAt(2) as TextView).setOnClickListener { dialog.dismiss() }
         dialog.show()
+        // Fill the screen width; the default leaves a third of it unused.
+        dialog.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.96).toInt(),
+            (resources.displayMetrics.heightPixels * 0.85).toInt()
+        )
         return dialog
     }
 
