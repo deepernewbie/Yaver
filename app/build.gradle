@@ -1,0 +1,47 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'dev.yaver.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "dev.yaver.app"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        release {
+            storeFile     file("${rootProject.projectDir}/app/release.keystore")
+            storePassword System.getenv("YAVER_KEYSTORE_PASSWORD") ?: "android"
+            keyAlias      System.getenv("YAVER_KEY_ALIAS")         ?: "androiddebugkey"
+            keyPassword   System.getenv("YAVER_KEY_PASSWORD")      ?: "android"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+dependencies {
+    // Deliberately minimal: plain Activity, platform theme, org.json and
+    // HttpURLConnection. Every library left out is a version that cannot
+    // fail to resolve on a build nobody can debug from a phone.
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+}
