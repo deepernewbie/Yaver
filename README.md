@@ -96,8 +96,30 @@ every few exchanges and when you leave the app.
 `consolidate_memory` merges duplicates and corrects what has gone stale.
 `memory_status` reports what is about to be forgotten.
 
+## Messages
+
+Yaver can read incoming messages from WhatsApp, Telegram, Signal and SMS by
+listening to their notifications. Turn it on under More → Messages; it needs
+notification access, granted once in Android settings.
+
+Be clear about the limits, because they are not obvious:
+
+- Only messages **sent to you** are seen. Never your own — WhatsApp raises no
+  notification for those, so a chat containing only you captures nothing.
+- Muted chats raise no notification and are invisible.
+- Anything arriving while the app is open in the foreground is missed.
+- Long messages arrive truncated to whatever the notification showed.
+
+For "what came in today and what needs me" this is enough. For an archive of a
+conversation it is not.
+
+Replies are drafted, never sent: `draft_message` shows the text with a button
+that opens WhatsApp with it already typed.
+
+This is the feature that makes Play Protect refuse the first install. Turn off
+Play Protect scanning once, install, turn it back on.
+
 ## Not here yet
 
-Sub-agents and deep research, PDF and document reading, voice, image search,
-HTML report rendering, WhatsApp notification capture. The web version has
-these; they come back a few at a time.
+PDF and document reading, image search, embedded maps, text-to-speech. The web
+version had these; they come back a few at a time.

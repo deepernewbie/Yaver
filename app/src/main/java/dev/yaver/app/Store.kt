@@ -583,6 +583,74 @@ object Store {
         return out.sortedByDescending { it.third }.take(limit).map { it.first to it.second }
     }
 
+    // ── captured messages ────────────────────────────────────────────────────
+
+    private const val MESSAGES = "messages.jsonl"
+    private const val MESSAGE_RETENTION_DAYS = 30
+
+    data class Message(
+        val ts: Long, val app: String, val chat: String,
+        val sender: String, val text: String, val key: String
+    )
+
+    /** Notifications repeat constantly — the same message arrives several times. */
+    private val recentKeys = LinkedHashSet<String>()
+
+    @Synchronized
+    fun addMessage(app: String, chat: String, sender: String, text: String, ts: Long, key: String) {
+        if (!recentKeys.add(key)) return
+        while (recentKeys.size > 400) recentKeys.remove(recentKeys.first())
+
+        val line = JSONObject()
+            .put("ts", ts).put("app", app).put("chat", chat)
+            .put("sender", sender).put("text", text.take(4000)).put("key", key)
+            .toString()
+        try {
+            File(appContext.filesDir, MESSAGES).appendText(line + "\n")
+        } catch (e: Exception) {
+            Log.error("message write failed: ${e.message}")
+        }
+    }
+
+    fun messages(sinceMs: Long = 0, chat: String = "", limit: Int = 200): List<Message> {
+        val raw = readText(MESSAGES) ?: return emptyList()
+        val seen = HashSet<String>()
+        val out = mutableListOf<Message>()
+        for (line in raw.lineSequence()) {
+            if (line.isBlank()) continue
+            val o = try { JSONObject(line) } catch (e: Exception) { continue }
+            val ts = o.optLong("ts")
+            if (ts <= sinceMs) continue
+            val key = o.optString("key")
+            if (key.isNotEmpty() && !seen.add(key)) continue
+            val chatName = o.optString("chat")
+            if (chat.isNotEmpty() && !chatName.contains(chat, ignoreCase = true)) continue
+            out.add(Message(ts, o.optString("app"), chatName,
+                o.optString("sender"), o.optString("text"), key))
+        }
+        return out.sortedByDescending { it.ts }.take(limit)
+    }
+
+    fun chats(sinceMs: Long = 0): List<Pair<String, Int>> =
+        messages(sinceMs, limit = 1000).groupingBy { it.chat }.eachCount()
+            .toList().sortedByDescending { it.second }
+
+    /** Keep the file from growing without bound. Runs on launch. */
+    fun pruneMessages() {
+        val cutoff = System.currentTimeMillis() - MESSAGE_RETENTION_DAYS * 86_400_000L
+        val raw = readText(MESSAGES) ?: return
+        val lines = raw.lines().filter { it.isNotBlank() }
+        val kept = lines.filter { line ->
+            try { JSONObject(line).optLong("ts") >= cutoff } catch (e: Exception) { false }
+        }
+        if (kept.size < lines.size) {
+            writeText(MESSAGES, if (kept.isEmpty()) "" else kept.joinToString("\n") + "\n")
+            Log.info("pruned ${lines.size - kept.size} old messages")
+        }
+    }
+
+    fun clearMessages() { delete(MESSAGES) }
+
     // ── things shared to the agent ───────────────────────────────────────────
 
     private const val FORWARDS = "forwards.jsonl"

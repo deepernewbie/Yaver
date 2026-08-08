@@ -473,6 +473,74 @@ object Tools {
                 "text" to slice)
         },
 
+        // ── what came in ─────────────────────────────────────────────────────
+
+        Tool("read_messages",
+            "Read messages captured from WhatsApp and other messaging apps. Use this for \"what came in\", \"what did X say\", \"what needs me today\". Only messages sent TO the user are here — never their own, and nothing from muted chats.",
+            mapOf(
+                "since" to "Local datetime to read from. Default: the last 24 hours.",
+                "chat" to "Optional — only this conversation, matched loosely.",
+                "limit" to "Default 60."
+            )
+        ) { _, args ->
+            if (!NotificationCapture.isEnabled()) {
+                ok("capture_off" to true,
+                    "note" to "Message capture is switched off. Tell the user to turn it on under More → Messages; it needs notification access.")
+            } else {
+                val since = Store.parseLocal(args.str("since"))
+                    ?: (System.currentTimeMillis() - 86_400_000L)
+                val list = Store.messages(since, args.str("chat"), args.optInt("limit", 60))
+                if (list.isEmpty()) {
+                    ok("count" to 0,
+                        "note" to "Nothing captured in that window. Messages only arrive when they raise a notification, so anything read on the phone first, or from a muted chat, is missed.")
+                } else {
+                    val arr = JSONArray()
+                    list.forEach { m ->
+                        arr.put(JSONObject()
+                            .put("at", Store.localIso(m.ts).replace("T", " ").take(16))
+                            .put("chat", m.chat)
+                            .put("from", m.sender)
+                            .put("text", m.text))
+                    }
+                    ok("count" to list.size, "messages" to arr)
+                }
+            }
+        },
+
+        Tool("list_chats", "Which conversations have been active, and how much.",
+            mapOf("since" to "Local datetime. Default: the last 7 days.")
+        ) { _, args ->
+            val since = Store.parseLocal(args.str("since"))
+                ?: (System.currentTimeMillis() - 7 * 86_400_000L)
+            val arr = JSONArray()
+            Store.chats(since).take(30).forEach { (chat, count) ->
+                arr.put(JSONObject().put("chat", chat).put("messages", count))
+            }
+            ok("count" to arr.length(), "chats" to arr)
+        },
+
+        Tool("draft_message",
+            "Prepare a reply for the user to send. It appears as a card with the text and a button that opens WhatsApp with the message already typed. You never send anything — they press send.",
+            mapOf(
+                "to" to "Who it is for: a name, or a phone number in international form without + or spaces.",
+                "text" to "The message itself, in the user's own voice."
+            )
+        ) { _, args ->
+            val text = args.str("text")
+            if (text.isBlank()) throw ToolError("text is required")
+            val to = args.str("to")
+            val digits = to.filter { it.isDigit() }
+            val url = if (digits.length >= 8) {
+                "https://wa.me/$digits?text=" + java.net.URLEncoder.encode(text, "UTF-8")
+            } else {
+                "https://wa.me/?text=" + java.net.URLEncoder.encode(text, "UTF-8")
+            }
+            ok("drafted" to true,
+                "note" to "Shown to the user with a send button. Nothing has been sent.",
+                "card" to JSONObject().put("type", "draft")
+                    .put("to", to).put("text", text).put("url", url))
+        },
+
         // ── things handed to the agent ───────────────────────────────────────
 
         Tool("read_forwards",
@@ -490,6 +558,48 @@ object Tools {
                 }
                 ok("count" to items.size, "items" to arr)
             }
+        },
+
+        // ── investigating in parallel ────────────────────────────────────────
+
+        Tool("delegate",
+            "Hand two to four independent questions to sub-agents that research them at the same time and report back. Use it when a request contains several separate investigations — comparing options, checking a few places, gathering different kinds of fact. Each task must stand alone; they cannot see each other's work.",
+            mapOf("tasks" to "Array of self-contained task descriptions, 2 to 4.")
+        ) { ctx, args ->
+            val raw = args.optJSONArray("tasks")
+                ?: throw ToolError("tasks must be an array of task descriptions")
+            val tasks = (0 until raw.length()).map { i ->
+                // Models pass strings or {task}/{description} objects.
+                val item = raw.opt(i)
+                when (item) {
+                    is String -> item
+                    is JSONObject -> item.optString("task").ifBlank {
+                        item.optString("description").ifBlank { item.optString("goal") }
+                    }
+                    else -> item?.toString() ?: ""
+                }
+            }.filter { it.isNotBlank() }
+            if (tasks.size < 2) throw ToolError("Give at least two independent tasks, or just do it yourself.")
+
+            val findings = SubAgent.runMany(ctx, tasks) { Log.info(it) }
+            ok("count" to findings.size,
+                "findings" to SubAgent.findingsJson(findings),
+                "instruction" to "Synthesise these into one answer. Say plainly which parts nobody could verify.")
+        },
+
+        Tool("deep_research",
+            "Investigate one broad question properly: it is split into independent sub-questions, researched in parallel, and reported back. Slow and expensive — use it when the user asks for real research, not for a quick lookup.",
+            mapOf("question" to "The question to investigate.", "breadth" to "How many sub-questions, 2 to 4. Default 3.")
+        ) { ctx, args ->
+            val question = args.str("question")
+            if (question.isBlank()) throw ToolError("question is required")
+            val subs = SubAgent.planQuestions(question, args.optInt("breadth", 3))
+            Log.info("deep research: ${subs.size} lines of enquiry")
+            val findings = SubAgent.runMany(ctx, subs) { Log.info(it) }
+            ok("question" to question,
+                "sub_questions" to JSONArray(subs),
+                "findings" to SubAgent.findingsJson(findings),
+                "instruction" to "Write the answer from these findings. Keep what was verified separate from what was not. Consider render_html if the answer has structure.")
         },
 
         // ── things the user keeps ────────────────────────────────────────────

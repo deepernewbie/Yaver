@@ -124,6 +124,7 @@ class MainActivity : Activity() {
         handleLaunchPrompt(intent)
 
         io.execute {
+            Store.pruneMessages()
             val dropped = Store.pruneMemories()
             if (dropped.isNotEmpty()) {
                 ui.post { toast("Forgot ${dropped.size} memories unused for ${Store.MEMORY_TTL_DAYS} days") }
@@ -580,6 +581,20 @@ class MainActivity : Activity() {
                                 Pair("Open", { openArtifact(path, title) })
                             )
                         }
+                        "draft" -> {
+                            val body = card.optString("text")
+                            val url = card.optString("url")
+                            addCard(
+                                "Draft — not sent",
+                                (if (card.optString("to").isNotBlank()) "To ${card.optString("to")}\n\n" else "") + body,
+                                true,
+                                Pair("Open WhatsApp", {
+                                    try {
+                                        startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+                                    } catch (e: Exception) { toast("WhatsApp is not installed") }
+                                })
+                            )
+                        }
                         "event" -> addCard(
                             "Added to your calendar",
                             "${card.optString("title")}\n${card.optString("starts")}",
@@ -789,12 +804,17 @@ class MainActivity : Activity() {
 
         val dialog = AlertDialog.Builder(this).setView(frame).create()
         (frame.getChildAt(2) as TextView).setOnClickListener { dialog.dismiss() }
+        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(paper))
         dialog.show()
         // Fill the screen width; the default leaves a third of it unused.
         dialog.window?.setLayout(
             (resources.displayMetrics.widthPixels * 0.96).toInt(),
             (resources.displayMetrics.heightPixels * 0.85).toInt()
         )
+        frame.layoutParams = frame.layoutParams?.apply {
+            width = ViewGroup.LayoutParams.MATCH_PARENT
+            height = ViewGroup.LayoutParams.MATCH_PARENT
+        }
         return dialog
     }
 
@@ -826,18 +846,19 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("More")
             .setItems(arrayOf(
-                "Files", "Shared with me", "Conversations", "Skills", "Usage",
-                "Compress this conversation", "Settings", "Debug log"
+                "Messages", "Files", "Shared with me", "Conversations", "Skills",
+                "Usage", "Compress this conversation", "Settings", "Debug log"
             )) { _, index ->
                 when (index) {
-                    0 -> showFiles()
-                    1 -> showInbox()
-                    2 -> showSessions()
-                    3 -> showSkills()
-                    4 -> showUsage()
-                    5 -> compressConversation()
-                    6 -> showSettings()
-                    7 -> showDebug()
+                    0 -> showMessages()
+                    1 -> showFiles()
+                    2 -> showInbox()
+                    3 -> showSessions()
+                    4 -> showSkills()
+                    5 -> showUsage()
+                    6 -> compressConversation()
+                    7 -> showSettings()
+                    8 -> showDebug()
                 }
             }
             .setNegativeButton("Close", null)
@@ -910,6 +931,7 @@ class MainActivity : Activity() {
         })
         frame.addView(bar)
 
+        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(paper))
         dialog.show()
         dialog.window?.setLayout(
             (resources.displayMetrics.widthPixels * 0.97).toInt(),
@@ -942,6 +964,79 @@ class MainActivity : Activity() {
             row.addView(iconAction("×", faint) { Store.delete(a.path); toast("Deleted") })
             box.addView(row)
         }
+    }
+
+    private fun showMessages() = sheet("Messages") { box ->
+        val enabled = NotificationCapture.isEnabled()
+        val access = NotificationCapture.hasAccess(this)
+
+        box.addView(rowLabel(
+            when {
+                !access -> "Notification access not granted"
+                !enabled -> "Capture is off"
+                else -> "Capture is on"
+            },
+            if (enabled && access) signal else brass, 12f))
+
+        box.addView(rowLabel(
+            "I can only see messages sent to you that raise a notification. Never your own — " +
+            "WhatsApp raises no notification for those, so a chat with only you captures nothing. " +
+            "Muted chats and anything you read before it notified are missed too.",
+            faint, 11f))
+
+        if (!access) {
+            box.addView(Button(this).apply {
+                text = "Grant notification access"
+                isAllCaps = false
+                setTextColor(Color.WHITE)
+                setBackgroundColor(signal)
+                setOnClickListener { NotificationCapture.openAccessSettings(this@MainActivity) }
+            })
+        } else {
+            box.addView(Button(this).apply {
+                text = if (enabled) "Turn capture off" else "Turn capture on"
+                isAllCaps = false
+                setTextColor(Color.WHITE)
+                setBackgroundColor(if (enabled) faint else signal)
+                setOnClickListener {
+                    Store.setSetting(NotificationCapture.ENABLED, if (enabled) "false" else "true")
+                    toast(if (enabled) "Capture off" else "Capture on")
+                }
+            })
+        }
+
+        val list = Store.messages(System.currentTimeMillis() - 3 * 86_400_000L, limit = 80)
+        if (list.isEmpty()) {
+            box.addView(rowLabel("Nothing captured in the last three days.", faint))
+            return@sheet
+        }
+
+        box.addView(rowLabel("${list.size} message(s), last three days", soft, 12f))
+        var lastChat = ""
+        list.forEach { m ->
+            if (m.chat != lastChat) {
+                lastChat = m.chat
+                box.addView(rowLabel(m.chat, signal, 12f))
+            }
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(4), 0, dp(4))
+            }
+            row.addView(rowLabel(
+                "${SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(Date(m.ts))}" +
+                if (m.sender.isNotBlank() && m.sender != m.chat) " · ${m.sender}" else "",
+                faint, 11f))
+            row.addView(rowLabel(m.text.take(300)))
+            box.addView(row)
+        }
+
+        box.addView(Button(this).apply {
+            text = "Clear captured messages"
+            isAllCaps = false
+            setTextColor(faint)
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnClickListener { Store.clearMessages(); toast("Cleared") }
+        })
     }
 
     private fun showInbox() = sheet("Shared with me") { box ->

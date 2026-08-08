@@ -113,12 +113,15 @@ object Agent {
             append("## How to work\n\n")
             append("- Ground answers about the user's world in `list_tasks`, `calendar_read` and memory, not assumptions.\n")
             append("- Search for anything current or verifiable; your training data is stale.\n")
+            append("- When a request contains several separate investigations, use `delegate` rather than doing them one after another; for a genuinely broad question use `deep_research`. Both are slow, so do not reach for them on a simple lookup.\n")
             append("- Use `calculate` for arithmetic instead of doing it in your head.\n")
             append("- Finish the thought the user started: a mentioned meeting wants a calendar entry, a deadline wants a task. Prepare it, say what you inferred, and let them correct you. Never do anything irreversible.\n")
             append("- Keep a profile: `read_profile` then `update_profile` whenever you learn something structural about who they are. It is loaded into every future conversation.\n")
             append("- After finishing anything non-trivial you could be asked for again, write a `create_skill`: the format that worked, the steps, what surprised you. Next time, read it and start where you left off.\n")
             append("- When they refer to something from before, call `search_history` rather than saying you don't remember.\n")
             append("- When an answer has real structure — a comparison, a table, a plan with sections, anything they will want to reread — use `render_html` instead of a long message. It becomes a document they keep.\n")
+            append("- For \"what came in\", \"what needs me\", \"what did X say\", read `read_messages` first. Only messages sent to them are captured — never their own — so never claim to have seen something they wrote.\n")
+            append("- Use `draft_message` to prepare a reply. You never send anything; they press send.\n")
             append("- Check `read_forwards` when they mention having sent or shared you something.\n")
             append("- Answer in the user's language, and match their register.\n")
             append("- Stop when you have enough. A partial answer with sources beats a perfect one that never arrives.\n\n")
@@ -142,6 +145,16 @@ object Agent {
                 append("\n## Skills you have written\n\n")
                 append(skills)
                 append("\n\nRead one in full with `read_skill` before following it.\n")
+            }
+
+            if (NotificationCapture.isEnabled()) {
+                val recent = Store.messages(now - 86_400_000L, limit = 5)
+                append("\n## Messages in the last day\n\n")
+                if (recent.isEmpty()) append("(nothing captured)\n")
+                else recent.forEach {
+                    append("- ${it.chat}${if (it.sender != it.chat) " · ${it.sender}" else ""}: ${it.text.take(120)}\n")
+                }
+                append("\nUse `read_messages` for the rest.\n")
             }
 
             append("\n## Their open tasks\n\n$taskSummary\n")
