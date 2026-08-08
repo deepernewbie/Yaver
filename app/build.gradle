@@ -11,8 +11,8 @@ android {
         applicationId "dev.yaver.app"
         minSdk 26
         targetSdk 34
-        versionCode 7
-        versionName "1.6"
+        versionCode 13
+        versionName "2.2"
     }
 
     signingConfigs {
@@ -44,4 +44,7 @@ dependencies {
     // fail to resolve on a build nobody can debug from a phone.
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    // The one unavoidable dependency: Android's own PdfRenderer draws pages as
+    // pictures and exposes no text, which is useless to an agent.
+    implementation 'com.tom-roush:pdfbox-android:2.0.27.0'
 }

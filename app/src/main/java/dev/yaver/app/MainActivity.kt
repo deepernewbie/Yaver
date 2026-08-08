@@ -45,6 +45,8 @@ class MainActivity : Activity() {
     private var sessionId = ""
     private var harvesting = false
     private val DICTATE = 7301
+    private var tts: android.speech.tts.TextToSpeech? = null
+    private var lastAnswer = ""
 
     private var busy = false
 
@@ -114,11 +116,16 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
+        if (Backup.restoreIfEmpty(this)) {
+            toast("Settings restored from Downloads")
+        }
+
         sessionId = Store.currentSessionId()
         turns = Store.loadSession(sessionId)
         if (turns.isEmpty()) showWelcome() else replay()
         refreshDueBar()
         showLastCrash()
+        Browser.start(this)
         askNotificationPermission()
         io.execute { Reminders.rescheduleAll(this) }
         handleLaunchPrompt(intent)
@@ -135,6 +142,45 @@ class MainActivity : Activity() {
     override fun onPause() {
         super.onPause()
         Store.saveSession(turns, sessionId)
+        tts?.stop()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        tts?.shutdown()
+        tts = null
+    }
+
+    /**
+     * Read the last answer aloud. Uses whatever voice the phone has, which on
+     * a Turkish device means Turkish — a bundled engine would be a large
+     * download and worse at it.
+     */
+    private fun speak() {
+        if (lastAnswer.isBlank()) { toast("Nothing to read yet"); return }
+        val engine = tts
+        if (engine != null) {
+            if (engine.isSpeaking) { engine.stop(); return }
+            speakNow(engine)
+            return
+        }
+        tts = android.speech.tts.TextToSpeech(this) { status ->
+            if (status != android.speech.tts.TextToSpeech.SUCCESS) {
+                post { toast("No speech engine on this phone") }
+                return@TextToSpeech
+            }
+            tts?.language = java.util.Locale.getDefault()
+            post { tts?.let { speakNow(it) } }
+        }
+    }
+
+    private fun speakNow(engine: android.speech.tts.TextToSpeech) {
+        // Strip the markup, or it reads asterisks and pipes out loud.
+        val plain = lastAnswer
+            .replace(Regex("[*_`#|]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .take(3500)
+        engine.speak(plain, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "yaver")
     }
 
     override fun onStop() {
@@ -179,9 +225,14 @@ class MainActivity : Activity() {
         requestCode: Int, permissions: Array<out String>, grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != Calendar.REQUEST_CODE) return
-        val granted = grantResults.isNotEmpty() && grantResults.all { it == android.content.pm.PackageManager.PERMISSION_GRANTED }
-        toast(if (granted) "Calendar access granted — ask me again" else "Calendar access denied")
+        val granted = grantResults.isNotEmpty() &&
+            grantResults.all { it == android.content.pm.PackageManager.PERMISSION_GRANTED }
+        when (requestCode) {
+            Calendar.REQUEST_CODE ->
+                toast(if (granted) "Calendar access granted — ask me again" else "Calendar access denied")
+            Whereabouts.REQUEST_CODE ->
+                toast(if (granted) "Location granted — ask me again" else "Location denied")
+        }
     }
 
     // ── chrome ───────────────────────────────────────────────────────────────
@@ -212,6 +263,17 @@ class MainActivity : Activity() {
             setPadding(0, 0, dp(10), 0)
         })
 
+        bar.addView(Button(this).apply {
+            text = "🔊"
+            isAllCaps = false
+            textSize = 15f
+            setTextColor(soft)
+            setBackgroundColor(Color.TRANSPARENT)
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(dp(8), 0, dp(8), 0)
+            setOnClickListener { speak() }
+        })
         bar.addView(Button(this).apply {
             text = "☰"
             isAllCaps = false
@@ -504,6 +566,45 @@ class MainActivity : Activity() {
         transcript.addView(card)
     }
 
+    /**
+     * A picture with its credit underneath. Fetched on a background thread —
+     * a card that blocks the UI while a photo downloads is worse than no card.
+     */
+    private fun addImageCard(title: String, url: String, credit: String, licence: String) {
+        val holder = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(surface)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(6); bottomMargin = dp(8) }
+        }
+        val image = ImageView(this).apply {
+            adjustViewBounds = true
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        holder.addView(image)
+        holder.addView(TextView(this).apply {
+            text = title + (if (credit.isNotBlank()) " · $credit" else "") +
+                   (if (licence.isNotBlank()) " · $licence" else "")
+            setTextColor(faint); textSize = 11f
+            setPadding(0, dp(6), 0, 0)
+        })
+        transcript.addView(holder)
+
+        io.execute {
+            val bitmap = try {
+                java.net.URL(url).openStream().use { android.graphics.BitmapFactory.decodeStream(it) }
+            } catch (e: Exception) { null }
+            post {
+                if (bitmap != null) image.setImageBitmap(bitmap)
+                else holder.addView(rowLabel("(could not load the picture)", faint, 11f))
+                scrollDown()
+            }
+        }
+    }
+
     private fun scrollDown() {
         ui.post {
             val child = scroll.getChildAt(0) ?: return@post
@@ -556,8 +657,11 @@ class MainActivity : Activity() {
                 override fun onToolEnd(name: String, ok: Boolean, ms: Long, result: JSONObject) = post {
                     val last = transcript.getChildAt(transcript.childCount - 1)
                     if (last is TextView && last.text.startsWith("▰")) {
-                        last.text = "${if (ok) "▪" else "✕"}  $name  ${ms}ms"
-                        last.setTextColor(if (ok) soft else danger)
+                        val blocked = result.optString("blocked")
+                        val empty = blocked.isNotEmpty() && blocked != "null"
+                        last.text = "${if (!ok || empty) "✕" else "▪"}  $name  ${ms}ms" +
+                            (if (empty) "  ·  nothing readable" else "")
+                        last.setTextColor(if (ok && !empty) soft else danger)
                         if (!ok) {
                             val why = result.optString("error").ifBlank { result.optString("instruction") }
                             if (why.isNotBlank()) last.append("\n    $why")
@@ -567,11 +671,20 @@ class MainActivity : Activity() {
 
                 override fun onCard(card: JSONObject) = post {
                     when (card.optString("type")) {
-                        "permission" -> addCard(
-                            "Permission needed",
-                            "I need access to your phone calendar to read or change events. Android asks you directly — nothing is shared anywhere.",
-                            true, Pair("Grant calendar access", { Calendar.request(this@MainActivity) })
-                        )
+                        "permission" -> {
+                            val what = card.optString("what", "calendar")
+                            if (what == "location") {
+                                addCard("Permission needed",
+                                    "I need a rough idea of where you are to search nearby. Approximate only, and it never leaves the phone except as a search term.",
+                                    true,
+                                    Pair("Grant location", { Whereabouts.request(this@MainActivity) }))
+                            } else {
+                                addCard("Permission needed",
+                                    "I need access to your phone calendar to read or change events. Android asks you directly — nothing is shared anywhere.",
+                                    true,
+                                    Pair("Grant calendar access", { Calendar.request(this@MainActivity) }))
+                            }
+                        }
                         "html", "file" -> {
                             val path = card.optString("path")
                             val title = card.optString("title", "Document")
@@ -581,6 +694,38 @@ class MainActivity : Activity() {
                                 Pair("Open", { openArtifact(path, title) })
                             )
                         }
+                        "images" -> {
+                            val items = card.optJSONArray("items") ?: JSONArray()
+                            for (i in 0 until items.length()) {
+                                val img = items.optJSONObject(i) ?: continue
+                                addImageCard(img.optString("title"), img.optString("url"),
+                                    img.optString("credit"), img.optString("licence"))
+                            }
+                        }
+                        "places" -> {
+                            val items = card.optJSONArray("items") ?: JSONArray()
+                            for (i in 0 until items.length()) {
+                                val place = items.optJSONObject(i) ?: continue
+                                val lat = place.optDouble("lat")
+                                val lon = place.optDouble("lon")
+                                val name = place.optString("name")
+                                addCard("Place", "$name\n${place.optString("address")}", false,
+                                    Pair("Open in Maps", {
+                                        val geo = android.net.Uri.parse(
+                                            "geo:$lat,$lon?q=$lat,$lon(" +
+                                            android.net.Uri.encode(name) + ")")
+                                        try {
+                                            startActivity(Intent(Intent.ACTION_VIEW, geo))
+                                        } catch (e: Exception) { toast("No maps app installed") }
+                                    }))
+                            }
+                        }
+                        "browser" -> addCard(
+                            "The browser needs you",
+                            card.optString("why"),
+                            true,
+                            Pair("Open browser", { showBrowser() })
+                        )
                         "draft" -> {
                             val body = card.optString("text")
                             val url = card.optString("url")
@@ -607,6 +752,7 @@ class MainActivity : Activity() {
 
                 override fun onFinished(reply: String) = post {
                     turns.add(Store.Turn("assistant", reply))
+                    lastAnswer = Agent.stripCalls(reply)
                     if (currentBubble == null && reply.isNotBlank()) {
                         addAgentBubble(reply)
                     } else {
@@ -846,19 +992,22 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("More")
             .setItems(arrayOf(
-                "Messages", "Files", "Shared with me", "Conversations", "Skills",
-                "Usage", "Compress this conversation", "Settings", "Debug log"
+                "Goals", "Messages", "Files", "Shared with me", "Browser",
+                "Conversations", "Skills", "Usage", "Compress this conversation",
+                "Settings", "Debug log"
             )) { _, index ->
                 when (index) {
-                    0 -> showMessages()
-                    1 -> showFiles()
-                    2 -> showInbox()
-                    3 -> showSessions()
-                    4 -> showSkills()
-                    5 -> showUsage()
-                    6 -> compressConversation()
-                    7 -> showSettings()
-                    8 -> showDebug()
+                    0 -> showGoals()
+                    1 -> showMessages()
+                    2 -> showFiles()
+                    3 -> showInbox()
+                    4 -> showBrowser()
+                    5 -> showSessions()
+                    6 -> showSkills()
+                    7 -> showUsage()
+                    8 -> compressConversation()
+                    9 -> showSettings()
+                    10 -> showDebug()
                 }
             }
             .setNegativeButton("Close", null)
@@ -936,6 +1085,62 @@ class MainActivity : Activity() {
         dialog.window?.setLayout(
             (resources.displayMetrics.widthPixels * 0.97).toInt(),
             (resources.displayMetrics.heightPixels * 0.9).toInt()
+        )
+    }
+
+    /**
+     * Hand the browser to the user.
+     *
+     * Signing in, solving a check, picking something from a list nobody can
+     * describe — these are not things to automate, and pretending otherwise
+     * produces an agent that fails silently on every site with a login. The
+     * session persists, so the agent carries on from wherever they leave it.
+     */
+    private fun showBrowser() {
+        val view = Browser.view()
+        if (view == null) { toast("The browser is not running"); return }
+
+        // It has been living off-screen, measured but unattached.
+        (view.parent as? ViewGroup)?.removeView(view)
+
+        val frame = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(paper)
+        }
+        frame.addView(TextView(this).apply {
+            text = "Browser — Yaver is watching this page"
+            setTextColor(soft); textSize = 12f
+            setPadding(dp(16), dp(12), dp(16), dp(8))
+        })
+        frame.addView(view, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val dialog = AlertDialog.Builder(this).setView(frame).create()
+        frame.addView(TextView(this).apply {
+            text = "Done — hand it back"
+            setTextColor(signal); textSize = 15f
+            gravity = Gravity.END
+            setPadding(dp(18), dp(12), dp(20), dp(16))
+            isClickable = true
+            setOnClickListener { dialog.dismiss() }
+        })
+
+        dialog.setOnDismissListener {
+            // Return it to its off-screen life, or the next action finds a
+            // view still attached to a dead dialog.
+            (view.parent as? ViewGroup)?.removeView(view)
+            val metrics = resources.displayMetrics
+            view.measure(
+                View.MeasureSpec.makeMeasureSpec(metrics.widthPixels, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(metrics.heightPixels, View.MeasureSpec.EXACTLY))
+            view.layout(0, 0, metrics.widthPixels, metrics.heightPixels)
+            toast("Browser handed back — tell me when to carry on")
+        }
+        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(paper))
+        dialog.show()
+        dialog.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.97).toInt(),
+            (resources.displayMetrics.heightPixels * 0.92).toInt()
         )
     }
 
@@ -1072,6 +1277,49 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.TRANSPARENT)
             setOnClickListener { Store.clearForwards(); toast("Cleared") }
         })
+    }
+
+    private fun showGoals() = sheet("Goals") { box ->
+        val list = Store.goals().sortedWith(compareBy<Store.Goal>(
+            { it.status != "active" }, { -it.updated }
+        ))
+        if (list.isEmpty()) {
+            box.addView(rowLabel("Nothing being pursued.", faint))
+            box.addView(rowLabel(
+                "A goal is something that takes weeks — a flat, a trip, a deal. Tell me about one and I'll keep track between conversations.",
+                faint, 12f))
+            return@sheet
+        }
+        list.forEach { g ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val main = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            main.addView(rowLabel(g.title + if (g.status != "active") "  (${g.status})" else "",
+                if (g.status == "active") ink else faint))
+            if (g.detail.isNotBlank()) main.addView(rowLabel(g.detail, faint, 11f))
+            main.addView(rowLabel(
+                "${g.notes.size} note(s) · last " +
+                SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(g.updated)),
+                faint, 11f))
+            main.setOnClickListener {
+                val history = g.notes.takeLast(20).joinToString("\n\n") { (at, text) ->
+                    SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(Date(at)) + "\n" + text
+                }
+                AlertDialog.Builder(this)
+                    .setTitle(g.title)
+                    .setMessage(if (history.isBlank()) "No notes yet." else history)
+                    .setPositiveButton("Close", null)
+                    .show()
+            }
+            row.addView(main)
+            row.addView(iconAction("×", faint) {
+                Store.saveGoals(Store.goals().filter { it.id != g.id })
+                toast("Removed")
+            })
+            box.addView(row)
+        }
     }
 
     private fun showSkills() = sheet("Skills") { box ->
@@ -1362,6 +1610,29 @@ class MainActivity : Activity() {
         val personaField = labelled("Standing instructions", Store.setting(Store.PERSONA),
             "e.g. Reply in Turkish. Keep summaries short.")
 
+        content.addView(rowLabel("Surviving a reinstall", soft, 12f))
+        content.addView(rowLabel(
+            "Settings are copied to Downloads/yaver-settings.json and read back " +
+            "automatically if this app is ever reinstalled with an empty key. " +
+            "The key is in plain text in that file.", faint, 11f))
+        content.addView(Button(this).apply {
+            text = if (Backup.exists(this@MainActivity)) "Restore from backup now" else "Write backup now"
+            isAllCaps = false
+            setTextColor(soft)
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnClickListener {
+                io.execute {
+                    if (Backup.exists(this@MainActivity)) {
+                        val n = Backup.restoreNow(this@MainActivity)
+                        post { toast(if (n > 0) "Restored $n setting(s)" else "Nothing to restore"); recreate() }
+                    } else {
+                        val where = Backup.write(this@MainActivity)
+                        post { toast(where?.let { "Written to $it" } ?: "Could not write the backup") }
+                    }
+                }
+            }
+        })
+
         content.addView(rowLabel("Calendar access", soft, 12f))
         content.addView(rowLabel(
             if (Calendar.canRead(this)) "Granted" else "Not granted",
@@ -1385,7 +1656,10 @@ class MainActivity : Activity() {
                     .ifBlank { "anthropic/claude-sonnet-4.5" })
                 Store.setSetting(Store.USER_NAME, nameField.text.toString().trim())
                 Store.setSetting(Store.PERSONA, personaField.text.toString().trim())
-                toast("Saved")
+                io.execute {
+                    val where = Backup.write(this)
+                    post { toast(if (where != null) "Saved · backed up to $where" else "Saved") }
+                }
                 recreate()
             }
             .setNegativeButton("Cancel", null)
@@ -1393,8 +1667,18 @@ class MainActivity : Activity() {
     }
 
     private fun showDebug() {
+        val promptSize = Agent.promptSize()
+        val sizeLine = "prompt: ~${promptSize.first} tokens fixed, ~${promptSize.second} tokens context\n\n"
+        val revisions = Store.revisions(15)
+        val harness = if (revisions.isEmpty()) "" else
+            "── changes to my own instructions ──\n" +
+            revisions.joinToString("\n") { r ->
+                SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(Date(r.ts)) +
+                "  ${r.what}: ${r.why}"
+            } + "\n\n"
+
         val text = TextView(this).apply {
-            this.text = Log.dump().ifBlank { "Nothing recorded yet." }
+            this.text = sizeLine + harness + Log.dump().ifBlank { "Nothing recorded yet." }
             setTextColor(soft)
             textSize = 10f
             typeface = Typeface.MONOSPACE
@@ -1478,14 +1762,39 @@ class ShareActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Store.init(this)
+
         val text = intent?.getStringExtra(Intent.EXTRA_TEXT)?.trim()
-        if (text.isNullOrEmpty()) {
-            Toast.makeText(this, "Nothing to save", Toast.LENGTH_SHORT).show()
-        } else {
-            val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT) ?: ""
-            Store.addForward(if (subject.isBlank()) text else "$subject\n\n$text", "shared")
-            Toast.makeText(this, "Saved for Yaver", Toast.LENGTH_SHORT).show()
+        val stream = intent?.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+        val subject = intent?.getStringExtra(Intent.EXTRA_SUBJECT) ?: ""
+
+        when {
+            stream != null -> {
+                // Documents are read here rather than stored as a path: a URI
+                // granted to this one intent is not readable later.
+                val name = displayName(stream)
+                val mime = intent?.type ?: contentResolver.getType(stream)
+                val extract = Docs.fromUri(this, stream, mime, name)
+                if (extract.text.isBlank()) {
+                    Toast.makeText(this, extract.note ?: "Nothing readable in that file", Toast.LENGTH_LONG).show()
+                } else {
+                    val header = "[$name]" + (extract.note?.let { " $it" } ?: "")
+                    Store.addForward("$header\n\n${extract.text}", name ?: "document")
+                    Toast.makeText(this, "Read $name — ${extract.text.length} characters", Toast.LENGTH_SHORT).show()
+                }
+            }
+            !text.isNullOrEmpty() -> {
+                Store.addForward(if (subject.isBlank()) text else "$subject\n\n$text", "shared")
+                Toast.makeText(this, "Saved for Yaver", Toast.LENGTH_SHORT).show()
+            }
+            else -> Toast.makeText(this, "Nothing to save", Toast.LENGTH_SHORT).show()
         }
         finish()
     }
+
+    private fun displayName(uri: android.net.Uri): String? = try {
+        contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val index = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && c.moveToFirst()) c.getString(index) else null
+        }
+    } catch (e: Exception) { null }
 }

@@ -10,6 +10,10 @@
     <!-- Alarms do not survive a reboot; without this a reminder set on Monday
          is silently lost the next time the phone restarts. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Coarse only: street-level precision buys nothing for finding a
+         pharmacy, and asking for less is the difference between a permission
+         people grant and one they think about. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!-- Speech recognition runs in another app. Without this the intent looks
@@ -82,6 +86,14 @@
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/*" />
+            </intent-filter>
+            <!-- Documents are extracted to text on arrival. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <data android:mimeType="application/json" />
             </intent-filter>
         </activity>
     </application>

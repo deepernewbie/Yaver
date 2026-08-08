@@ -30,6 +30,8 @@ object SubAgent {
 
     data class Finding(val task: String, val result: String, val rounds: Int, val failed: Boolean)
 
+    // A sub-agent gets four tools and no drawers to open — its whole job is
+    // narrow enough that browsing a menu would be wasted turns.
     private fun toolSchema(): String = Tools.all
         .filter { it.name in ALLOWED }
         .joinToString("\n\n") { t ->

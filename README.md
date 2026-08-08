@@ -119,7 +119,62 @@ that opens WhatsApp with it already typed.
 This is the feature that makes Play Protect refuse the first install. Turn off
 Play Protect scanning once, install, turn it back on.
 
+## Why the prompt is shaped the way it is
+
+Two halves, and the split matters more than it looks.
+
+The **fixed half** is identical on every turn: who it is, the rules, twelve
+core tool schemas, and a one-line index of ten further groups. A runtime that
+keeps processed prefixes — llama.cpp's KV cache, or a provider's prompt cache —
+can skip re-reading all of it.
+
+The **changing half** rides with the user's message: the date, the profile,
+goal titles, a count of open tasks, three relevant memories. A few hundred
+tokens.
+
+What used to happen: all forty-odd tool schemas plus every relevant memory,
+task and message went into the system prompt, rebuilt from scratch each turn.
+Around ten thousand tokens before a word was written, and because it changed
+every time, no cache could help. Reading a whole codebase to answer one
+question about it.
+
+Now the agent opens the drawer it needs with `open_tools`, the schemas arrive
+in the conversation, and they stay. One extra round trip, and every turn after
+it is small. This is what makes a local model on a phone plausible at all —
+generation speed was never the bottleneck; re-reading ten thousand tokens of
+prompt was.
+
+## Goals, and changing its own instructions
+
+Two ideas taken from Prime Agent's continual harness.
+
+**Goals** are for work that spans weeks and many conversations — finding a
+flat, planning a trip. A task gets done; a goal gets progressed. Each carries
+its own notes, written as evidence rather than status updates, and is loaded
+into every conversation so the next one starts informed instead of asking the
+same questions again.
+
+**Evidence-backed self-edits.** When the agent rewrites its profile or writes a
+skill, it must say what prompted the change, and the change is logged. An agent
+that edits its own instructions with no trail is impossible to debug when it
+starts behaving oddly, and requiring a reason discourages pointless churn. The
+log sits at the top of the Debug panel.
+
+What was not adapted: Prime Agent's RLM runtime is a persistent Python
+interpreter the model programs against. There is no Python on Android, and the
+prompt-based tool protocol here works with any model on OpenRouter, which
+matters more on a phone.
+
+## Location
+
+`where_am_i` gives a rough position, and `show_places` can search around it.
+Coarse permission only — street-level precision buys nothing for finding a
+pharmacy, and asking for less is the difference between a permission people
+grant and one they think about.
+
 ## Not here yet
 
-PDF and document reading, image search, embedded maps, text-to-speech. The web
-version had these; they come back a few at a time.
+Sending images to the model — a photographed menu, receipt or sign is the most
+useful thing still missing. Contacts, so a draft can be addressed by name
+rather than number. A warning when Android has denied exact alarms and
+reminders are running approximate.

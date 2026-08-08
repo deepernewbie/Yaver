@@ -21,7 +21,30 @@ object Tools {
         val name: String,
         val description: String,
         val parameters: Map<String, String>,
+        val group: String = "core",
         val execute: (Context, JSONObject) -> JSONObject
+    )
+
+    /**
+     * Tools are grouped and only the group names are in the prompt.
+     *
+     * Listing every schema every turn cost about ten thousand tokens before a
+     * word was written — the same mistake as reading a whole codebase to answer
+     * one question about it. Worse, it made the prompt change on every turn,
+     * which throws away any hope of a cached prefix. Now the agent opens the
+     * drawer it needs; the schemas arrive in the conversation and stay there.
+     */
+    val GROUPS = linkedMapOf(
+        "calendar" to "read, add, move and delete events in the phone's calendar",
+        "messages" to "read captured WhatsApp and SMS messages, draft replies",
+        "browser" to "drive a real browser: click, type, scroll, dismiss banners",
+        "files" to "write, read and render documents the user keeps",
+        "goals" to "long-running work tracked across conversations",
+        "memory" to "recall, forget, consolidate; the profile and past conversations",
+        "media" to "find photographs, look up places and addresses, current location",
+        "research" to "parallel sub-agents for questions with several separate parts",
+        "skills" to "write and read your own procedures for recurring jobs",
+        "routines" to "recurring jobs that notify at a set time"
     )
 
     private fun ok(vararg pairs: Pair<String, Any?>): JSONObject {
@@ -41,6 +64,21 @@ object Tools {
     }
 
     val all: List<Tool> = listOf(
+
+        Tool("open_tools",
+            "Open a group of tools you need. Their full descriptions arrive in the result and stay available for the rest of this conversation. Open a group before using anything in it — one extra step, and it keeps every turn small and fast.",
+            mapOf("group" to "One of the group names listed in your instructions.")
+        ) { _, args ->
+            val group = args.str("group").lowercase(Locale.ROOT)
+            if (group !in GROUPS) {
+                ok("error" to "No group called \"$group\".",
+                    "available" to JSONArray(GROUPS.keys.toList()))
+            } else {
+                ok("group" to group,
+                    "tools" to schemaText(group),
+                    "note" to "These are now available. Do not open this group again.")
+            }
+        },
 
         // ── tasks ────────────────────────────────────────────────────────────
 
@@ -161,7 +199,8 @@ object Tools {
 
         Tool("forget",
             "Remove something from memory — a fact that turned out wrong, or that the user asked you to drop.",
-            mapOf("query" to "What to forget; the closest match is removed.", "id" to "Exact memory id if known.")
+            mapOf("query" to "What to forget; the closest match is removed.", "id" to "Exact memory id if known."),
+            group = "memory"
         ) { _, args ->
             val list = Store.memories()
             val target = if (args.str("id").isNotBlank()) {
@@ -181,7 +220,8 @@ object Tools {
                 "from" to "Local datetime to start from. Default now.",
                 "to" to "Local datetime to stop at. Default 7 days out.",
                 "limit" to "Default 50."
-            )
+            ),
+            group = "calendar"
         ) { ctx, args ->
             if (!Calendar.canRead(ctx)) {
                 ok("needs_permission" to true,
@@ -205,7 +245,8 @@ object Tools {
                 "end" to "Local datetime. Defaults to start + 1h.",
                 "location" to "Optional.", "notes" to "Optional.",
                 "remind" to "Minutes before to alert. Default 30."
-            )
+            ),
+            group = "calendar"
         ) { ctx, args ->
             val start = Store.parseLocal(args.str("start"))
                 ?: throw ToolError("start must be a local datetime like 2026-08-11T19:00")
@@ -222,7 +263,8 @@ object Tools {
         Tool("calendar_update", "Move or rename an event already in the calendar.",
             mapOf("id" to "Event id from calendar_read.", "title" to "New title.",
                   "start" to "New local datetime.", "end" to "New local datetime.",
-                  "location" to "New location.", "notes" to "New notes.")
+                  "location" to "New location.", "notes" to "New notes."),
+            group = "calendar"
         ) { ctx, args ->
             val id = args.optLong("id").takeIf { it > 0 } ?: throw ToolError("id is required")
             val changed = Calendar.update(ctx, id,
@@ -236,7 +278,8 @@ object Tools {
         },
 
         Tool("calendar_delete", "Remove an event from the calendar. Confirm with the user first.",
-            mapOf("id" to "Event id from calendar_read.")
+            mapOf("id" to "Event id from calendar_read."),
+            group = "calendar"
         ) { ctx, args ->
             val id = args.optLong("id").takeIf { it > 0 } ?: throw ToolError("id is required")
             ok("deleted" to Calendar.delete(ctx, id), "id" to id)
@@ -246,7 +289,8 @@ object Tools {
 
         Tool("read_profile",
             "Read your working description of the user before rewriting it.",
-            mapOf()
+            mapOf(),
+            group = "memory"
         ) { _, _ ->
             val text = Store.profile()
             ok("profile" to text.ifBlank { "(empty — nothing recorded about this person yet)" })
@@ -254,17 +298,27 @@ object Tools {
 
         Tool("update_profile",
             "Rewrite your description of this person: who they are, what they are working on, how they like things done. Read it first, then return the whole improved version. It is loaded into every conversation, so it is the most valuable thing you maintain — but keep it short and factual.",
-            mapOf("content" to "The complete profile in markdown. Replaces the old one entirely.")
+            mapOf(
+                "content" to "The complete profile in markdown. Replaces the old one entirely.",
+                "because" to "What in this conversation prompted the change. Required."
+            ),
+            group = "memory"
         ) { _, args ->
             val content = args.str("content")
             if (content.trim().length < 10) throw ToolError("content is required")
+            val why = args.str("because")
+            if (why.isBlank()) {
+                throw ToolError("Say what prompted this change in `because` — a profile that rewrites itself with no trail cannot be debugged when it goes wrong.")
+            }
             Store.saveProfile(content)
+            Store.recordRevision("profile", why)
             ok("saved" to true, "chars" to content.length)
         },
 
         Tool("search_history",
             "Search past conversations. Use this when the user refers to something you discussed before rather than admitting you don't remember.",
-            mapOf("query" to "Words that would have appeared in that conversation.", "limit" to "Default 6.")
+            mapOf("query" to "Words that would have appeared in that conversation.", "limit" to "Default 6."),
+            group = "memory"
         ) { _, args ->
             val hits = Store.searchSessions(args.str("query"), args.optInt("limit", 6))
             if (hits.isEmpty()) {
@@ -289,19 +343,23 @@ object Tools {
                 "name" to "Short identifier, e.g. \"weekly-review\".",
                 "title" to "One line: what this skill does.",
                 "when" to "One line: when to use it. This is what you match against later.",
-                "body" to "The procedure in markdown — steps, format, preferences, anything that surprised you."
-            )
+                "body" to "The procedure in markdown — steps, format, preferences, anything that surprised you.",
+                "because" to "What made this worth writing down."
+            ),
+            group = "skills"
         ) { _, args ->
             val body = args.str("body")
             if (body.isBlank()) throw ToolError("body is required")
             val name = args.str("name").ifBlank { args.str("title") }
             if (name.isBlank()) throw ToolError("name or title is required")
             val file = Store.saveSkill(name, args.str("title", name), args.str("when"), body)
+            Store.recordRevision("skill:$name", args.str("because").ifBlank { "no reason given" })
             ok("saved" to true, "file" to file,
                 "note" to "It is listed in your instructions from now on.")
         },
 
-        Tool("list_skills", "List the skills you have written, with what each is for.", mapOf()
+        Tool("list_skills", "List the skills you have written, with what each is for.", mapOf(),
+            group = "skills"
         ) { _, _ ->
             val list = Store.skills()
             val arr = JSONArray()
@@ -313,7 +371,8 @@ object Tools {
 
         Tool("read_skill",
             "Read a skill in full before following it. The index in your instructions carries only titles.",
-            mapOf("name" to "Skill name from list_skills.")
+            mapOf("name" to "Skill name from list_skills."),
+            group = "skills"
         ) { _, args ->
             val skill = Store.readSkill(args.str("name"))
                 ?: throw ToolError("No skill by that name. Call list_skills.")
@@ -321,7 +380,8 @@ object Tools {
         },
 
         Tool("delete_skill", "Remove a skill that turned out wrong or is no longer wanted.",
-            mapOf("name" to "Skill name.")
+            mapOf("name" to "Skill name."),
+            group = "skills"
         ) { _, args ->
             ok("deleted" to Store.deleteSkill(args.str("name")))
         },
@@ -330,7 +390,8 @@ object Tools {
 
         Tool("memory_status",
             "See how memory is doing: how much is stored, and what is about to be forgotten through disuse.",
-            mapOf()
+            mapOf(),
+            group = "memory"
         ) { _, _ ->
             val all = Store.memories()
             val fading = all.filter {
@@ -353,7 +414,8 @@ object Tools {
 
         Tool("consolidate_memory",
             "Tidy the memory store: merge duplicates, correct anything now out of date, note connections. Do this when memory looks messy or contradictory, or when asked.",
-            mapOf("topic" to "Optional — only consolidate memories about this.")
+            mapOf("topic" to "Optional — only consolidate memories about this."),
+            group = "memory"
         ) { _, args ->
             val topic = args.str("topic")
             val list = if (topic.isBlank()) Store.memories().take(60)
@@ -374,6 +436,62 @@ object Tools {
             }
         },
 
+        // ── long-running work ────────────────────────────────────────────────
+
+        Tool("set_goal",
+            "Record something being pursued over weeks and many conversations — finding a flat, planning a trip, getting something signed. Different from a task: a task gets done, a goal gets progressed. It is loaded into every conversation, so the next one starts informed.",
+            mapOf("title" to "Short name.", "detail" to "What success looks like, and any constraints."),
+            group = "goals"
+        ) { _, args ->
+            val title = args.str("title")
+            if (title.isBlank()) throw ToolError("title is required")
+            val list = Store.goals()
+            val now = System.currentTimeMillis()
+            val goal = Store.Goal(Store.newId(), title, args.str("detail"), "active", now, now, mutableListOf())
+            list.add(goal)
+            Store.saveGoals(list)
+            ok("added" to true, "id" to goal.id)
+        },
+
+        Tool("note_progress",
+            "Add what you learned or did towards a goal. Write it as evidence — what happened, what it means, what is still open — so a later conversation can pick it up without asking again.",
+            mapOf("id" to "Goal id from list_goals.", "note" to "What changed.",
+                  "status" to "Optional: active | paused | done."),
+            group = "goals"
+        ) { _, args ->
+            val list = Store.goals()
+            val goal = list.firstOrNull { it.id == args.str("id") }
+                ?: throw ToolError("No goal with that id. Call list_goals first.")
+            val note = args.str("note")
+            if (note.isNotBlank()) goal.notes.add(System.currentTimeMillis() to note)
+            args.str("status").takeIf { it in listOf("active", "paused", "done") }?.let { goal.status = it }
+            goal.updated = System.currentTimeMillis()
+            Store.saveGoals(list)
+            ok("noted" to true, "title" to goal.title, "status" to goal.status,
+                "notes_total" to goal.notes.size)
+        },
+
+        Tool("list_goals", "What is being pursued, and where each stands.",
+            mapOf("status" to "active | all. Default active."),
+            group = "goals"
+        ) { _, args ->
+            val all = args.str("status", "active") == "all"
+            val list = Store.goals().filter { all || it.status == "active" }
+            val arr = JSONArray()
+            list.forEach { g ->
+                val recent = JSONArray()
+                g.notes.takeLast(5).forEach { (at, text) ->
+                    recent.put("${Store.localIso(at).take(10)}: $text")
+                }
+                arr.put(JSONObject()
+                    .put("id", g.id).put("title", g.title).put("detail", g.detail)
+                    .put("status", g.status)
+                    .put("last_touched", Store.localIso(g.updated).take(10))
+                    .put("recent_notes", recent))
+            }
+            ok("count" to list.size, "goals" to arr)
+        },
+
         // ── recurring work ───────────────────────────────────────────────────
 
         Tool("add_routine",
@@ -384,7 +502,8 @@ object Tools {
                 "every" to "daily | weekdays | weekly",
                 "hour" to "Hour of day, 0-23, local time.",
                 "minute" to "Minute, default 0."
-            )
+            ),
+            group = "routines"
         ) { ctx, args ->
             val prompt = args.str("prompt")
             if (prompt.isBlank()) throw ToolError("prompt is required")
@@ -407,7 +526,8 @@ object Tools {
                 "note" to "You will be notified; tapping the notification runs it.")
         },
 
-        Tool("list_routines", "List the recurring jobs that are set up.", mapOf()
+        Tool("list_routines", "List the recurring jobs that are set up.", mapOf(),
+            group = "routines"
         ) { _, _ ->
             val list = Store.routines()
             val arr = JSONArray()
@@ -421,7 +541,8 @@ object Tools {
             ok("count" to list.size, "routines" to arr)
         },
 
-        Tool("delete_routine", "Remove a recurring job.", mapOf("id" to "Routine id from list_routines.")
+        Tool("delete_routine", "Remove a recurring job.", mapOf("id" to "Routine id from list_routines."),
+            group = "routines"
         ) { ctx, args ->
             val id = args.str("id")
             val list = Store.routines()
@@ -481,7 +602,8 @@ object Tools {
                 "since" to "Local datetime to read from. Default: the last 24 hours.",
                 "chat" to "Optional — only this conversation, matched loosely.",
                 "limit" to "Default 60."
-            )
+            ),
+            group = "messages"
         ) { _, args ->
             if (!NotificationCapture.isEnabled()) {
                 ok("capture_off" to true,
@@ -508,7 +630,8 @@ object Tools {
         },
 
         Tool("list_chats", "Which conversations have been active, and how much.",
-            mapOf("since" to "Local datetime. Default: the last 7 days.")
+            mapOf("since" to "Local datetime. Default: the last 7 days."),
+            group = "messages"
         ) { _, args ->
             val since = Store.parseLocal(args.str("since"))
                 ?: (System.currentTimeMillis() - 7 * 86_400_000L)
@@ -524,7 +647,8 @@ object Tools {
             mapOf(
                 "to" to "Who it is for: a name, or a phone number in international form without + or spaces.",
                 "text" to "The message itself, in the user's own voice."
-            )
+            ),
+            group = "messages"
         ) { _, args ->
             val text = args.str("text")
             if (text.isBlank()) throw ToolError("text is required")
@@ -539,6 +663,93 @@ object Tools {
                 "note" to "Shown to the user with a send button. Nothing has been sent.",
                 "card" to JSONObject().put("type", "draft")
                     .put("to", to).put("text", text).put("url", url))
+        },
+
+        // ── the browser ──────────────────────────────────────────────────────
+
+        Tool("browser_open",
+            "Open a page in a real browser and read it as rendered. Use this instead of browse_open whenever the content is built by JavaScript, needs cookies dismissed, or needs interacting with — search boxes, filters, tabs, \"load more\". You get the visible text plus a numbered list of everything you can click or type into.",
+            mapOf("url" to "Full URL, from a search result or from the user."),
+            group = "browser"
+        ) { _, args ->
+            val url = args.str("url")
+            if (url.isBlank()) throw ToolError("url is required")
+            if (!Browser.isReady()) throw ToolError("The browser is not running. Use browse_open instead.")
+            val state = Browser.open(url)
+            Browser.toJson(state, 8000).put("instruction",
+                "Act by element number: browser_click, browser_type. If a cookie wall is in the way, call browser_dismiss_consent first.")
+        },
+
+        Tool("browser_state",
+            "Re-read the current page — its text and the numbered elements. Use after something on the page has changed.",
+            mapOf("chars" to "How much text, default 8000."),
+            group = "browser"
+        ) { _, args ->
+            if (!Browser.isReady()) throw ToolError("The browser is not running.")
+            Browser.toJson(Browser.state(), args.optInt("chars", 8000).coerceIn(500, 24000))
+        },
+
+        Tool("browser_click",
+            "Click a numbered element on the current page, then read what changed.",
+            mapOf("index" to "The number from the element list."),
+            group = "browser"
+        ) { _, args ->
+            if (!Browser.isReady()) throw ToolError("The browser is not running.")
+            val index = args.optInt("index", -1)
+            if (index < 0) throw ToolError("index is required")
+            Browser.toJson(Browser.click(index), 8000)
+        },
+
+        Tool("browser_type",
+            "Type into a numbered field — a search box, a form. Set submit to true to press Enter afterwards.",
+            mapOf(
+                "index" to "The number from the element list.",
+                "text" to "What to type.",
+                "submit" to "true to submit the form afterwards. Default false."
+            ),
+            group = "browser"
+        ) { _, args ->
+            if (!Browser.isReady()) throw ToolError("The browser is not running.")
+            val index = args.optInt("index", -1)
+            if (index < 0) throw ToolError("index is required")
+            Browser.toJson(Browser.type(index, args.str("text"), args.optBoolean("submit", false)), 8000)
+        },
+
+        Tool("browser_scroll",
+            "Scroll the page. Many sites load more content only as you go down.",
+            mapOf("pages" to "Screens to scroll; negative goes up. Default 1."),
+            group = "browser"
+        ) { _, args ->
+            if (!Browser.isReady()) throw ToolError("The browser is not running.")
+            Browser.toJson(Browser.scroll(args.optInt("pages", 1).coerceIn(-5, 5)), 8000)
+        },
+
+        Tool("browser_back", "Go back to the previous page.", mapOf(),
+            group = "browser"
+        ) { _, _ ->
+            if (!Browser.isReady()) throw ToolError("The browser is not running.")
+            Browser.toJson(Browser.back(), 8000)
+        },
+
+        Tool("browser_dismiss_consent",
+            "Try to close a cookie or consent banner. Worth one call when a page looks empty or blocked by an overlay.",
+            mapOf(),
+            group = "browser"
+        ) { _, _ ->
+            if (!Browser.isReady()) throw ToolError("The browser is not running.")
+            Browser.toJson(Browser.dismissConsent(), 8000)
+        },
+
+        Tool("browser_show",
+            "Put the browser on screen so the user can act themselves — signing in, solving a check, choosing something. Their session is kept, so afterwards you can carry on from the same page.",
+            mapOf("why" to "One line telling the user what they need to do."),
+            group = "browser"
+        ) { _, args ->
+            if (!Browser.isReady()) throw ToolError("The browser is not running.")
+            ok("shown" to true,
+                "note" to "The browser has been opened for the user. Wait for them to say they are done, then call browser_state.",
+                "card" to JSONObject().put("type", "browser").put("why",
+                    args.str("why", "Take a look and do what is needed, then close it.")))
         },
 
         // ── things handed to the agent ───────────────────────────────────────
@@ -560,11 +771,99 @@ object Tools {
             }
         },
 
+        // ── showing things ───────────────────────────────────────────────────
+
+        Tool("find_images",
+            "Find photographs of something and show them to the user. Searches Wikimedia Commons, so it is good for species, places, buildings and objects, and poor for products and people. Never describe a picture you have not fetched.",
+            mapOf(
+                "query" to "What to picture, in English and as specific as possible. Scientific names work best for species.",
+                "count" to "1 to 4. Default 3."
+            ),
+            group = "media"
+        ) { _, args ->
+            val query = args.str("query")
+            if (query.isBlank()) throw ToolError("query is required")
+            val found = Web.images(query, args.optInt("count", 3).coerceIn(1, 4))
+            if (found.isEmpty()) {
+                ok("found" to 0, "note" to "No pictures found. Try the scientific name, or a broader term.")
+            } else {
+                val arr = JSONArray()
+                val cards = JSONArray()
+                found.forEach { img ->
+                    arr.put(JSONObject().put("title", img.title)
+                        .put("credit", img.credit).put("licence", img.licence))
+                    cards.put(JSONObject().put("title", img.title).put("url", img.url)
+                        .put("credit", img.credit).put("licence", img.licence))
+                }
+                ok("found" to found.size, "images" to arr,
+                    "note" to "Shown to the user. Credit the photographers in your reply.",
+                    "card" to JSONObject().put("type", "images").put("items", cards))
+            }
+        },
+
+        Tool("where_am_i",
+            "Find out roughly where the user is. Call this before any \"near me\" search rather than asking them where they are.",
+            mapOf(),
+            group = "media"
+        ) { ctx, _ ->
+            if (!Whereabouts.granted(ctx)) {
+                ok("needs_permission" to true,
+                    "note" to "Location permission not granted. A button has been shown — ask them to tap it, then try again.",
+                    "card" to JSONObject().put("type", "permission").put("what", "location"))
+            } else {
+                val fix = Whereabouts.current(ctx)
+                if (fix == null) {
+                    ok("found" to false,
+                        "note" to "No location available — location services may be switched off on the phone.")
+                } else {
+                    // A place name is far more useful to a model than a pair of
+                    // numbers, and it is one request away.
+                    val place = Web.reverseGeocode(fix.latitude, fix.longitude)
+                    ok("latitude" to fix.latitude, "longitude" to fix.longitude,
+                        "accuracy_metres" to fix.accuracyMetres.toInt(),
+                        "fix_age_minutes" to fix.ageMinutes,
+                        "place" to (place ?: "unknown"),
+                        "note" to "Use this with show_places for anything nearby.")
+                }
+            }
+        },
+
+        Tool("show_places",
+            "Look up real addresses and coordinates and show them to the user with a button that opens their maps app. Use this rather than stating an address from memory — invented addresses are the single most damaging kind of mistake here.",
+            mapOf("query" to "What to find, e.g. \"pharmacy\" or a specific place name.",
+                  "near_me" to "true to search around the user's current position.",
+                  "limit" to "1 to 5. Default 3."),
+            group = "media"
+        ) { ctx, args ->
+            val query = args.str("query")
+            if (query.isBlank()) throw ToolError("query is required")
+            val limit = args.optInt("limit", 3).coerceIn(1, 5)
+            val places = if (args.optBoolean("near_me", false)) {
+                val fix = Whereabouts.current(ctx)
+                if (fix == null) Web.geocode(query, limit)
+                else Web.geocodeNear(query, fix.latitude, fix.longitude, limit)
+            } else {
+                Web.geocode(query, limit)
+            }
+            if (places.isEmpty()) {
+                ok("found" to 0, "note" to "Nothing matched. Do not invent an address — ask the user to be more specific.")
+            } else {
+                val arr = JSONArray()
+                places.forEach { p ->
+                    arr.put(JSONObject().put("name", p.name).put("address", p.address)
+                        .put("lat", p.lat).put("lon", p.lon))
+                }
+                ok("found" to places.size, "places" to arr,
+                    "card" to JSONObject().put("type", "places").put("items", arr))
+            }
+        },
+
         // ── investigating in parallel ────────────────────────────────────────
 
         Tool("delegate",
             "Hand two to four independent questions to sub-agents that research them at the same time and report back. Use it when a request contains several separate investigations — comparing options, checking a few places, gathering different kinds of fact. Each task must stand alone; they cannot see each other's work.",
-            mapOf("tasks" to "Array of self-contained task descriptions, 2 to 4.")
+            mapOf("tasks" to "Array of self-contained task descriptions, 2 to 4."),
+            group = "research"
         ) { ctx, args ->
             val raw = args.optJSONArray("tasks")
                 ?: throw ToolError("tasks must be an array of task descriptions")
@@ -589,7 +888,8 @@ object Tools {
 
         Tool("deep_research",
             "Investigate one broad question properly: it is split into independent sub-questions, researched in parallel, and reported back. Slow and expensive — use it when the user asks for real research, not for a quick lookup.",
-            mapOf("question" to "The question to investigate.", "breadth" to "How many sub-questions, 2 to 4. Default 3.")
+            mapOf("question" to "The question to investigate.", "breadth" to "How many sub-questions, 2 to 4. Default 3."),
+            group = "research"
         ) { ctx, args ->
             val question = args.str("question")
             if (question.isBlank()) throw ToolError("question is required")
@@ -610,7 +910,8 @@ object Tools {
                 "title" to "Short title for the card.",
                 "html" to "A complete HTML document.",
                 "save_as" to "Optional filename, e.g. \"casio-comparison.html\"."
-            )
+            ),
+            group = "files"
         ) { _, args ->
             val html = args.str("html")
             if (html.trim().length < 20) throw ToolError("html is required")
@@ -626,7 +927,8 @@ object Tools {
 
         Tool("write_file",
             "Save something the user will keep and reread — a note, a list, a draft. For anything with structure prefer render_html; use this for plain text and markdown.",
-            mapOf("name" to "Filename, e.g. \"packing-list.md\".", "content" to "The file contents.")
+            mapOf("name" to "Filename, e.g. \"packing-list.md\".", "content" to "The file contents."),
+            group = "files"
         ) { _, args ->
             val content = args.str("content")
             if (content.isEmpty()) throw ToolError("content is required")
@@ -636,7 +938,8 @@ object Tools {
         },
 
         Tool("read_file", "Read something you saved earlier.",
-            mapOf("path" to "Path from list_files or from an earlier write.")
+            mapOf("path" to "Path from list_files or from an earlier write."),
+            group = "files"
         ) { _, args ->
             val path = args.str("path")
             val text = Store.readText(path) ?: Store.readText("${Store.ARTIFACT_DIR}/$path")
@@ -644,7 +947,8 @@ object Tools {
             ok("path" to path, "chars" to text.length, "text" to text.take(20000))
         },
 
-        Tool("list_files", "List what you have saved for the user.", mapOf()
+        Tool("list_files", "List what you have saved for the user.", mapOf(),
+            group = "files"
         ) { _, _ ->
             val list = Store.artifacts()
             val arr = JSONArray()
@@ -668,10 +972,20 @@ object Tools {
 
     val byName: Map<String, Tool> = all.associateBy { it.name }
 
-    /** The schema block that goes into the system prompt. */
-    fun schemaText(): String = all.joinToString("\n\n") { t ->
+    private fun render(tools: List<Tool>): String = tools.joinToString("\n\n") { t ->
         val params = t.parameters.entries.joinToString("\n") { "    ${it.key}: ${it.value}" }
         "- ${t.name}: ${t.description}" + if (params.isNotEmpty()) "\n$params" else ""
+    }
+
+    /** The always-available tools, written into the stable part of the prompt. */
+    fun coreSchema(): String = render(all.filter { it.group == "core" })
+
+    fun schemaText(group: String): String = render(all.filter { it.group == group })
+
+    /** One line per drawer — what the agent sees instead of forty schemas. */
+    fun groupIndex(): String = GROUPS.entries.joinToString("\n") { (name, what) ->
+        val count = all.count { it.group == name }
+        "- $name ($count tools): $what"
     }
 
     fun run(context: Context, name: String, args: JSONObject): JSONObject {

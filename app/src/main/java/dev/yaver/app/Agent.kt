@@ -64,104 +64,123 @@ object Agent {
         }
     }
 
-    private fun systemPrompt(context: Context, userText: String, nudge: String): String {
-        val name = Store.setting(Store.USER_NAME)
-        val persona = Store.setting(Store.PERSONA)
-        val memories = Store.recall(userText, 10)
-        val allMemories = Store.memories().size
+    /**
+     * The stable half of the prompt.
+     *
+     * Every byte here is identical on every turn, which is what lets a local
+     * runtime keep the processed prefix in its KV cache and skip re-reading it.
+     * Anything that changes — the date, the goals, what came in — is appended
+     * to the user's message instead, where it costs a few hundred tokens
+     * rather than invalidating everything.
+     *
+     * Tool schemas used to live here: forty of them, ten thousand tokens,
+     * rebuilt every turn. Now only the dozen core ones are inlined and the rest
+     * are behind `open_tools`.
+     */
+    private fun systemPrompt(): String = buildString {
+        append("You are Yaver — an aide-de-camp running on someone's phone. The name is Turkish: the officer who keeps a commander's affairs in order, anticipates what is needed and prepares it, but never gives the orders.\n\n")
+
+        append("## Time\n\n")
+        append("**Every time you write is local wall-clock time.** Write `2026-08-11T19:00` for seven in the evening. Never append `Z`, never convert to UTC — the app handles that. Times coming back from tools are local too.\n\n")
+        append("Turkish ordinals like \"6'sında\" mean the sixth DAY of the month, never a clock time. A due time and a reminder are different: \"dinner at 19:00, remind me at 18:00\" is one task due at 19:00 with `remind: 60`.\n\n")
+        append("Today's date and the weekday table are given with each message. Use that table rather than working weekdays out yourself.\n\n")
+
+        append("## Tools\n\nCall a tool by emitting exactly:\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {...}}\n</tool_call>\n\n")
+        append("Rules:\n")
+        append("- Emit tool calls alone, with no other prose in that reply. You will get the result and can then continue.\n")
+        append("- Several independent calls may go in one reply.\n")
+        append("- Never invent a tool result, and never claim you searched or read something you did not.\n\n")
+
+        append("### Always available\n\n")
+        append(Tools.coreSchema())
+        append("\n\n### Everything else, behind `open_tools`\n\n")
+        append(Tools.groupIndex())
+        append("\n\nOpen a group before using it. The schemas arrive in the result and stay for the rest of the conversation, so open each one at most once.\n\n")
+
+        append("## Saying it is not doing it\n\n")
+        append("Announcing an action does not perform it. If you write that you are adding a task or creating an event, emit the tool call in that same reply. Describe what you did in the past tense only after seeing the tool result.\n\n")
+
+        append("## Never invent specifics\n\n")
+        append("- Never state a price, date, figure or URL you did not read from a tool result in this conversation.\n")
+        append("- Every link must be one that appeared in a tool result. Never build a URL from a pattern.\n")
+        append("- If search is down, say so and ask which site to try — guessing domain after domain produces confident nonsense.\n")
+        append("- When a site blocks you, name it and move on rather than filling the gap from memory.\n\n")
+
+        append("## How to work\n\n")
+        append("- Ground answers about the user's world in their tasks, calendar and memory rather than assumptions. Open the group and look.\n")
+        append("- Search for anything current or verifiable; your training data is stale.\n")
+        append("- Two ways to read a page. `browse_open` downloads the HTML: fast, fine for articles. The `browser` group drives a real browser: slower, but it sees pages built by JavaScript and can dismiss banners, type and click. If a fetched page comes back thin or blocked, open it in the browser instead of guessing.\n")
+        append("- Use `calculate` for arithmetic instead of doing it in your head.\n")
+        append("- Finish the thought the user started: a mentioned meeting wants a calendar entry, a deadline wants a task. Prepare it, say what you inferred, and let them correct you. Never do anything irreversible.\n")
+        append("- Keep a profile and write skills for jobs you may be asked to repeat; both are in the `memory` and `skills` groups.\n")
+        append("- Answer in the user's language, and match their register.\n")
+        append("- Stop when you have enough. A partial answer with sources beats a perfect one that never arrives.\n")
+    }
+
+    /**
+     * The changing half, appended to the user's message.
+     *
+     * Deliberately thin. Memories, tasks and messages used to be injected here
+     * on the chance they mattered; that is thousands of tokens a turn spent on
+     * a guess. The agent can fetch what it needs, and now knows how.
+     */
+    private fun contextBlock(context: Context, userText: String): String = buildString {
         val now = System.currentTimeMillis()
+        append("\n\n---\n")
+        append("now: ${Store.localIso(now)} (offset ${Store.offsetLabel()})\n")
+        append(dayTable())
+        append("\n")
 
-        val openTasks = Store.tasks().filter { !it.done }
-        val taskSummary = if (openTasks.isEmpty()) "(no open tasks)" else
-            openTasks.take(8).joinToString("\n") { t ->
-                val due = t.due?.let { " — due ${Store.localIso(it)}" } ?: ""
-                val urgent = Store.urgency(t, now)?.takeIf { it != "later" }?.let { " [$it]" } ?: ""
-                "- ${t.title}$due$urgent"
-            }
+        val name = Store.setting(Store.USER_NAME)
+        if (name.isNotBlank()) append("user: $name\n")
 
-        return buildString {
-            append("You are Yaver — an aide-de-camp running on ")
-            append(if (name.isNotBlank()) "$name's" else "the user's")
-            append(" phone. The name is Turkish: the officer who keeps a commander's affairs in order, anticipates what is needed and prepares it, but never gives the orders.\n\n")
+        // A profile is small and shapes everything, so it stays.
+        val profile = Store.profile()
+        if (profile.isNotBlank()) append("\nprofile:\n${profile.take(1200)}\n")
 
-            append("Current time: ${Store.localIso(now)} (offset ${Store.offsetLabel()}).\n\n")
-            append("### The next two weeks\n\n")
-            append(dayTable())
-            append("\n\nUse that table rather than working weekdays out yourself.\n\n")
-
-            append("**Every time you write is local wall-clock time.** Write `2026-08-11T19:00` for seven in the evening. Never append `Z`, never convert to UTC — the app handles that. Times coming back from tools are local too.\n\n")
-            append("Turkish ordinals like \"6'sında\" mean the sixth DAY of the month, never a clock time. A due time and a reminder are different things: \"dinner at 19:00, remind me at 18:00\" is one task due at 19:00 with `remind: 60`.\n\n")
-
-            append("## Tools\n\nCall a tool by emitting exactly:\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {...}}\n</tool_call>\n\n")
-            append("Rules:\n")
-            append("- Emit tool calls alone, with no other prose in that reply. You will get the result and can then continue.\n")
-            append("- Several independent calls may go in one reply.\n")
-            append("- Never invent a tool result, and never claim you searched or read something you did not.\n\n")
-            append("Available tools:\n\n")
-            append(Tools.schemaText())
-            append("\n\n")
-
-            append("## Saying it is not doing it\n\n")
-            append("Announcing an action does not perform it. If you write that you are adding a task or creating an event, emit the tool call in that same reply. Describe what you did in the past tense only after seeing the tool result.\n\n")
-
-            append("## Never invent specifics\n\n")
-            append("- Never state a price, date, figure or URL you did not read from a tool result in this conversation.\n")
-            append("- Every link must be one that appeared in a tool result. Never build a URL from a pattern.\n")
-            append("- Never invent a website address. If search is down, say so and ask which site to try — guessing domain after domain produces confident nonsense.\n")
-            append("- When a site blocks you, name it and move on rather than filling the gap from memory.\n\n")
-
-            append("## How to work\n\n")
-            append("- Ground answers about the user's world in `list_tasks`, `calendar_read` and memory, not assumptions.\n")
-            append("- Search for anything current or verifiable; your training data is stale.\n")
-            append("- When a request contains several separate investigations, use `delegate` rather than doing them one after another; for a genuinely broad question use `deep_research`. Both are slow, so do not reach for them on a simple lookup.\n")
-            append("- Use `calculate` for arithmetic instead of doing it in your head.\n")
-            append("- Finish the thought the user started: a mentioned meeting wants a calendar entry, a deadline wants a task. Prepare it, say what you inferred, and let them correct you. Never do anything irreversible.\n")
-            append("- Keep a profile: `read_profile` then `update_profile` whenever you learn something structural about who they are. It is loaded into every future conversation.\n")
-            append("- After finishing anything non-trivial you could be asked for again, write a `create_skill`: the format that worked, the steps, what surprised you. Next time, read it and start where you left off.\n")
-            append("- When they refer to something from before, call `search_history` rather than saying you don't remember.\n")
-            append("- When an answer has real structure — a comparison, a table, a plan with sections, anything they will want to reread — use `render_html` instead of a long message. It becomes a document they keep.\n")
-            append("- For \"what came in\", \"what needs me\", \"what did X say\", read `read_messages` first. Only messages sent to them are captured — never their own — so never claim to have seen something they wrote.\n")
-            append("- Use `draft_message` to prepare a reply. You never send anything; they press send.\n")
-            append("- Check `read_forwards` when they mention having sent or shared you something.\n")
-            append("- Answer in the user's language, and match their register.\n")
-            append("- Stop when you have enough. A partial answer with sources beats a perfect one that never arrives.\n\n")
-
-            val profile = Store.profile()
-            if (profile.isNotBlank()) {
-                append("## Who this person is\n\n")
-                append(profile)
-                append("\n\n")
-            }
-
-            append("## What you know about this person\n\n")
-            if (memories.isEmpty()) append("(nothing saved yet)\n")
-            else memories.forEach { append("- ${it.text}\n") }
-            if (allMemories > memories.size) {
-                append("\n($allMemories memories stored in total; those above are the ones relevant to this message. Use `recall` for the rest.)\n")
-            }
-
-            val skills = Store.skillIndex()
-            if (skills.isNotBlank()) {
-                append("\n## Skills you have written\n\n")
-                append(skills)
-                append("\n\nRead one in full with `read_skill` before following it.\n")
-            }
-
-            if (NotificationCapture.isEnabled()) {
-                val recent = Store.messages(now - 86_400_000L, limit = 5)
-                append("\n## Messages in the last day\n\n")
-                if (recent.isEmpty()) append("(nothing captured)\n")
-                else recent.forEach {
-                    append("- ${it.chat}${if (it.sender != it.chat) " · ${it.sender}" else ""}: ${it.text.take(120)}\n")
-                }
-                append("\nUse `read_messages` for the rest.\n")
-            }
-
-            append("\n## Their open tasks\n\n$taskSummary\n")
-
-            if (persona.isNotBlank()) append("\n## Standing instructions from the user\n\n$persona\n")
-                if (nudge.isNotBlank()) append("\n$nudge\n")
+        // Titles only. If a goal matters this turn, the agent opens the group.
+        val goals = Store.goals().filter { it.status == "active" }
+        if (goals.isNotEmpty()) {
+            append("\ngoals in progress: ")
+            append(goals.take(5).joinToString("; ") { it.title })
+            append("\n")
         }
+
+        // Counts, not contents: enough to know whether looking is worthwhile.
+        val open = Store.tasks().count { !it.done }
+        val urgent = Store.tasks().count { Store.urgency(it, now) == "overdue" }
+        if (open > 0) {
+            append("open tasks: $open")
+            if (urgent > 0) append(" ($urgent overdue)")
+            append(" — use list_tasks to see them\n")
+        }
+        if (NotificationCapture.isEnabled()) {
+            val recent = Store.messages(now - 86_400_000L, limit = 40).size
+            if (recent > 0) append("messages in the last day: $recent — open the messages group to read them\n")
+        }
+
+        // The three memories most relevant to what was just said. Cheap, and it
+        // stops the agent asking about things it already knows.
+        val memories = Store.recall(userText, 3)
+        if (memories.isNotEmpty()) {
+            append("\nrelevant memories:\n")
+            memories.forEach { append("- ${it.text}\n") }
+            append("(use recall for more)\n")
+        }
+
+        val persona = Store.setting(Store.PERSONA)
+        if (persona.isNotBlank()) append("\nstanding instructions: $persona\n")
+
+        if (pendingNudge.isNotBlank()) append("\n$pendingNudge\n")
+    }
+
+    /** Rough sizes for the Debug panel — four characters to a token. */
+    fun promptSize(): Pair<Int, Int> {
+        val fixed = systemPrompt().length / 4
+        val context = try {
+            contextBlock(Store.appContext, "").length / 4
+        } catch (e: Exception) { 0 }
+        return fixed to context
     }
 
     // ── tool-call parsing ────────────────────────────────────────────────────
@@ -256,16 +275,17 @@ object Agent {
 
     fun run(context: Context, userText: String, history: List<Store.Turn>, listener: Listener) {
         Llm.cancelled = false
-        val deliveredNudge = pendingNudge
-        pendingNudge = ""
-        if (deliveredNudge.isNotBlank()) Log.info("memory nudge delivered with this turn")
+        if (pendingNudge.isNotBlank()) Log.info("memory nudge delivered with this turn")
 
         val convo = mutableListOf<Pair<String, String>>()
-        convo.add("system" to systemPrompt(context, userText, deliveredNudge))
+        convo.add("system" to systemPrompt())
         history.filter { it.role == "user" || it.role == "assistant" }
             .takeLast(20)
             .forEach { convo.add(it.role to it.content) }
-        convo.add("user" to userText)
+        // Context rides with the message, so the system prefix never changes
+        // and a local runtime can keep it cached.
+        convo.add("user" to userText + contextBlock(context, userText))
+        pendingNudge = ""     // delivered with this turn
 
         var finalText = ""
         var toolsRun = 0
@@ -352,7 +372,8 @@ object Agent {
                     }
 
                     val ms = System.currentTimeMillis() - started
-                    Log.tool("${call.name} ${if (failed) "failed" else "ok"} (${ms}ms)")
+                    Log.tool("${call.name} ${if (failed) "failed" else "ok"} (${ms}ms)" +
+                        summarise(call.name, result))
                     listener.onToolEnd(call.name, !failed, ms, result)
 
                     result.optJSONObject("card")?.let { listener.onCard(it) }
@@ -397,6 +418,29 @@ object Agent {
         } catch (e: Exception) {
             Log.error("run failed: ${e.message}")
             listener.onFailed(e.message ?: e.toString())
+        }
+    }
+
+    /** One line saying what a tool actually came back with. */
+    private fun summarise(name: String, result: JSONObject): String {
+        val blocked = result.optString("blocked")
+        if (blocked.isNotEmpty() && blocked != "null") return " — blocked: $blocked"
+        if (result.optBoolean("repeat")) return " — already done this request"
+        val error = result.optString("error")
+        if (error.isNotEmpty() && error != "null") return " — ${error.take(80)}"
+
+        return when (name) {
+            "browse_open" -> {
+                val chars = result.optInt("chars_total")
+                val via = if (result.optBoolean("via_reader")) " via reader" else ""
+                " — $chars chars$via"
+            }
+            "web_search" -> " — ${result.optInt("count")} results from ${result.optString("engine")}"
+            "read_messages" -> " — ${result.optInt("count")} messages"
+            "find_images" -> " — ${result.optInt("found")} images"
+            "delegate", "deep_research" -> " — ${result.optInt("count")} findings"
+            "calendar_read" -> " — ${result.optInt("count")} events"
+            else -> ""
         }
     }
 

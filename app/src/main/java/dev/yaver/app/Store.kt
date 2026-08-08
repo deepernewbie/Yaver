@@ -464,6 +464,101 @@ object Store {
         return "$ARTIFACT_DIR/$safe"
     }
 
+    // ── goals ────────────────────────────────────────────────────────────────
+    //
+    // Adapted from Prime Agent's long-running work. A task is something to do;
+    // a goal is something being pursued across weeks and many conversations —
+    // finding a flat, planning a trip, getting a contract signed. It carries
+    // its own running notes, so the next session starts informed instead of
+    // asking the same questions again.
+
+    data class Goal(
+        val id: String,
+        var title: String,
+        var detail: String,
+        var status: String,            // active | paused | done
+        val created: Long,
+        var updated: Long,
+        val notes: MutableList<Pair<Long, String>>
+    ) {
+        fun toJson(): JSONObject {
+            val log = JSONArray()
+            notes.takeLast(40).forEach { (at, text) ->
+                log.put(JSONObject().put("at", at).put("text", text))
+            }
+            return JSONObject()
+                .put("id", id).put("title", title).put("detail", detail)
+                .put("status", status).put("created", created).put("updated", updated)
+                .put("notes", log)
+        }
+
+        companion object {
+            fun from(o: JSONObject): Goal {
+                val log = mutableListOf<Pair<Long, String>>()
+                o.optJSONArray("notes")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val n = arr.optJSONObject(i) ?: continue
+                        log.add(n.optLong("at") to n.optString("text"))
+                    }
+                }
+                return Goal(
+                    id = o.optString("id"),
+                    title = o.optString("title"),
+                    detail = o.optString("detail"),
+                    status = o.optString("status", "active"),
+                    created = o.optLong("created"),
+                    updated = o.optLong("updated"),
+                    notes = log
+                )
+            }
+        }
+    }
+
+    private const val GOALS = "goals.json"
+
+    fun goals(): MutableList<Goal> {
+        val arr = readJson(GOALS).optJSONArray("goals") ?: JSONArray()
+        return (0 until arr.length()).map { Goal.from(arr.getJSONObject(it)) }.toMutableList()
+    }
+
+    fun saveGoals(list: List<Goal>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(it.toJson()) }
+        writeText(GOALS, JSONObject().put("goals", arr).toString(2))
+    }
+
+    // ── the harness log ──────────────────────────────────────────────────────
+    //
+    // Also from Prime Agent: when the agent edits its own operating state — the
+    // profile, a skill — the change is recorded with the evidence that
+    // prompted it. Two reasons. An agent that rewrites its own instructions
+    // with no trail is impossible to debug when it starts behaving oddly, and
+    // requiring a reason in the first place discourages churn.
+
+    private const val HARNESS_LOG = "harness-log.jsonl"
+
+    data class Revision(val ts: Long, val what: String, val why: String)
+
+    fun recordRevision(what: String, why: String) {
+        val line = JSONObject()
+            .put("ts", System.currentTimeMillis())
+            .put("what", what).put("why", why.take(400))
+            .toString()
+        try {
+            File(appContext.filesDir, HARNESS_LOG).appendText(line + "\n")
+        } catch (e: Exception) { /* the log is a courtesy, not a dependency */ }
+    }
+
+    fun revisions(limit: Int = 40): List<Revision> {
+        val raw = readText(HARNESS_LOG) ?: return emptyList()
+        return raw.lines().filter { it.isNotBlank() }.mapNotNull { line ->
+            try {
+                val o = JSONObject(line)
+                Revision(o.optLong("ts"), o.optString("what"), o.optString("why"))
+            } catch (e: Exception) { null }
+        }.sortedByDescending { it.ts }.take(limit)
+    }
+
     // ── usage ────────────────────────────────────────────────────────────────
 
     private const val USAGE = "usage.json"
