@@ -616,23 +616,11 @@ class MainActivity : Activity() {
                 "${r.every} at ${String.format(Locale.US, "%02d:%02d", r.hour, r.minute)}  ·  next $next",
                 faint, 11f))
             row.addView(main)
-            row.addView(Button(this).apply {
-                text = "▶"
-                isAllCaps = false
-                setTextColor(signal)
-                setBackgroundColor(Color.TRANSPARENT)
-                setOnClickListener { input.setText(r.prompt); send() }
-            })
-            row.addView(Button(this).apply {
-                text = "×"
-                isAllCaps = false
-                setTextColor(faint)
-                setBackgroundColor(Color.TRANSPARENT)
-                setOnClickListener {
-                    Store.saveRoutines(Store.routines().filter { it.id != r.id })
-                    Reminders.cancelRoutine(this@MainActivity, r.id)
-                    toast("Removed")
-                }
+            row.addView(iconAction("▶", signal) { input.setText(r.prompt); send() })
+            row.addView(iconAction("×", faint) {
+                Store.saveRoutines(Store.routines().filter { it.id != r.id })
+                Reminders.cancelRoutine(this@MainActivity, r.id)
+                toast("Removed")
             })
             content.addView(row)
         }
@@ -658,6 +646,22 @@ class MainActivity : Activity() {
             .create()
         dialog.show()
         return dialog
+    }
+
+    /** A tap target sized to the glyph rather than to Android's button minimum. */
+    private fun iconAction(glyph: String, colour: Int, onClick: () -> Unit) = TextView(this).apply {
+        text = glyph
+        setTextColor(colour)
+        textSize = 17f
+        gravity = Gravity.CENTER
+        minWidth = 0
+        minimumWidth = 0
+        setPadding(dp(10), dp(6), dp(10), dp(6))
+        isClickable = true
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.CENTER_VERTICAL }
+        setOnClickListener { onClick() }
     }
 
     private fun rowLabel(text: String, colour: Int = ink, size: Float = 14f) = TextView(this).apply {
@@ -713,13 +717,7 @@ class MainActivity : Activity() {
                     .show()
             }
             row.addView(main)
-            row.addView(Button(this).apply {
-                text = "×"
-                isAllCaps = false
-                setTextColor(faint)
-                setBackgroundColor(Color.TRANSPARENT)
-                setOnClickListener { Store.deleteSkill(sk.name); toast("Deleted") }
-            })
+            row.addView(iconAction("×", faint) { Store.deleteSkill(sk.name); toast("Deleted") })
             box.addView(row)
         }
     }
@@ -802,35 +800,23 @@ class MainActivity : Activity() {
                 if (urgency == "overdue") danger else faint, 11f))
             row.addView(main)
 
-            row.addView(Button(this).apply {
-                text = if (t.done) "↺" else "✓"
-                isAllCaps = false
-                setTextColor(signal)
-                setBackgroundColor(Color.TRANSPARENT)
-                setOnClickListener {
-                    val all = Store.tasks()
-                    val target = all.firstOrNull { it.id == t.id }
-                    if (target != null) {
-                        target.done = !target.done
-                        Store.saveTasks(all)
-                        if (target.done) Reminders.cancelTask(this@MainActivity, target.id)
-                        else Reminders.scheduleTask(this@MainActivity, target)
-                    }
-                    refreshDueBar()
-                    toast(if (t.done) "Reopened" else "Done")
+            row.addView(iconAction(if (t.done) "↺" else "✓", signal) {
+                val all = Store.tasks()
+                val target = all.firstOrNull { it.id == t.id }
+                if (target != null) {
+                    target.done = !target.done
+                    Store.saveTasks(all)
+                    if (target.done) Reminders.cancelTask(this@MainActivity, target.id)
+                    else Reminders.scheduleTask(this@MainActivity, target)
                 }
+                refreshDueBar()
+                toast(if (t.done) "Reopened" else "Done")
             })
-            row.addView(Button(this).apply {
-                text = "×"
-                isAllCaps = false
-                setTextColor(faint)
-                setBackgroundColor(Color.TRANSPARENT)
-                setOnClickListener {
-                    Store.saveTasks(Store.tasks().filter { it.id != t.id })
-                    Reminders.cancelTask(this@MainActivity, t.id)
-                    refreshDueBar()
-                    toast("Deleted")
-                }
+            row.addView(iconAction("×", faint) {
+                Store.saveTasks(Store.tasks().filter { it.id != t.id })
+                Reminders.cancelTask(this@MainActivity, t.id)
+                refreshDueBar()
+                toast("Deleted")
             })
             box.addView(row)
         }
@@ -867,17 +853,11 @@ class MainActivity : Activity() {
                     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(e.start))
                 main.addView(rowLabel(time + if (e.location.isNotBlank()) " · ${e.location}" else "", faint, 11f))
                 row.addView(main)
-                row.addView(Button(this).apply {
-                    text = "×"
-                    isAllCaps = false
-                    setTextColor(faint)
-                    setBackgroundColor(Color.TRANSPARENT)
-                    setOnClickListener {
-                        try {
-                            if (Calendar.delete(this@MainActivity, e.id)) toast("Removed from calendar")
-                            else toast("Could not remove it")
-                        } catch (ex: Exception) { toast(ex.message ?: "Failed") }
-                    }
+                row.addView(iconAction("×", faint) {
+                    try {
+                        if (Calendar.delete(this@MainActivity, e.id)) toast("Removed from calendar")
+                        else toast("Could not remove it")
+                    } catch (ex: Exception) { toast(ex.message ?: "Failed") }
                 })
                 box.addView(row)
             }
@@ -960,27 +940,15 @@ class MainActivity : Activity() {
             }
             main.addView(rowLabel(note, if (idle >= Store.MEMORY_WARN_DAYS && !Store.memoryProtected(m)) brass else faint, 11f))
             row.addView(main)
-            row.addView(Button(this).apply {
-                text = if (m.pinned) "★" else "☆"
-                isAllCaps = false
-                setTextColor(brass)
-                setBackgroundColor(Color.TRANSPARENT)
-                setOnClickListener {
-                    val list = Store.memories()
-                    list.firstOrNull { it.id == m.id }?.let { it.pinned = !it.pinned }
-                    Store.saveMemories(list)
-                    toast(if (m.pinned) "Unpinned" else "Pinned")
-                }
+            row.addView(iconAction(if (m.pinned) "★" else "☆", brass) {
+                val list = Store.memories()
+                list.firstOrNull { it.id == m.id }?.let { it.pinned = !it.pinned }
+                Store.saveMemories(list)
+                toast(if (m.pinned) "Unpinned" else "Pinned")
             })
-            row.addView(Button(this).apply {
-                text = "×"
-                isAllCaps = false
-                setTextColor(faint)
-                setBackgroundColor(Color.TRANSPARENT)
-                setOnClickListener {
-                    Store.saveMemories(Store.memories().filter { it.id != m.id })
-                    toast("Forgotten")
-                }
+            row.addView(iconAction("×", faint) {
+                Store.saveMemories(Store.memories().filter { it.id != m.id })
+                toast("Forgotten")
             })
             box.addView(row)
         }

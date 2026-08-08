@@ -40,6 +40,11 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
+            <!-- Done and Snooze, tapped straight from the notification. -->
+            <intent-filter>
+                <action android:name="dev.yaver.app.DONE" />
+                <action android:name="dev.yaver.app.SNOOZE" />
+            </intent-filter>
         </receiver>
 
         <!-- Anything shared from another app becomes something handed to the

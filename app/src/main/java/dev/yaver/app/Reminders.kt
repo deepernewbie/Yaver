@@ -126,7 +126,54 @@ object Reminders {
 
     // ── posting ──────────────────────────────────────────────────────────────
 
-    fun notify(context: Context, id: Int, channel: String, title: String, body: String, prompt: String?) {
+    const val ACTION_DONE = "dev.yaver.app.DONE"
+    const val ACTION_SNOOZE = "dev.yaver.app.SNOOZE"
+    private const val SNOOZE_MINUTES = 15
+
+    /**
+     * A reminder you can act on without opening anything.
+     *
+     * Most of the time the answer to "call the hotel at 10" is either "already
+     * did" or "not now" — both of which should take one tap from the lock
+     * screen rather than a trip through the app.
+     */
+    private fun taskActions(context: Context, taskId: String): List<Notification.Action> {
+        fun action(label: String, act: String, icon: Int): Notification.Action {
+            val intent = Intent(context, AlarmReceiver::class.java).apply {
+                action = act
+                putExtra(EXTRA_ID, taskId)
+            }
+            val pending = PendingIntent.getBroadcast(
+                context, (act + taskId).hashCode(), intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            return Notification.Action.Builder(
+                android.graphics.drawable.Icon.createWithResource(context, icon), label, pending
+            ).build()
+        }
+        return listOf(
+            action("Done", ACTION_DONE, android.R.drawable.checkbox_on_background),
+            action("Snooze ${SNOOZE_MINUTES}m", ACTION_SNOOZE, android.R.drawable.ic_menu_recent_history)
+        )
+    }
+
+    fun snooze(context: Context, taskId: String) {
+        val task = Store.tasks().firstOrNull { it.id == taskId } ?: return
+        val intent = Intent(context, AlarmReceiver::class.java).apply {
+            putExtra(EXTRA_KIND, "task")
+            putExtra(EXTRA_ID, task.id)
+            putExtra(EXTRA_TITLE, task.title)
+            action = "dev.yaver.app.TASK_${task.id}"
+        }
+        schedule(context, System.currentTimeMillis() + SNOOZE_MINUTES * 60_000L,
+            intent, codeFor("task", task.id))
+        Log.info("snoozed ${task.title} by $SNOOZE_MINUTES minutes")
+    }
+
+    fun notify(
+        context: Context, id: Int, channel: String, title: String, body: String,
+        prompt: String?, taskId: String? = null
+    ) {
         ensureChannels(context)
 
         val open = Intent(context, MainActivity::class.java).apply {
@@ -138,14 +185,15 @@ object Reminders {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = Notification.Builder(context, channel)
+        val builder = Notification.Builder(context, channel)
             .setSmallIcon(android.R.drawable.ic_popup_reminder)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(Notification.BigTextStyle().bigText(body))
             .setContentIntent(pending)
             .setAutoCancel(true)
-            .build()
+        taskId?.let { id2 -> taskActions(context, id2).forEach { builder.addAction(it) } }
+        val notification = builder.build()
 
         try {
             context.getSystemService(NotificationManager::class.java)?.notify(id, notification)
@@ -170,6 +218,28 @@ class AlarmReceiver : BroadcastReceiver() {
             return
         }
 
+        // Acting on a reminder from the shade, without opening the app.
+        when (intent.action) {
+            Reminders.ACTION_DONE -> {
+                val id = intent.getStringExtra(Reminders.EXTRA_ID) ?: return
+                val list = Store.tasks()
+                list.firstOrNull { it.id == id }?.let { task ->
+                    task.done = true
+                    Store.saveTasks(list)
+                    Reminders.cancelTask(context, id)
+                    Log.info("completed from the notification: ${task.title}")
+                }
+                context.getSystemService(android.app.NotificationManager::class.java)?.cancel(id.hashCode())
+                return
+            }
+            Reminders.ACTION_SNOOZE -> {
+                val id = intent.getStringExtra(Reminders.EXTRA_ID) ?: return
+                Reminders.snooze(context, id)
+                context.getSystemService(android.app.NotificationManager::class.java)?.cancel(id.hashCode())
+                return
+            }
+        }
+
         when (intent.getStringExtra(Reminders.EXTRA_KIND)) {
             "task" -> {
                 val id = intent.getStringExtra(Reminders.EXTRA_ID) ?: return
@@ -179,7 +249,7 @@ class AlarmReceiver : BroadcastReceiver() {
                 val body = if (due != null) {
                     "Due ${Store.localIso(due).replace("T", " ").take(16)}"
                 } else "Due now"
-                Reminders.notify(context, id.hashCode(), "tasks", task.title, body, null)
+                Reminders.notify(context, id.hashCode(), "tasks", task.title, body, null, task.id)
                 Log.info("reminded: ${task.title}")
             }
             "routine" -> {
