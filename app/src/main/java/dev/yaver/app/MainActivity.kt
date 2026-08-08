@@ -234,59 +234,52 @@ class MainActivity : Activity() {
 
     // ── chrome ───────────────────────────────────────────────────────────────
 
+    /**
+     * The top bar.
+     *
+     * The first version put the wordmark, the model name and three Buttons in
+     * one row and let them fight: the mark wrapped mid-word, and each Button
+     * claimed Android's 64dp minimum whether it needed it or not. Here the
+     * name and model sit in a column that takes the leftover space, and the
+     * actions are glyph-sized text views that take exactly what they need.
+     */
     private fun buildTopBar(): View {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(10), dp(8), dp(10))
-            setBackgroundColor(paper)
+            setPadding(dp(16), dp(12), dp(8), dp(8))
         }
 
-        // The mark: Y with the Z carried as an exponent.
-        val mark = TextView(this).apply {
-            text = android.text.Html.fromHtml("Y<sup><small>z</small></sup>aver", 0)
-            setTextColor(ink)
-            textSize = 20f
-            typeface = Typeface.SERIF
+        val titles = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        bar.addView(mark)
-
-        bar.addView(TextView(this).apply {
+        titles.addView(TextView(this).apply {
+            text = android.text.Html.fromHtml("Y<sup><small>z</small></sup>aver", 0)
+            setTextColor(ink)
+            textSize = 21f
+            typeface = Typeface.SERIF
+            maxLines = 1
+            // Without this the superscript markup gives the layout an excuse to
+            // break the word across two lines.
+            setSingleLine(true)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        titles.addView(TextView(this).apply {
             text = Store.model().substringAfterLast('/')
             setTextColor(faint)
-            textSize = 11f
+            textSize = 10.5f
             typeface = Typeface.MONOSPACE
-            setPadding(0, 0, dp(10), 0)
+            maxLines = 1
+            setSingleLine(true)
+            ellipsize = android.text.TextUtils.TruncateAt.END
         })
+        bar.addView(titles)
 
-        bar.addView(Button(this).apply {
-            text = "🔊"
-            isAllCaps = false
-            textSize = 15f
-            setTextColor(soft)
-            setBackgroundColor(Color.TRANSPARENT)
-            minWidth = 0
-            minimumWidth = 0
-            setPadding(dp(8), 0, dp(8), 0)
-            setOnClickListener { speak() }
-        })
-        bar.addView(Button(this).apply {
-            text = "☰"
-            isAllCaps = false
-            textSize = 16f
-            setTextColor(soft)
-            setBackgroundColor(Color.TRANSPARENT)
-            setOnClickListener { showSessions() }
-        })
-        bar.addView(Button(this).apply {
-            text = "New"
-            isAllCaps = false
-            textSize = 13f
-            setTextColor(signal)
-            setBackgroundColor(Color.TRANSPARENT)
-            setOnClickListener { newSession() }
-        })
+        bar.addView(iconAction("🔊", soft) { speak() })
+        bar.addView(iconAction("☰", soft) { showSessions() })
+        bar.addView(iconAction("＋", signal) { newSession() })
+
         return bar
     }
 
@@ -312,18 +305,11 @@ class MainActivity : Activity() {
         }
         row.addView(input)
 
-        val micButton = Button(this).apply {
-            text = "🎙"
-            textSize = 17f
-            setTextColor(soft)
-            setBackgroundColor(Color.TRANSPARENT)
-            minWidth = 0
-            minimumWidth = 0
-            setPadding(dp(6), 0, dp(6), 0)
-            layoutParams = LinearLayout.LayoutParams(dp(42), dp(46))
-            setOnClickListener { startDictation() }
-        }
-        row.addView(micButton)
+        row.addView(iconAction("🎙", soft) { startDictation() }.apply {
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(46)).apply {
+                gravity = Gravity.BOTTOM
+            }
+        })
 
         sendButton = Button(this).apply {
             text = "→"
@@ -344,12 +330,14 @@ class MainActivity : Activity() {
             setPadding(dp(10), 0, dp(10), dp(10))
             setBackgroundColor(paper)
         }
-        fun tab(label: String, onClick: () -> Unit) = Button(this).apply {
+        fun tab(label: String, onClick: () -> Unit) = TextView(this).apply {
             text = label
-            isAllCaps = false
-            textSize = 12f
+            textSize = 12.5f
+            gravity = Gravity.CENTER
             setTextColor(soft)
-            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(0, dp(8), 0, dp(8))
+            maxLines = 1
+            isClickable = true
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener { onClick() }
         }
