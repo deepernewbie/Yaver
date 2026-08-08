@@ -439,6 +439,31 @@ object Store {
         "- ${sk.name}: ${sk.title}" + if (sk.useWhen.isNotBlank()) " — use when ${sk.useWhen}" else ""
     }
 
+    // ── artifacts ────────────────────────────────────────────────────────────
+    //
+    // Things the agent makes that outlive the conversation: reports, notes,
+    // small pages. Kept as files so they can be reopened, shared and deleted
+    // long after the chat that produced them has scrolled away.
+
+    const val ARTIFACT_DIR = "artifacts"
+
+    data class Artifact(val path: String, val name: String, val bytes: Int, val modified: Long)
+
+    fun artifacts(): List<Artifact> =
+        listFiles(ARTIFACT_DIR).mapNotNull { name ->
+            val text = readText("$ARTIFACT_DIR/$name") ?: return@mapNotNull null
+            Artifact("$ARTIFACT_DIR/$name", name, text.length, fileModified("$ARTIFACT_DIR/$name"))
+        }.sortedByDescending { it.modified }
+
+    private fun fileModified(name: String): Long =
+        try { File(appContext.filesDir, name).lastModified() } catch (e: Exception) { 0L }
+
+    fun writeArtifact(name: String, content: String): String {
+        val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "-").take(80).ifEmpty { "note.txt" }
+        writeText("$ARTIFACT_DIR/$safe", content)
+        return "$ARTIFACT_DIR/$safe"
+    }
+
     // ── usage ────────────────────────────────────────────────────────────────
 
     private const val USAGE = "usage.json"

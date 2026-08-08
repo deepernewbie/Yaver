@@ -386,10 +386,66 @@ class MainActivity : Activity() {
         return tv
     }
 
+    /**
+     * Turn a markdown pipe table into aligned monospace text.
+     *
+     * A TextView cannot lay out a real table, and models produce them
+     * constantly — vocabulary lists, comparisons, prices. Aligned columns in a
+     * fixed-width block is the honest version of the same information.
+     */
+    private fun renderTables(md: String): String {
+        val lines = md.split("\n")
+        val out = StringBuilder()
+        var i = 0
+        while (i < lines.size) {
+            val isSeparator = i + 1 < lines.size &&
+                lines[i].contains('|') &&
+                Regex("^\\s*\\|?[\\s:|-]*-[\\s:|-]*\\|?\\s*$").matches(lines[i + 1])
+
+            if (!isSeparator) { out.append(lines[i]).append('\n'); i++; continue }
+
+            val rows = mutableListOf<List<String>>()
+            fun cells(line: String) = line.trim()
+                .removePrefix("|").removeSuffix("|")
+                .split('|').map { it.trim() }
+
+            rows.add(cells(lines[i]))
+            var j = i + 2
+            while (j < lines.size && lines[j].contains('|')) { rows.add(cells(lines[j])); j++ }
+
+            val columns = rows.maxOf { it.size }
+            val widths = IntArray(columns)
+            rows.forEach { r -> r.forEachIndexed { c, v -> widths[c] = maxOf(widths[c], v.length) } }
+            // A very wide column would wrap and destroy the alignment anyway.
+            for (c in widths.indices) widths[c] = widths[c].coerceAtMost(22)
+
+            out.append("<tt>")
+            rows.forEachIndexed { index, r ->
+                val line = (0 until columns).joinToString("  ") { c ->
+                    (r.getOrElse(c) { "" }).take(widths[c]).padEnd(widths[c])
+                }.trimEnd()
+                out.append(line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+                out.append("<br>")
+                if (index == 0) {
+                    out.append("─".repeat(minOf(widths.sum() + (columns - 1) * 2, 60))).append("<br>")
+                }
+            }
+            out.append("</tt>\n")
+            i = j
+        }
+        return out.toString()
+    }
+
     /** Just enough markdown for what models emit: bold, code, headings, bullets. */
     private fun render(md: String): CharSequence {
-        val html = md
-            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        val withTables = renderTables(md)
+        // The table renderer already emits escaped HTML inside <tt>…</tt>, so
+        // protect those blocks from a second round of escaping.
+        val parts = withTables.split("<tt>", "</tt>")
+        val html = parts.mapIndexed { index, part ->
+            if (index % 2 == 1) "<tt>$part</tt>"
+            else part.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        }.joinToString("")
             .replace(Regex("`([^`]+)`"), "<tt>$1</tt>")
             .replace(Regex("\\*\\*([^*]+)\\*\\*"), "<b>$1</b>")
             .replace(Regex("(?m)^#{1,6}\\s*(.+)$"), "<b>$1</b>")
@@ -515,6 +571,15 @@ class MainActivity : Activity() {
                             "I need access to your phone calendar to read or change events. Android asks you directly — nothing is shared anywhere.",
                             true, Pair("Grant calendar access", { Calendar.request(this@MainActivity) })
                         )
+                        "html", "file" -> {
+                            val path = card.optString("path")
+                            val title = card.optString("title", "Document")
+                            addCard(
+                                if (card.optString("type") == "html") "Report" else "Saved",
+                                title, false,
+                                Pair("Open", { openArtifact(path, title) })
+                            )
+                        }
                         "event" -> addCard(
                             "Added to your calendar",
                             "${card.optString("title")}\n${card.optString("starts")}",
@@ -761,20 +826,157 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("More")
             .setItems(arrayOf(
-                "Conversations", "Skills", "Usage",
+                "Files", "Shared with me", "Conversations", "Skills", "Usage",
                 "Compress this conversation", "Settings", "Debug log"
             )) { _, index ->
                 when (index) {
-                    0 -> showSessions()
-                    1 -> showSkills()
-                    2 -> showUsage()
-                    3 -> compressConversation()
-                    4 -> showSettings()
-                    5 -> showDebug()
+                    0 -> showFiles()
+                    1 -> showInbox()
+                    2 -> showSessions()
+                    3 -> showSkills()
+                    4 -> showUsage()
+                    5 -> compressConversation()
+                    6 -> showSettings()
+                    7 -> showDebug()
                 }
             }
             .setNegativeButton("Close", null)
             .show()
+    }
+
+    /**
+     * Open a saved document. HTML goes into a WebView so a report looks like a
+     * report; anything else is shown as text.
+     */
+    private fun openArtifact(path: String, title: String) {
+        val text = Store.readText(path)
+        if (text == null) { toast("That file is gone"); return }
+
+        val content: View = if (path.endsWith(".html", true)) {
+            android.webkit.WebView(this).apply {
+                settings.javaScriptEnabled = false
+                settings.loadWithOverviewMode = true
+                settings.useWideViewPort = true
+                setBackgroundColor(Color.WHITE)
+                loadDataWithBaseURL(null, text, "text/html", "UTF-8", null)
+            }
+        } else {
+            ScrollView(this).apply {
+                addView(TextView(this@MainActivity).apply {
+                    this.text = render(text)
+                    setTextColor(ink)
+                    textSize = 14f
+                    setPadding(dp(16), dp(12), dp(16), dp(16))
+                })
+            }
+        }
+
+        val frame = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(paper)
+        }
+        frame.addView(TextView(this).apply {
+            this.text = title
+            setTextColor(ink); textSize = 18f
+            typeface = Typeface.SERIF
+            setPadding(dp(18), dp(16), dp(18), dp(8))
+        })
+        frame.addView(content, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val dialog = AlertDialog.Builder(this).setView(frame).create()
+        bar.addView(TextView(this).apply {
+            this.text = "Share"
+            setTextColor(signal); textSize = 15f
+            setPadding(dp(18), dp(12), dp(18), dp(16))
+            isClickable = true
+            setOnClickListener {
+                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                    type = if (path.endsWith(".html", true)) "text/html" else "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, title)
+                    putExtra(Intent.EXTRA_TEXT, text)
+                }, "Share $title"))
+            }
+        })
+        bar.addView(TextView(this).apply {
+            this.text = "Close"
+            setTextColor(soft); textSize = 15f
+            gravity = Gravity.END
+            setPadding(dp(18), dp(12), dp(20), dp(16))
+            isClickable = true
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { dialog.dismiss() }
+        })
+        frame.addView(bar)
+
+        dialog.show()
+        dialog.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.97).toInt(),
+            (resources.displayMetrics.heightPixels * 0.9).toInt()
+        )
+    }
+
+    private fun showFiles() = sheet("Files") { box ->
+        val list = Store.artifacts()
+        if (list.isEmpty()) {
+            box.addView(rowLabel("Nothing saved yet.", faint))
+            box.addView(rowLabel(
+                "Reports and notes I make for you collect here, and stay after the conversation goes.",
+                faint, 12f))
+            return@sheet
+        }
+        list.forEach { a ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val main = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            main.addView(rowLabel(a.name))
+            main.addView(rowLabel(
+                "${a.bytes} chars · " +
+                SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(Date(a.modified)),
+                faint, 11f))
+            main.setOnClickListener { openArtifact(a.path, a.name) }
+            row.addView(main)
+            row.addView(iconAction("×", faint) { Store.delete(a.path); toast("Deleted") })
+            box.addView(row)
+        }
+    }
+
+    private fun showInbox() = sheet("Shared with me") { box ->
+        val items = Store.forwards()
+        if (items.isEmpty()) {
+            box.addView(rowLabel("Nothing shared yet.", faint))
+            box.addView(rowLabel(
+                "In any app — WhatsApp, a browser, Maps — use Share and pick Yaver. " +
+                "It arrives here and I treat it as something you handed me on purpose.",
+                faint, 12f))
+            return@sheet
+        }
+        box.addView(rowLabel("${items.size} item(s)", soft, 12f))
+        items.forEach { f ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(8), 0, dp(8))
+            }
+            row.addView(rowLabel(
+                SimpleDateFormat("d MMM HH:mm", Locale.getDefault()).format(Date(f.ts)), faint, 11f))
+            row.addView(rowLabel(f.text.take(400)))
+            row.setOnClickListener {
+                input.setText("Bunu ele al:\n\n${f.text.take(2000)}")
+                toast("Added to the composer")
+            }
+            box.addView(row)
+        }
+        box.addView(rowLabel(""))
+        box.addView(Button(this).apply {
+            text = "Clear all"
+            isAllCaps = false
+            setTextColor(faint)
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnClickListener { Store.clearForwards(); toast("Cleared") }
+        })
     }
 
     private fun showSkills() = sheet("Skills") { box ->

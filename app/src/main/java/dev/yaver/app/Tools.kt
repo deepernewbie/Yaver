@@ -492,6 +492,58 @@ object Tools {
             }
         },
 
+        // ── things the user keeps ────────────────────────────────────────────
+
+        Tool("render_html",
+            "Show the user a formatted page: a report, a comparison, a table, a summary with structure. It appears in the conversation as a card they can open full screen, and is saved so they can reopen it later. Write a complete, self-contained HTML document with its own inline CSS — no external stylesheets or scripts, they will not load.",
+            mapOf(
+                "title" to "Short title for the card.",
+                "html" to "A complete HTML document.",
+                "save_as" to "Optional filename, e.g. \"casio-comparison.html\"."
+            )
+        ) { _, args ->
+            val html = args.str("html")
+            if (html.trim().length < 20) throw ToolError("html is required")
+            val title = args.str("title", "Report")
+            val name = args.str("save_as").ifBlank {
+                title.replace(Regex("[^A-Za-z0-9]+"), "-").lowercase(Locale.ROOT).take(40) + ".html"
+            }
+            val path = Store.writeArtifact(if (name.endsWith(".html")) name else "$name.html", html)
+            ok("rendered" to true, "saved" to path,
+                "note" to "Shown on screen and saved. Tell the user it is under Files.",
+                "card" to JSONObject().put("type", "html").put("title", title).put("path", path))
+        },
+
+        Tool("write_file",
+            "Save something the user will keep and reread — a note, a list, a draft. For anything with structure prefer render_html; use this for plain text and markdown.",
+            mapOf("name" to "Filename, e.g. \"packing-list.md\".", "content" to "The file contents.")
+        ) { _, args ->
+            val content = args.str("content")
+            if (content.isEmpty()) throw ToolError("content is required")
+            val path = Store.writeArtifact(args.str("name", "note.md"), content)
+            ok("written" to true, "path" to path, "chars" to content.length,
+                "card" to JSONObject().put("type", "file").put("title", args.str("name", "note.md")).put("path", path))
+        },
+
+        Tool("read_file", "Read something you saved earlier.",
+            mapOf("path" to "Path from list_files or from an earlier write.")
+        ) { _, args ->
+            val path = args.str("path")
+            val text = Store.readText(path) ?: Store.readText("${Store.ARTIFACT_DIR}/$path")
+                ?: throw ToolError("No file at $path. Call list_files.")
+            ok("path" to path, "chars" to text.length, "text" to text.take(20000))
+        },
+
+        Tool("list_files", "List what you have saved for the user.", mapOf()
+        ) { _, _ ->
+            val list = Store.artifacts()
+            val arr = JSONArray()
+            list.forEach {
+                arr.put(JSONObject().put("path", it.path).put("name", it.name).put("chars", it.bytes))
+            }
+            ok("count" to list.size, "files" to arr)
+        },
+
         // ── arithmetic ───────────────────────────────────────────────────────
 
         Tool("calculate",

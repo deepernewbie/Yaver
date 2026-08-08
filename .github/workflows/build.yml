@@ -56,14 +56,14 @@ jobs:
             exit 1
           fi
           SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-          cp "$SRC" "Yaver-$SHORT.apk"
-          echo "Collected Yaver-$SHORT.apk"
+          cp "$SRC" "Yaver.apk"
+          echo "Collected Yaver.apk from $SRC (commit $SHORT)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk
-          path: Yaver-*.apk
+          path: Yaver.apk
           retention-days: 30
           if-no-files-found: error
 
@@ -72,8 +72,10 @@ jobs:
         with:
           tag_name: latest
           name: Latest Yaver build
-          body: Built from `${{ github.sha }}`.
-          files: Yaver-*.apk
+          body: |
+            Commit `${{ github.sha }}`
+            Built ${{ github.run_started_at }}
+          files: Yaver.apk
           prerelease: true
           fail_on_unmatched_files: true
         env:

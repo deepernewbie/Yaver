@@ -118,6 +118,8 @@ object Agent {
             append("- Keep a profile: `read_profile` then `update_profile` whenever you learn something structural about who they are. It is loaded into every future conversation.\n")
             append("- After finishing anything non-trivial you could be asked for again, write a `create_skill`: the format that worked, the steps, what surprised you. Next time, read it and start where you left off.\n")
             append("- When they refer to something from before, call `search_history` rather than saying you don't remember.\n")
+            append("- When an answer has real structure — a comparison, a table, a plan with sections, anything they will want to reread — use `render_html` instead of a long message. It becomes a document they keep.\n")
+            append("- Check `read_forwards` when they mention having sent or shared you something.\n")
             append("- Answer in the user's language, and match their register.\n")
             append("- Stop when you have enough. A partial answer with sources beats a perfect one that never arrives.\n\n")
 
