@@ -407,7 +407,8 @@ object Agent {
         var saved = 0
         for (i in 0 until minOf(arr.length(), 12)) {
             val o = arr.optJSONObject(i) ?: continue
-            val text = o.optString("text").ifBlank { continue }
+            val text = o.optString("text")
+            if (text.isBlank()) continue
             val entities = o.optJSONArray("entities")?.let { a ->
                 (0 until a.length()).map { a.optString(it) }
             } ?: emptyList()
