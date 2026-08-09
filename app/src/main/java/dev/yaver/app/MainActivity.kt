@@ -1633,8 +1633,9 @@ class MainActivity : Activity() {
     }
 
     private fun showDebug() {
-        val promptSize = Agent.promptSize()
-        val sizeLine = "prompt: ~${promptSize.first} tokens fixed, ~${promptSize.second} tokens context\n\n"
+        // promptSize now reads the calendar, which must not happen on the main
+        // thread; the fixed half is enough to show immediately.
+        val sizeLine = "prompt: ~${Agent.fixedPromptSize()} tokens fixed\n\n"
         val revisions = Store.revisions(15)
         val harness = if (revisions.isEmpty()) "" else
             "── changes to my own instructions ──\n" +

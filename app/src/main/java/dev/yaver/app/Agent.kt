@@ -122,6 +122,8 @@ object Agent {
         append("- Finish the thought the user started: a mentioned meeting wants a calendar entry, a deadline wants a task. Prepare it, say what you inferred, and let them correct you. Never do anything irreversible.\n")
         append("- Keep a profile up to date with `profile` action=update, and write a `skill` for any job you may be asked to repeat.\n")
         append("- Answer in the user's language, and match their register.\n")
+        append("- Do several things in one reply when they are independent — four tasks from four calendar entries is one reply with four calls, not four turns. Turns are expensive and rate limits are real.\n")
+        append("- Never re-run a call you have already made in this exchange. If a tool has told you something, use it; do not read the calendar twice to be sure.\n")
         append("- Stop when you have enough. A partial answer with sources beats a perfect one that never arrives.\n")
     }
 
@@ -154,22 +156,38 @@ object Agent {
             append("\n")
         }
 
-        // Counts, not contents: enough to know whether looking is worthwhile.
-        val open = Store.tasks().count { !it.done }
-        val urgent = Store.tasks().count { Store.urgency(it, now) == "overdue" }
-        if (open > 0) {
-            append("open tasks: $open")
-            if (urgent > 0) append(" ($urgent overdue)")
-            append(" — use list_tasks to see them\n")
+        // Contents, not counts. Telling the model there are three tasks and
+        // making it fetch them means it either spends a turn or, worse, asks
+        // the user what they are.
+        val open = Store.tasks().filter { !it.done }
+        if (open.isNotEmpty()) {
+            append("\nopen tasks:\n")
+            open.take(12).forEach { t ->
+                val due = t.due?.let { " — ${Store.localIso(it).replace("T", " ").take(16)}" } ?: ""
+                val flag = Store.urgency(t, now)?.takeIf { it != "later" }?.let { " [$it]" } ?: ""
+                append("- ${t.title}$due$flag\n")
+            }
+            if (open.size > 12) append("- …and ${open.size - 12} more\n")
         }
+        if (Calendar.canRead(Store.appContext)) {
+            val soon = Calendar.list(Store.appContext, now, now + 3 * 86_400_000L, 8)
+            if (soon.isNotEmpty()) {
+                append("\nnext three days in the calendar:\n")
+                soon.forEach { e ->
+                    append("- ${Store.localIso(e.start).replace("T", " ").take(16)} ${e.title}\n")
+                }
+                append("(use calendar action=read for a wider window)\n")
+            }
+        }
+
         if (NotificationCapture.isEnabled()) {
             val recent = Store.messages(now - 86_400_000L, limit = 40).size
             if (recent > 0) append("messages in the last day: $recent — open the messages group to read them\n")
         }
 
-        // The three memories most relevant to what was just said. Cheap, and it
-        // stops the agent asking about things it already knows.
-        val memories = Store.recall(userText, 3)
+        // Memories relevant to what was just said. Cheap, and it stops the
+        // agent asking about things it already knows.
+        val memories = Store.recall(userText, 6)
         if (memories.isNotEmpty()) {
             append("\nrelevant memories:\n")
             memories.forEach { append("- ${it.text}\n") }
@@ -182,14 +200,8 @@ object Agent {
         if (pendingNudge.isNotBlank()) append("\n$pendingNudge\n")
     }
 
-    /** Rough sizes for the Debug panel — four characters to a token. */
-    fun promptSize(): Pair<Int, Int> {
-        val fixed = systemPrompt().length / 4
-        val context = try {
-            contextBlock(Store.appContext, "").length / 4
-        } catch (e: Exception) { 0 }
-        return fixed to context
-    }
+    /** Rough size of the unchanging half — four characters to a token. */
+    fun fixedPromptSize(): Int = systemPrompt().length / 4
 
     // ── tool-call parsing ────────────────────────────────────────────────────
     //
@@ -270,12 +282,20 @@ object Agent {
             }
         }
 
-        // Some emit the JSON with no wrapper at all, which is just as clear.
+        // Some emit the JSON with no wrapper at all, which is just as clear —
+        // but only when that JSON is the whole message. A model explaining a
+        // command to the user, or showing an example in a code fence, must not
+        // have it executed on their behalf.
         if (calls.isEmpty()) {
-            balancedJson(text)?.let { candidate ->
-                if (candidate.contains("\"name\"") &&
-                    (candidate.contains("\"arguments\"") || candidate.contains("\"parameters\""))) {
-                    calls.add(parseOne(candidate))
+            val bare = text.trim()
+                .removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+            if (bare.startsWith("{") && bare.endsWith("}")) {
+                balancedJson(bare)?.let { candidate ->
+                    if (candidate.length >= bare.length - 2 &&
+                        candidate.contains("\"name\"") &&
+                        (candidate.contains("\"arguments\"") || candidate.contains("\"parameters\""))) {
+                        calls.add(parseOne(candidate))
+                    }
                 }
             }
         }
@@ -380,11 +400,23 @@ object Agent {
                 listener.onAssistantTurnStart()
 
                 val raw = StringBuilder()
-                Llm.stream(convo) { delta ->
-                    raw.append(delta)
-                    // Only prose reaches the screen; a half-written tool tag
-                    // shown to the user reads as garbage.
-                    listener.onAssistantToken(delta)
+                try {
+                    Llm.stream(convo) { delta ->
+                        raw.append(delta)
+                        // Only prose reaches the screen; a half-written tool tag
+                        // shown to the user reads as garbage.
+                        listener.onAssistantToken(delta)
+                    }
+                } catch (err: Exception) {
+                    // Losing three completed tool calls to a rate limit on the
+                    // fourth is the worst possible outcome: the work happened,
+                    // and the user is shown an error. Keep it and say so.
+                    if (toolsRun == 0) throw err
+                    Log.error("model call failed after $toolsRun tool(s) — keeping the work")
+                    finalText = "I got part of the way and then the model stopped: " +
+                        "${err.message ?: err}\n\n" +
+                        "What ran did take effect — check the panels. Say \"devam\" and I'll carry on."
+                    break
                 }
 
                 val text = raw.toString()

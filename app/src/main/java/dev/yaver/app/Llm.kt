@@ -73,7 +73,7 @@ object Llm {
      * quickly. A short wait almost always clears it, and losing a minute of
      * finished work to one refused call is the worst possible outcome.
      */
-    private fun <T> withRetry(tries: Int = 4, block: () -> T): T {
+    private fun <T> withRetry(tries: Int = 6, block: () -> T): T {
         var wait = 1500L
         var attempt = 1
         while (true) {
@@ -83,7 +83,9 @@ object Llm {
                 if (!e.rateLimited || attempt >= tries || cancelled) throw e
                 Log.info("Rate limited — waiting ${wait}ms then retrying ($attempt/${tries - 1})")
                 Thread.sleep(wait)
-                wait = minOf(wait * 2, 12000)
+                // A free tier's window is a minute; giving up after six
+                // seconds guarantees failure just as it was about to clear.
+                wait = minOf(wait * 2, 25000)
                 attempt++
             }
         }

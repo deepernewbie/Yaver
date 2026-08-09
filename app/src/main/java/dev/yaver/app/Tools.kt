@@ -968,13 +968,14 @@ object Tools {
     val byName: Map<String, Tool> = primitiveByName
 
     /**
-     * The whole tool surface, compactly.
+     * The whole tool surface, with what each parameter means.
      *
-     * Each subject gets a line, then one line per action listing only the
-     * parameter names. The full prose for each parameter lived in the prompt
-     * before and cost four thousand tokens; the names alone are enough for a
-     * model to fill them in, and anything genuinely ambiguous is spelled out
-     * in the description.
+     * An earlier version listed parameter names only, to save tokens. It saved
+     * about fifteen hundred and cost far more than that: a model that reads
+     * `due` without being told the format guesses, and a model that reads
+     * `action: add | list` without being told what `status` accepts asks the
+     * user instead of acting. Names are an index; the descriptions are the
+     * information.
      */
     fun schemaText(): String = buildString {
         facades.forEach { facade ->
@@ -982,17 +983,19 @@ object Tools {
             append("    action: ").append(facade.actions.keys.joinToString(" | ")).append('\n')
             facade.actions.forEach { (action, primitive) ->
                 val tool = primitiveByName[primitive] ?: return@forEach
-                if (tool.parameters.isEmpty()) return@forEach
-                append("    ").append(action).append(" → ")
-                    .append(tool.parameters.keys.joinToString(", ")).append('\n')
+                append("\n    action=\"").append(action).append("\" — ")
+                    .append(tool.description).append('\n')
+                tool.parameters.forEach { (key, what) ->
+                    append("        ").append(key).append(": ").append(what).append('\n')
+                }
             }
             append('\n')
         }
 
         primitives.filter { it.name in STANDALONE }.forEach { tool ->
-            append("- ").append(tool.name).append(": ").append(tool.description.take(200)).append('\n')
-            if (tool.parameters.isNotEmpty()) {
-                append("    ").append(tool.parameters.keys.joinToString(", ")).append('\n')
+            append("- ").append(tool.name).append(": ").append(tool.description).append('\n')
+            tool.parameters.forEach { (key, what) ->
+                append("        ").append(key).append(": ").append(what).append('\n')
             }
             append('\n')
         }
