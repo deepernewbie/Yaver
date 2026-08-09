@@ -104,6 +104,9 @@ object Llm {
             .put("model", model)
             .put("messages", msgs)
             .put("temperature", temperature)
+            // Some providers default to a small completion budget, which
+            // truncates a tool call mid-JSON and looks like the model refusing.
+            .put("max_tokens", 2048)
             .put("stream", true)
             .put("stream_options", JSONObject().put("include_usage", true))
 
@@ -150,7 +153,8 @@ object Llm {
             msgs.put(JSONObject().put("role", role).put("content", content))
         }
         val body = JSONObject()
-            .put("model", model).put("messages", msgs).put("temperature", temperature)
+            .put("model", model).put("messages", msgs)
+            .put("temperature", temperature).put("max_tokens", 2048)
 
         val conn = connect(body)
         if (conn.responseCode !in 200..299) throw failure(conn)

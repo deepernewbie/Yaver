@@ -97,6 +97,16 @@ object Agent {
         append("## Saying it is not doing it\n\n")
         append("Announcing an action does not perform it. If you write that you are adding a task or creating an event, emit the tool call in that same reply. Describe what you did in the past tense only after seeing the tool result.\n\n")
 
+        // A worked exchange is worth more to a small model than any amount of
+        // instruction about format. This is the shape of nearly every turn.
+        append("### What a turn looks like\n\n")
+        append("User: yarın 10'da Yavuz abiyle toplantı var, hatırlat\n\n")
+        append("You (nothing but the call):\n")
+        append("<tool_call>\n{\"name\": \"task\", \"arguments\": {\"action\": \"add\", \"title\": \"Yavuz abiyle toplantı\", \"due\": \"2026-08-11T10:00\", \"remind\": 30}}\n</tool_call>\n\n")
+        append("Then you receive:\n<tool_response>{\"added\": true, \"due\": \"2026-08-11T10:00:00+03:00\"}</tool_response>\n\n")
+        append("You (now, and only now, in the past tense):\nEklendi — yarın 10:00, yarım saat önce hatırlatırım.\n\n")
+        append("Never write \"ekliyorum\" or \"I'll add that\" without the call in the same reply. Either call the tool or say you have not.\n\n")
+
         append("## Never invent specifics\n\n")
         append("- Never state a price, date, figure or URL you did not read from a tool result in this conversation.\n")
         append("- Every link must be one that appeared in a tool result. Never build a URL from a pattern.\n")
@@ -260,8 +270,21 @@ object Agent {
         return calls
     }
 
+    /**
+     * Reasoning models wrap their working in <think> tags, and some emit a
+     * stray closing tag with no opener when the provider trims the front. Tool
+     * calls are parsed from the whole text — a call inside a think block still
+     * counts — but none of it should reach the screen.
+     */
+    private val THINK = Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE)
+    private val THINK_OPEN = Regex("<think>[\\s\\S]*$", RegexOption.IGNORE_CASE)
+    private val THINK_ORPHAN = Regex("^[\\s\\S]*?</think>", RegexOption.IGNORE_CASE)
+
     /** Removes finished calls and any half-streamed opening tag still arriving. */
     fun stripCalls(text: String): String = text
+        .replace(THINK, "")
+        .let { if (it.contains("</think>", true)) it.replace(THINK_ORPHAN, "") else it }
+        .replace(THINK_OPEN, "")
         .replace(CALL_RE, "")
         .replace(FN_TAG_RE, "")
         .replace(Regex("<(tool_call|function_call|tool_use)>[\\s\\S]*$"), "")
@@ -287,6 +310,7 @@ object Agent {
         var finalText = ""
         var toolsRun = 0
         var consecutiveFailures = 0
+        var corrections = 0
         var lastSignature = ""
         var repeats = 0
         val urlsSeen = mutableSetOf<String>()
@@ -315,6 +339,20 @@ object Agent {
                 }
 
                 if (calls.isEmpty()) {
+                    // "I'll add that" with no tool call is the commonest way a
+                    // weaker model fails: it reads as success and nothing
+                    // happened. One corrective round usually recovers it.
+                    if (corrections < 2 && announcesAction(prose)) {
+                        corrections++
+                        Log.error("turn ${turn + 1}: announced an action without calling a tool — correcting")
+                        convo.add("assistant" to text)
+                        convo.add("user" to (
+                            "You said you would do that, but you emitted no tool call, so nothing happened. " +
+                            "Emit the call now, alone, in exactly this shape and nothing else:\n" +
+                            "<tool_call>\n{\"name\": \"task\", \"arguments\": {\"action\": \"add\", \"title\": \"…\"}}\n</tool_call>\n" +
+                            "Replace the name and arguments with what the user actually asked for."))
+                        continue
+                    }
                     finalText = prose.ifBlank {
                         if (toolsRun > 0) "Done." else "(The model returned an empty response. Try again, or switch model in Settings.)"
                     }
@@ -454,6 +492,26 @@ object Agent {
             "calendar_read" -> " — ${result.optInt("count")} events"
             else -> ""
         }
+    }
+
+    /**
+     * Does this read as a promise rather than a report?
+     *
+     * Present continuous and first-person future are the tells, in both
+     * languages. Deliberately narrow: mistaking a finished report for a
+     * promise would send the agent round again for nothing.
+     */
+    private val ANNOUNCES = Regex(
+        "(ekliyorum|ekleyeyim|ekliyeyim|kaydediyorum|kaydedeyim|oluşturuyorum|olusturuyorum|" +
+        "bakıyorum|bakiyorum|arıyorum|ariyorum|yapıyorum|yapiyorum|hallediyorum|ayarlıyorum|" +
+        "ayarliyorum|kuruyorum|siliyorum|güncelliyorum|guncelliyorum|" +
+        "let me |i'?ll |i will |going to |adding |creating |checking |searching |setting up )",
+        RegexOption.IGNORE_CASE)
+
+    private fun announcesAction(prose: String): Boolean {
+        val text = prose.trim()
+        if (text.isEmpty() || text.length > 400) return false
+        return ANNOUNCES.containsMatchIn(text)
     }
 
     /** Near-identical after collapsing whitespace and case. */
