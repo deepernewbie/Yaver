@@ -329,6 +329,9 @@ object Agent {
      * calls are parsed from the whole text — a call inside a think block still
      * counts — but none of it should reach the screen.
      */
+    /** A wrapper-less JSON call, which would otherwise be shown to the user. */
+    private val BARE_JSON_CALL = Regex("^\\s*\\{\\s*[\"']?name[\"']?\\s*:[\\s\\S]*$")
+
     private val THINK = Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE)
     private val THINK_OPEN = Regex("<think>[\\s\\S]*$", RegexOption.IGNORE_CASE)
     private val THINK_ORPHAN = Regex("^[\\s\\S]*?</think>", RegexOption.IGNORE_CASE)
@@ -342,7 +345,7 @@ object Agent {
         .replace(FN_TAG_RE, "")
         .replace(Regex("<(tool_call|function_call|tool_use)>[\\s\\S]*$"), "")
         // A bare JSON call with no wrapper would otherwise be shown as prose.
-        .replace(Regex("^\\s*\\{\\s*"name"[\\s\\S]*$"), "")
+        .replace(BARE_JSON_CALL, "")
         .replace(Regex("<function\\s*=[\\s\\S]*$"), "")
         .trim()
 
