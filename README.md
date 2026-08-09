@@ -121,28 +121,26 @@ Play Protect scanning once, install, turn it back on.
 
 ## Why the prompt is shaped the way it is
 
-Two halves, and the split matters more than it looks.
+One tool per subject, not one per verb. `calendar` with an action of read, add,
+update or delete — the way a person would describe it — rather than four
+separate tools. Nineteen subjects cover fifty-one underlying operations.
 
-The **fixed half** is identical on every turn: who it is, the rules, twelve
-core tool schemas, and a one-line index of ten further groups. A runtime that
-keeps processed prefixes — llama.cpp's KV cache, or a provider's prompt cache —
-can skip re-reading all of it.
+This went through a wrong turn worth recording. The first attempt put every
+tool behind a menu the agent had to open first: it made the prompt small, and
+made a weak model worse, because a model that struggles to take one step does
+not manage two. Size was never really the problem — choosing between fifty
+near-identical names was. Merging them fixes both at once, and the schema fell
+from about four thousand tokens to under a thousand without adding a round
+trip.
 
-The **changing half** rides with the user's message: the date, the profile,
-goal titles, a count of open tasks, three relevant memories. A few hundred
-tokens.
+The old names still work. A model that guesses `calendar_add` instead of
+`calendar` with action=add gets what it asked for rather than an error it has
+to recover from.
 
-What used to happen: all forty-odd tool schemas plus every relevant memory,
-task and message went into the system prompt, rebuilt from scratch each turn.
-Around ten thousand tokens before a word was written, and because it changed
-every time, no cache could help. Reading a whole codebase to answer one
-question about it.
-
-Now the agent opens the drawer it needs with `open_tools`, the schemas arrive
-in the conversation, and they stay. One extra round trip, and every turn after
-it is small. This is what makes a local model on a phone plausible at all —
-generation speed was never the bottleneck; re-reading ten thousand tokens of
-prompt was.
+The prompt is also split in two: a fixed half — identity, rules, the whole tool
+surface — identical on every turn and therefore cacheable, and a small changing
+half that rides with the user's message carrying the date, the profile, goal
+titles and a few relevant memories.
 
 ## Goals, and changing its own instructions
 

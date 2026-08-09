@@ -91,11 +91,8 @@ object Agent {
         append("- Several independent calls may go in one reply.\n")
         append("- Never invent a tool result, and never claim you searched or read something you did not.\n\n")
 
-        append("### Always available\n\n")
-        append(Tools.coreSchema())
-        append("\n\n### Everything else, behind `open_tools`\n\n")
-        append(Tools.groupIndex())
-        append("\n\nOpen a group before using it. The schemas arrive in the result and stay for the rest of the conversation, so open each one at most once.\n\n")
+        append(Tools.schemaText())
+        append("\nEach tool covers one subject and takes an `action`. Pass the action plus whatever that action needs — the parameter names are listed above.\n\n")
 
         append("## Saying it is not doing it\n\n")
         append("Announcing an action does not perform it. If you write that you are adding a task or creating an event, emit the tool call in that same reply. Describe what you did in the past tense only after seeing the tool result.\n\n")
@@ -107,12 +104,12 @@ object Agent {
         append("- When a site blocks you, name it and move on rather than filling the gap from memory.\n\n")
 
         append("## How to work\n\n")
-        append("- Ground answers about the user's world in their tasks, calendar and memory rather than assumptions. Open the group and look.\n")
+        append("- Ground answers about the user's world in their tasks, calendar and memory rather than assumptions. Look, do not guess.\n")
         append("- Search for anything current or verifiable; your training data is stale.\n")
-        append("- Two ways to read a page. `browse_open` downloads the HTML: fast, fine for articles. The `browser` group drives a real browser: slower, but it sees pages built by JavaScript and can dismiss banners, type and click. If a fetched page comes back thin or blocked, open it in the browser instead of guessing.\n")
+        append("- Two ways to read a page. `browse_open` downloads the HTML: fast, fine for articles. `browser` with action=open drives a real browser: slower, but it sees pages built by JavaScript and can dismiss banners, type and click. If a fetched page comes back thin or blocked, use the browser instead of guessing.\n")
         append("- Use `calculate` for arithmetic instead of doing it in your head.\n")
         append("- Finish the thought the user started: a mentioned meeting wants a calendar entry, a deadline wants a task. Prepare it, say what you inferred, and let them correct you. Never do anything irreversible.\n")
-        append("- Keep a profile and write skills for jobs you may be asked to repeat; both are in the `memory` and `skills` groups.\n")
+        append("- Keep a profile up to date with `profile` action=update, and write a `skill` for any job you may be asked to repeat.\n")
         append("- Answer in the user's language, and match their register.\n")
         append("- Stop when you have enough. A partial answer with sources beats a perfect one that never arrives.\n")
     }
@@ -309,8 +306,13 @@ object Agent {
                 }
 
                 val text = raw.toString()
+                Log.model(turn + 1, text)
                 val calls = parseCalls(text)
                 val prose = stripCalls(text)
+                if (calls.isEmpty() && text.contains("tool_call", ignoreCase = true)) {
+                    // It tried and the shape was wrong — worth saying so.
+                    Log.error("turn ${turn + 1}: emitted something tool-like that would not parse")
+                }
 
                 if (calls.isEmpty()) {
                     finalText = prose.ifBlank {
@@ -414,6 +416,16 @@ object Agent {
                 }
             }
 
+            // A model that answers the same thing twice is not answering; it is
+            // echoing. Silently letting it through leaves the user thinking
+            // their instruction was understood and refused.
+            val previous = history.lastOrNull { it.role == "assistant" }?.content
+            if (previous != null && toolsRun == 0 && similar(previous, finalText)) {
+                Log.error("model repeated its previous answer without acting")
+                finalText += "\n\n---\n_(I repeated myself and did not actually do anything — " +
+                    "this model is not following the tool format. Try a stronger one in Settings.)_"
+            }
+
             listener.onFinished(finalText)
         } catch (e: Exception) {
             Log.error("run failed: ${e.message}")
@@ -442,6 +454,19 @@ object Agent {
             "calendar_read" -> " — ${result.optInt("count")} events"
             else -> ""
         }
+    }
+
+    /** Near-identical after collapsing whitespace and case. */
+    private fun similar(a: String, b: String): Boolean {
+        fun norm(t: String) = t.lowercase(Locale.ROOT).replace(Regex("\\s+"), " ").trim()
+        val x = norm(a)
+        val y = norm(b)
+        if (x.isEmpty() || y.isEmpty()) return false
+        if (x == y) return true
+        val shorter = minOf(x.length, y.length)
+        val longer = maxOf(x.length, y.length)
+        if (shorter.toDouble() / longer < 0.85) return false
+        return x.take(shorter).commonPrefixWith(y.take(shorter)).length > shorter * 0.9
     }
 
     private fun nudgeAfterTurn() {

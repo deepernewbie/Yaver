@@ -1590,7 +1590,14 @@ class MainActivity : Activity() {
 
         val keyField = labelled("OpenRouter API key", Store.setting(Store.API_KEY), "sk-or-v1-…", true)
         val modelField = labelled("Model", Store.model(), "anthropic/claude-sonnet-4.5")
-        content.addView(rowLabel("Any slug from openrouter.ai/models. Small free models often ignore the tool format.", faint, 11f))
+        content.addView(rowLabel(
+            "Any slug from openrouter.ai/models.\n\n" +
+            "This app leans hard on tool calling, and small free models mostly cannot do it — " +
+            "they answer from the conversation instead of acting, often repeating themselves. " +
+            "If that is happening, it is the model, not the app.\n\n" +
+            "Known to work well: anthropic/claude-sonnet-4.5, openai/gpt-5, " +
+            "google/gemini-2.5-flash, qwen/qwen3-235b-a22b, deepseek/deepseek-chat.",
+            faint, 11f))
         val nameField = labelled("Your name", Store.setting(Store.USER_NAME), "How I should refer to you")
         val personaField = labelled("Standing instructions", Store.setting(Store.PERSONA),
             "e.g. Reply in Turkish. Keep summaries short.")

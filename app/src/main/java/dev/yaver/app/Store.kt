@@ -816,6 +816,19 @@ object Log {
     }
 
     fun info(message: String) = add("info", message)
+
+    /**
+     * What the model actually wrote.
+     *
+     * Without this a turn where nothing happens leaves no trace at all — no
+     * tool call, no error, an empty log and a user with only a screenshot.
+     * The raw output says immediately whether the model ignored the tools,
+     * emitted a call in the wrong shape, or simply repeated itself.
+     */
+    fun model(turn: Int, raw: String) {
+        val trimmed = raw.replace(Regex("\\s+"), " ").trim()
+        add("model", "turn $turn · ${raw.length} chars · ${trimmed.take(600)}")
+    }
     fun error(message: String) = add("error", message)
     fun tool(message: String) = add("tool", message)
     fun net(message: String) = add("net", message)

@@ -32,7 +32,7 @@ object SubAgent {
 
     // A sub-agent gets four tools and no drawers to open — its whole job is
     // narrow enough that browsing a menu would be wasted turns.
-    private fun toolSchema(): String = Tools.all
+    private fun toolSchema(): String = Tools.primitives
         .filter { it.name in ALLOWED }
         .joinToString("\n\n") { t ->
             val params = t.parameters.entries.joinToString("\n") { "    ${it.key}: ${it.value}" }

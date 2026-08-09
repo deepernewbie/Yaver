@@ -21,30 +21,7 @@ object Tools {
         val name: String,
         val description: String,
         val parameters: Map<String, String>,
-        val group: String = "core",
         val execute: (Context, JSONObject) -> JSONObject
-    )
-
-    /**
-     * Tools are grouped and only the group names are in the prompt.
-     *
-     * Listing every schema every turn cost about ten thousand tokens before a
-     * word was written — the same mistake as reading a whole codebase to answer
-     * one question about it. Worse, it made the prompt change on every turn,
-     * which throws away any hope of a cached prefix. Now the agent opens the
-     * drawer it needs; the schemas arrive in the conversation and stay there.
-     */
-    val GROUPS = linkedMapOf(
-        "calendar" to "read, add, move and delete events in the phone's calendar",
-        "messages" to "read captured WhatsApp and SMS messages, draft replies",
-        "browser" to "drive a real browser: click, type, scroll, dismiss banners",
-        "files" to "write, read and render documents the user keeps",
-        "goals" to "long-running work tracked across conversations",
-        "memory" to "recall, forget, consolidate; the profile and past conversations",
-        "media" to "find photographs, look up places and addresses, current location",
-        "research" to "parallel sub-agents for questions with several separate parts",
-        "skills" to "write and read your own procedures for recurring jobs",
-        "routines" to "recurring jobs that notify at a set time"
     )
 
     private fun ok(vararg pairs: Pair<String, Any?>): JSONObject {
@@ -63,22 +40,7 @@ object Tools {
         return (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
     }
 
-    val all: List<Tool> = listOf(
-
-        Tool("open_tools",
-            "Open a group of tools you need. Their full descriptions arrive in the result and stay available for the rest of this conversation. Open a group before using anything in it — one extra step, and it keeps every turn small and fast.",
-            mapOf("group" to "One of the group names listed in your instructions.")
-        ) { _, args ->
-            val group = args.str("group").lowercase(Locale.ROOT)
-            if (group !in GROUPS) {
-                ok("error" to "No group called \"$group\".",
-                    "available" to JSONArray(GROUPS.keys.toList()))
-            } else {
-                ok("group" to group,
-                    "tools" to schemaText(group),
-                    "note" to "These are now available. Do not open this group again.")
-            }
-        },
+    val primitives: List<Tool> = listOf(
 
         // ── tasks ────────────────────────────────────────────────────────────
 
@@ -199,8 +161,7 @@ object Tools {
 
         Tool("forget",
             "Remove something from memory — a fact that turned out wrong, or that the user asked you to drop.",
-            mapOf("query" to "What to forget; the closest match is removed.", "id" to "Exact memory id if known."),
-            group = "memory"
+            mapOf("query" to "What to forget; the closest match is removed.", "id" to "Exact memory id if known.")
         ) { _, args ->
             val list = Store.memories()
             val target = if (args.str("id").isNotBlank()) {
@@ -220,8 +181,7 @@ object Tools {
                 "from" to "Local datetime to start from. Default now.",
                 "to" to "Local datetime to stop at. Default 7 days out.",
                 "limit" to "Default 50."
-            ),
-            group = "calendar"
+            )
         ) { ctx, args ->
             if (!Calendar.canRead(ctx)) {
                 ok("needs_permission" to true,
@@ -245,8 +205,7 @@ object Tools {
                 "end" to "Local datetime. Defaults to start + 1h.",
                 "location" to "Optional.", "notes" to "Optional.",
                 "remind" to "Minutes before to alert. Default 30."
-            ),
-            group = "calendar"
+            )
         ) { ctx, args ->
             val start = Store.parseLocal(args.str("start"))
                 ?: throw ToolError("start must be a local datetime like 2026-08-11T19:00")
@@ -263,8 +222,7 @@ object Tools {
         Tool("calendar_update", "Move or rename an event already in the calendar.",
             mapOf("id" to "Event id from calendar_read.", "title" to "New title.",
                   "start" to "New local datetime.", "end" to "New local datetime.",
-                  "location" to "New location.", "notes" to "New notes."),
-            group = "calendar"
+                  "location" to "New location.", "notes" to "New notes.")
         ) { ctx, args ->
             val id = args.optLong("id").takeIf { it > 0 } ?: throw ToolError("id is required")
             val changed = Calendar.update(ctx, id,
@@ -278,8 +236,7 @@ object Tools {
         },
 
         Tool("calendar_delete", "Remove an event from the calendar. Confirm with the user first.",
-            mapOf("id" to "Event id from calendar_read."),
-            group = "calendar"
+            mapOf("id" to "Event id from calendar_read.")
         ) { ctx, args ->
             val id = args.optLong("id").takeIf { it > 0 } ?: throw ToolError("id is required")
             ok("deleted" to Calendar.delete(ctx, id), "id" to id)
@@ -289,8 +246,7 @@ object Tools {
 
         Tool("read_profile",
             "Read your working description of the user before rewriting it.",
-            mapOf(),
-            group = "memory"
+            mapOf()
         ) { _, _ ->
             val text = Store.profile()
             ok("profile" to text.ifBlank { "(empty — nothing recorded about this person yet)" })
@@ -301,8 +257,7 @@ object Tools {
             mapOf(
                 "content" to "The complete profile in markdown. Replaces the old one entirely.",
                 "because" to "What in this conversation prompted the change. Required."
-            ),
-            group = "memory"
+            )
         ) { _, args ->
             val content = args.str("content")
             if (content.trim().length < 10) throw ToolError("content is required")
@@ -317,8 +272,7 @@ object Tools {
 
         Tool("search_history",
             "Search past conversations. Use this when the user refers to something you discussed before rather than admitting you don't remember.",
-            mapOf("query" to "Words that would have appeared in that conversation.", "limit" to "Default 6."),
-            group = "memory"
+            mapOf("query" to "Words that would have appeared in that conversation.", "limit" to "Default 6.")
         ) { _, args ->
             val hits = Store.searchSessions(args.str("query"), args.optInt("limit", 6))
             if (hits.isEmpty()) {
@@ -345,8 +299,7 @@ object Tools {
                 "when" to "One line: when to use it. This is what you match against later.",
                 "body" to "The procedure in markdown — steps, format, preferences, anything that surprised you.",
                 "because" to "What made this worth writing down."
-            ),
-            group = "skills"
+            )
         ) { _, args ->
             val body = args.str("body")
             if (body.isBlank()) throw ToolError("body is required")
@@ -358,8 +311,7 @@ object Tools {
                 "note" to "It is listed in your instructions from now on.")
         },
 
-        Tool("list_skills", "List the skills you have written, with what each is for.", mapOf(),
-            group = "skills"
+        Tool("list_skills", "List the skills you have written, with what each is for.", mapOf()
         ) { _, _ ->
             val list = Store.skills()
             val arr = JSONArray()
@@ -371,8 +323,7 @@ object Tools {
 
         Tool("read_skill",
             "Read a skill in full before following it. The index in your instructions carries only titles.",
-            mapOf("name" to "Skill name from list_skills."),
-            group = "skills"
+            mapOf("name" to "Skill name from list_skills.")
         ) { _, args ->
             val skill = Store.readSkill(args.str("name"))
                 ?: throw ToolError("No skill by that name. Call list_skills.")
@@ -380,8 +331,7 @@ object Tools {
         },
 
         Tool("delete_skill", "Remove a skill that turned out wrong or is no longer wanted.",
-            mapOf("name" to "Skill name."),
-            group = "skills"
+            mapOf("name" to "Skill name.")
         ) { _, args ->
             ok("deleted" to Store.deleteSkill(args.str("name")))
         },
@@ -390,8 +340,7 @@ object Tools {
 
         Tool("memory_status",
             "See how memory is doing: how much is stored, and what is about to be forgotten through disuse.",
-            mapOf(),
-            group = "memory"
+            mapOf()
         ) { _, _ ->
             val all = Store.memories()
             val fading = all.filter {
@@ -414,8 +363,7 @@ object Tools {
 
         Tool("consolidate_memory",
             "Tidy the memory store: merge duplicates, correct anything now out of date, note connections. Do this when memory looks messy or contradictory, or when asked.",
-            mapOf("topic" to "Optional — only consolidate memories about this."),
-            group = "memory"
+            mapOf("topic" to "Optional — only consolidate memories about this.")
         ) { _, args ->
             val topic = args.str("topic")
             val list = if (topic.isBlank()) Store.memories().take(60)
@@ -440,8 +388,7 @@ object Tools {
 
         Tool("set_goal",
             "Record something being pursued over weeks and many conversations — finding a flat, planning a trip, getting something signed. Different from a task: a task gets done, a goal gets progressed. It is loaded into every conversation, so the next one starts informed.",
-            mapOf("title" to "Short name.", "detail" to "What success looks like, and any constraints."),
-            group = "goals"
+            mapOf("title" to "Short name.", "detail" to "What success looks like, and any constraints.")
         ) { _, args ->
             val title = args.str("title")
             if (title.isBlank()) throw ToolError("title is required")
@@ -456,8 +403,7 @@ object Tools {
         Tool("note_progress",
             "Add what you learned or did towards a goal. Write it as evidence — what happened, what it means, what is still open — so a later conversation can pick it up without asking again.",
             mapOf("id" to "Goal id from list_goals.", "note" to "What changed.",
-                  "status" to "Optional: active | paused | done."),
-            group = "goals"
+                  "status" to "Optional: active | paused | done.")
         ) { _, args ->
             val list = Store.goals()
             val goal = list.firstOrNull { it.id == args.str("id") }
@@ -472,8 +418,7 @@ object Tools {
         },
 
         Tool("list_goals", "What is being pursued, and where each stands.",
-            mapOf("status" to "active | all. Default active."),
-            group = "goals"
+            mapOf("status" to "active | all. Default active.")
         ) { _, args ->
             val all = args.str("status", "active") == "all"
             val list = Store.goals().filter { all || it.status == "active" }
@@ -502,8 +447,7 @@ object Tools {
                 "every" to "daily | weekdays | weekly",
                 "hour" to "Hour of day, 0-23, local time.",
                 "minute" to "Minute, default 0."
-            ),
-            group = "routines"
+            )
         ) { ctx, args ->
             val prompt = args.str("prompt")
             if (prompt.isBlank()) throw ToolError("prompt is required")
@@ -526,8 +470,7 @@ object Tools {
                 "note" to "You will be notified; tapping the notification runs it.")
         },
 
-        Tool("list_routines", "List the recurring jobs that are set up.", mapOf(),
-            group = "routines"
+        Tool("list_routines", "List the recurring jobs that are set up.", mapOf()
         ) { _, _ ->
             val list = Store.routines()
             val arr = JSONArray()
@@ -541,8 +484,7 @@ object Tools {
             ok("count" to list.size, "routines" to arr)
         },
 
-        Tool("delete_routine", "Remove a recurring job.", mapOf("id" to "Routine id from list_routines."),
-            group = "routines"
+        Tool("delete_routine", "Remove a recurring job.", mapOf("id" to "Routine id from list_routines.")
         ) { ctx, args ->
             val id = args.str("id")
             val list = Store.routines()
@@ -602,8 +544,7 @@ object Tools {
                 "since" to "Local datetime to read from. Default: the last 24 hours.",
                 "chat" to "Optional — only this conversation, matched loosely.",
                 "limit" to "Default 60."
-            ),
-            group = "messages"
+            )
         ) { _, args ->
             if (!NotificationCapture.isEnabled()) {
                 ok("capture_off" to true,
@@ -630,8 +571,7 @@ object Tools {
         },
 
         Tool("list_chats", "Which conversations have been active, and how much.",
-            mapOf("since" to "Local datetime. Default: the last 7 days."),
-            group = "messages"
+            mapOf("since" to "Local datetime. Default: the last 7 days.")
         ) { _, args ->
             val since = Store.parseLocal(args.str("since"))
                 ?: (System.currentTimeMillis() - 7 * 86_400_000L)
@@ -647,8 +587,7 @@ object Tools {
             mapOf(
                 "to" to "Who it is for: a name, or a phone number in international form without + or spaces.",
                 "text" to "The message itself, in the user's own voice."
-            ),
-            group = "messages"
+            )
         ) { _, args ->
             val text = args.str("text")
             if (text.isBlank()) throw ToolError("text is required")
@@ -669,8 +608,7 @@ object Tools {
 
         Tool("browser_open",
             "Open a page in a real browser and read it as rendered. Use this instead of browse_open whenever the content is built by JavaScript, needs cookies dismissed, or needs interacting with — search boxes, filters, tabs, \"load more\". You get the visible text plus a numbered list of everything you can click or type into.",
-            mapOf("url" to "Full URL, from a search result or from the user."),
-            group = "browser"
+            mapOf("url" to "Full URL, from a search result or from the user.")
         ) { _, args ->
             val url = args.str("url")
             if (url.isBlank()) throw ToolError("url is required")
@@ -682,8 +620,7 @@ object Tools {
 
         Tool("browser_state",
             "Re-read the current page — its text and the numbered elements. Use after something on the page has changed.",
-            mapOf("chars" to "How much text, default 8000."),
-            group = "browser"
+            mapOf("chars" to "How much text, default 8000.")
         ) { _, args ->
             if (!Browser.isReady()) throw ToolError("The browser is not running.")
             Browser.toJson(Browser.state(), args.optInt("chars", 8000).coerceIn(500, 24000))
@@ -691,8 +628,7 @@ object Tools {
 
         Tool("browser_click",
             "Click a numbered element on the current page, then read what changed.",
-            mapOf("index" to "The number from the element list."),
-            group = "browser"
+            mapOf("index" to "The number from the element list.")
         ) { _, args ->
             if (!Browser.isReady()) throw ToolError("The browser is not running.")
             val index = args.optInt("index", -1)
@@ -706,8 +642,7 @@ object Tools {
                 "index" to "The number from the element list.",
                 "text" to "What to type.",
                 "submit" to "true to submit the form afterwards. Default false."
-            ),
-            group = "browser"
+            )
         ) { _, args ->
             if (!Browser.isReady()) throw ToolError("The browser is not running.")
             val index = args.optInt("index", -1)
@@ -717,15 +652,13 @@ object Tools {
 
         Tool("browser_scroll",
             "Scroll the page. Many sites load more content only as you go down.",
-            mapOf("pages" to "Screens to scroll; negative goes up. Default 1."),
-            group = "browser"
+            mapOf("pages" to "Screens to scroll; negative goes up. Default 1.")
         ) { _, args ->
             if (!Browser.isReady()) throw ToolError("The browser is not running.")
             Browser.toJson(Browser.scroll(args.optInt("pages", 1).coerceIn(-5, 5)), 8000)
         },
 
-        Tool("browser_back", "Go back to the previous page.", mapOf(),
-            group = "browser"
+        Tool("browser_back", "Go back to the previous page.", mapOf()
         ) { _, _ ->
             if (!Browser.isReady()) throw ToolError("The browser is not running.")
             Browser.toJson(Browser.back(), 8000)
@@ -733,8 +666,7 @@ object Tools {
 
         Tool("browser_dismiss_consent",
             "Try to close a cookie or consent banner. Worth one call when a page looks empty or blocked by an overlay.",
-            mapOf(),
-            group = "browser"
+            mapOf()
         ) { _, _ ->
             if (!Browser.isReady()) throw ToolError("The browser is not running.")
             Browser.toJson(Browser.dismissConsent(), 8000)
@@ -742,8 +674,7 @@ object Tools {
 
         Tool("browser_show",
             "Put the browser on screen so the user can act themselves — signing in, solving a check, choosing something. Their session is kept, so afterwards you can carry on from the same page.",
-            mapOf("why" to "One line telling the user what they need to do."),
-            group = "browser"
+            mapOf("why" to "One line telling the user what they need to do.")
         ) { _, args ->
             if (!Browser.isReady()) throw ToolError("The browser is not running.")
             ok("shown" to true,
@@ -778,8 +709,7 @@ object Tools {
             mapOf(
                 "query" to "What to picture, in English and as specific as possible. Scientific names work best for species.",
                 "count" to "1 to 4. Default 3."
-            ),
-            group = "media"
+            )
         ) { _, args ->
             val query = args.str("query")
             if (query.isBlank()) throw ToolError("query is required")
@@ -803,8 +733,7 @@ object Tools {
 
         Tool("where_am_i",
             "Find out roughly where the user is. Call this before any \"near me\" search rather than asking them where they are.",
-            mapOf(),
-            group = "media"
+            mapOf()
         ) { ctx, _ ->
             if (!Whereabouts.granted(ctx)) {
                 ok("needs_permission" to true,
@@ -832,8 +761,7 @@ object Tools {
             "Look up real addresses and coordinates and show them to the user with a button that opens their maps app. Use this rather than stating an address from memory — invented addresses are the single most damaging kind of mistake here.",
             mapOf("query" to "What to find, e.g. \"pharmacy\" or a specific place name.",
                   "near_me" to "true to search around the user's current position.",
-                  "limit" to "1 to 5. Default 3."),
-            group = "media"
+                  "limit" to "1 to 5. Default 3.")
         ) { ctx, args ->
             val query = args.str("query")
             if (query.isBlank()) throw ToolError("query is required")
@@ -862,8 +790,7 @@ object Tools {
 
         Tool("delegate",
             "Hand two to four independent questions to sub-agents that research them at the same time and report back. Use it when a request contains several separate investigations — comparing options, checking a few places, gathering different kinds of fact. Each task must stand alone; they cannot see each other's work.",
-            mapOf("tasks" to "Array of self-contained task descriptions, 2 to 4."),
-            group = "research"
+            mapOf("tasks" to "Array of self-contained task descriptions, 2 to 4.")
         ) { ctx, args ->
             val raw = args.optJSONArray("tasks")
                 ?: throw ToolError("tasks must be an array of task descriptions")
@@ -888,8 +815,7 @@ object Tools {
 
         Tool("deep_research",
             "Investigate one broad question properly: it is split into independent sub-questions, researched in parallel, and reported back. Slow and expensive — use it when the user asks for real research, not for a quick lookup.",
-            mapOf("question" to "The question to investigate.", "breadth" to "How many sub-questions, 2 to 4. Default 3."),
-            group = "research"
+            mapOf("question" to "The question to investigate.", "breadth" to "How many sub-questions, 2 to 4. Default 3.")
         ) { ctx, args ->
             val question = args.str("question")
             if (question.isBlank()) throw ToolError("question is required")
@@ -910,8 +836,7 @@ object Tools {
                 "title" to "Short title for the card.",
                 "html" to "A complete HTML document.",
                 "save_as" to "Optional filename, e.g. \"casio-comparison.html\"."
-            ),
-            group = "files"
+            )
         ) { _, args ->
             val html = args.str("html")
             if (html.trim().length < 20) throw ToolError("html is required")
@@ -927,8 +852,7 @@ object Tools {
 
         Tool("write_file",
             "Save something the user will keep and reread — a note, a list, a draft. For anything with structure prefer render_html; use this for plain text and markdown.",
-            mapOf("name" to "Filename, e.g. \"packing-list.md\".", "content" to "The file contents."),
-            group = "files"
+            mapOf("name" to "Filename, e.g. \"packing-list.md\".", "content" to "The file contents.")
         ) { _, args ->
             val content = args.str("content")
             if (content.isEmpty()) throw ToolError("content is required")
@@ -938,8 +862,7 @@ object Tools {
         },
 
         Tool("read_file", "Read something you saved earlier.",
-            mapOf("path" to "Path from list_files or from an earlier write."),
-            group = "files"
+            mapOf("path" to "Path from list_files or from an earlier write.")
         ) { _, args ->
             val path = args.str("path")
             val text = Store.readText(path) ?: Store.readText("${Store.ARTIFACT_DIR}/$path")
@@ -947,8 +870,7 @@ object Tools {
             ok("path" to path, "chars" to text.length, "text" to text.take(20000))
         },
 
-        Tool("list_files", "List what you have saved for the user.", mapOf(),
-            group = "files"
+        Tool("list_files", "List what you have saved for the user.", mapOf()
         ) { _, _ ->
             val list = Store.artifacts()
             val arr = JSONArray()
@@ -970,28 +892,148 @@ object Tools {
         }
     )
 
-    val byName: Map<String, Tool> = all.associateBy { it.name }
+    // ── one tool per subject, not one per verb ───────────────────────────────
+    //
+    // Fifty-one tools was too many in two ways. The schemas alone filled the
+    // prompt, and a small model faced with fifty near-identical names picks
+    // the wrong one. Putting them behind `open_tools` fixed the size and made
+    // the second problem worse: the model now had to take two steps, and a
+    // model that struggles with one step does not manage two.
+    //
+    // So: one tool per subject with an `action`, which is how a person would
+    // describe the same thing. The implementations underneath are unchanged,
+    // and the old names still work — a model that guesses `calendar_add`
+    // instead of `calendar` with action=add gets what it wanted rather than an
+    // error it has to recover from.
 
-    private fun render(tools: List<Tool>): String = tools.joinToString("\n\n") { t ->
-        val params = t.parameters.entries.joinToString("\n") { "    ${it.key}: ${it.value}" }
-        "- ${t.name}: ${t.description}" + if (params.isNotEmpty()) "\n$params" else ""
+    data class Facade(
+        val name: String,
+        val description: String,
+        val actions: LinkedHashMap<String, String>   // action -> primitive
+    )
+
+    val facades: List<Facade> = listOf(
+        Facade("task", "The user's action items.", linkedMapOf(
+            "add" to "add_task", "list" to "list_tasks", "update" to "update_task",
+            "complete" to "complete_task", "delete" to "delete_task")),
+
+        Facade("calendar", "The phone's own calendar. Read it before answering anything about their schedule.", linkedMapOf(
+            "read" to "calendar_read", "add" to "calendar_add",
+            "update" to "calendar_update", "delete" to "calendar_delete")),
+
+        Facade("memory", "Long-term memory: durable facts about the user and their world.", linkedMapOf(
+            "remember" to "remember", "recall" to "recall", "forget" to "forget",
+            "status" to "memory_status", "consolidate" to "consolidate_memory")),
+
+        Facade("profile", "Your working description of who this person is. Loaded into every conversation.", linkedMapOf(
+            "read" to "read_profile", "update" to "update_profile")),
+
+        Facade("messages", "Messages captured from WhatsApp and SMS, and replies drafted for the user to send.", linkedMapOf(
+            "read" to "read_messages", "chats" to "list_chats", "draft" to "draft_message")),
+
+        Facade("browser", "A real browser you drive. Sees pages built by JavaScript; can click, type and scroll. Act by element number.", linkedMapOf(
+            "open" to "browser_open", "state" to "browser_state", "click" to "browser_click",
+            "type" to "browser_type", "scroll" to "browser_scroll", "back" to "browser_back",
+            "dismiss_consent" to "browser_dismiss_consent", "show" to "browser_show")),
+
+        Facade("files", "Documents you make for the user. They persist after the conversation.", linkedMapOf(
+            "render" to "render_html", "write" to "write_file",
+            "read" to "read_file", "list" to "list_files")),
+
+        Facade("goal", "Work pursued across weeks and many conversations, with its own running notes.", linkedMapOf(
+            "set" to "set_goal", "note" to "note_progress", "list" to "list_goals")),
+
+        Facade("routine", "Recurring jobs that notify at a set time.", linkedMapOf(
+            "add" to "add_routine", "list" to "list_routines", "delete" to "delete_routine")),
+
+        Facade("skill", "Your own written procedures for jobs you may be asked to repeat.", linkedMapOf(
+            "create" to "create_skill", "list" to "list_skills",
+            "read" to "read_skill", "delete" to "delete_skill")),
+
+        Facade("places", "Real addresses, coordinates and the user's own position.", linkedMapOf(
+            "find" to "show_places", "here" to "where_am_i"))
+    )
+
+    /** Primitives that stay as they are — single-purpose and used constantly. */
+    private val STANDALONE = setOf(
+        "web_search", "browse_open", "calculate", "find_images",
+        "delegate", "deep_research", "read_forwards", "search_history"
+    )
+
+    private val primitiveByName: Map<String, Tool> = primitives.associateBy { it.name }
+
+    private val facadeByName: Map<String, Facade> = facades.associateBy { it.name }
+
+    /** Everything callable: facades, standalone primitives, and the old names. */
+    val byName: Map<String, Tool> = primitiveByName
+
+    /**
+     * The whole tool surface, compactly.
+     *
+     * Each subject gets a line, then one line per action listing only the
+     * parameter names. The full prose for each parameter lived in the prompt
+     * before and cost four thousand tokens; the names alone are enough for a
+     * model to fill them in, and anything genuinely ambiguous is spelled out
+     * in the description.
+     */
+    fun schemaText(): String = buildString {
+        facades.forEach { facade ->
+            append("- ").append(facade.name).append(": ").append(facade.description).append('\n')
+            append("    action: ").append(facade.actions.keys.joinToString(" | ")).append('\n')
+            facade.actions.forEach { (action, primitive) ->
+                val tool = primitiveByName[primitive] ?: return@forEach
+                if (tool.parameters.isEmpty()) return@forEach
+                append("    ").append(action).append(" → ")
+                    .append(tool.parameters.keys.joinToString(", ")).append('\n')
+            }
+            append('\n')
+        }
+
+        primitives.filter { it.name in STANDALONE }.forEach { tool ->
+            append("- ").append(tool.name).append(": ").append(tool.description.take(200)).append('\n')
+            if (tool.parameters.isNotEmpty()) {
+                append("    ").append(tool.parameters.keys.joinToString(", ")).append('\n')
+            }
+            append('\n')
+        }
     }
 
-    /** The always-available tools, written into the stable part of the prompt. */
-    fun coreSchema(): String = render(all.filter { it.group == "core" })
-
-    fun schemaText(group: String): String = render(all.filter { it.group == group })
-
-    /** One line per drawer — what the agent sees instead of forty schemas. */
-    fun groupIndex(): String = GROUPS.entries.joinToString("\n") { (name, what) ->
-        val count = all.count { it.group == name }
-        "- $name ($count tools): $what"
+    /** Full detail for one thing, when the short form is not enough. */
+    fun describe(name: String): String {
+        facadeByName[name]?.let { facade ->
+            return buildString {
+                append(facade.name).append(": ").append(facade.description).append("\n\n")
+                facade.actions.forEach { (action, primitive) ->
+                    val tool = primitiveByName[primitive] ?: return@forEach
+                    append("action = \"").append(action).append("\"\n")
+                    append("  ").append(tool.description).append('\n')
+                    tool.parameters.forEach { (key, what) -> append("    ").append(key).append(": ").append(what).append('\n') }
+                    append('\n')
+                }
+            }
+        }
+        val tool = primitiveByName[name] ?: return "No tool called \"$name\"."
+        return buildString {
+            append(tool.name).append(": ").append(tool.description).append('\n')
+            tool.parameters.forEach { (key, what) -> append("  ").append(key).append(": ").append(what).append('\n') }
+        }
     }
 
     fun run(context: Context, name: String, args: JSONObject): JSONObject {
-        val tool = byName[name] ?: return ok(
+        // A facade call: resolve the action to the primitive underneath.
+        facadeByName[name]?.let { facade ->
+            val action = args.optString("action").lowercase(Locale.ROOT)
+            val target = facade.actions[action]
+                ?: return ok(
+                    "error" to "\"$name\" needs an action.",
+                    "actions" to JSONArray(facade.actions.keys.toList())
+                )
+            return run(context, target, args)
+        }
+
+        val tool = primitiveByName[name] ?: return ok(
             "error" to "No tool named \"$name\".",
-            "available" to JSONArray(all.map { it.name })
+            "available" to JSONArray(facades.map { it.name } + STANDALONE)
         )
         return try {
             tool.execute(context, args)
