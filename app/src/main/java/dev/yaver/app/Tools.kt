@@ -502,7 +502,27 @@ object Tools {
         ) { _, args ->
             val query = args.str("query")
             if (query.isBlank()) throw ToolError("query is required")
-            val (results, engine) = Web.search(query, args.optInt("max_results", 6).coerceIn(1, 12))
+            val limit = args.optInt("max_results", 6).coerceIn(1, 12)
+            var (results, engine) = Web.search(query, limit)
+
+            // The reader proxy that used to rescue blocked engines now refuses
+            // us outright, so plain HTTP search can fail completely. There is a
+            // real browser in this app; when the cheap route dies, use it.
+            if (results.isEmpty() && Browser.isReady()) {
+                Log.info("http search failed — searching in the browser instead")
+                val state = Browser.open("https://duckduckgo.com/?q=" +
+                    java.net.URLEncoder.encode(query, "UTF-8"))
+                val links = state.elements
+                    .filter { it.href.startsWith("http") && it.label.length > 12 }
+                    .filterNot { it.href.contains("duckduckgo.com") }
+                    .distinctBy { it.href }
+                    .take(limit)
+                if (links.isNotEmpty()) {
+                    results = links.map { Web.Result(it.label, it.href, "") }
+                    engine = "browser"
+                }
+            }
+
             if (results.isEmpty()) {
                 ok("results" to JSONArray(), "error" to "Every search engine failed or returned nothing usable.",
                     "detail" to engine,
@@ -968,37 +988,22 @@ object Tools {
     val byName: Map<String, Tool> = primitiveByName
 
     /**
-     * The whole tool surface, with what each parameter means.
+     * Every tool, in full, with every parameter described.
      *
-     * An earlier version listed parameter names only, to save tokens. It saved
-     * about fifteen hundred and cost far more than that: a model that reads
-     * `due` without being told the format guesses, and a model that reads
-     * `action: add | list` without being told what `status` accepts asks the
-     * user instead of acting. Names are an index; the descriptions are the
-     * information.
+     * This was briefly compressed — grouped behind a menu, then merged into
+     * subjects with an `action` field, then reduced to parameter names — to
+     * cut the prompt from ten thousand tokens to under one. Each step made the
+     * model worse, and the last one made it start inventing work it had not
+     * done. The tokens were never the problem. A model that can see exactly
+     * what `calendar_add` takes calls it correctly; one that has to infer
+     * `calendar` with action=add and guess the fields does not.
+     *
+     * The facades still resolve, so a model that calls the merged form gets
+     * what it asked for. They are simply not what we advertise.
      */
-    fun schemaText(): String = buildString {
-        facades.forEach { facade ->
-            append("- ").append(facade.name).append(": ").append(facade.description).append('\n')
-            append("    action: ").append(facade.actions.keys.joinToString(" | ")).append('\n')
-            facade.actions.forEach { (action, primitive) ->
-                val tool = primitiveByName[primitive] ?: return@forEach
-                append("\n    action=\"").append(action).append("\" — ")
-                    .append(tool.description).append('\n')
-                tool.parameters.forEach { (key, what) ->
-                    append("        ").append(key).append(": ").append(what).append('\n')
-                }
-            }
-            append('\n')
-        }
-
-        primitives.filter { it.name in STANDALONE }.forEach { tool ->
-            append("- ").append(tool.name).append(": ").append(tool.description).append('\n')
-            tool.parameters.forEach { (key, what) ->
-                append("        ").append(key).append(": ").append(what).append('\n')
-            }
-            append('\n')
-        }
+    fun schemaText(): String = primitives.joinToString("\n\n") { tool ->
+        val params = tool.parameters.entries.joinToString("\n") { "    ${it.key}: ${it.value}" }
+        "- ${tool.name}: ${tool.description}" + if (params.isNotEmpty()) "\n$params" else ""
     }
 
     /** Full detail for one thing, when the short form is not enough. */

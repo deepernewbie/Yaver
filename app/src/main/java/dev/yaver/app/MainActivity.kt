@@ -1633,9 +1633,6 @@ class MainActivity : Activity() {
     }
 
     private fun showDebug() {
-        // promptSize now reads the calendar, which must not happen on the main
-        // thread; the fixed half is enough to show immediately.
-        val sizeLine = "prompt: ~${Agent.fixedPromptSize()} tokens fixed\n\n"
         val revisions = Store.revisions(15)
         val harness = if (revisions.isEmpty()) "" else
             "── changes to my own instructions ──\n" +
@@ -1645,7 +1642,7 @@ class MainActivity : Activity() {
             } + "\n\n"
 
         val text = TextView(this).apply {
-            this.text = sizeLine + harness + Log.dump().ifBlank { "Nothing recorded yet." }
+            this.text = harness + Log.dump().ifBlank { "Nothing recorded yet." }
             setTextColor(soft)
             textSize = 10f
             typeface = Typeface.MONOSPACE
