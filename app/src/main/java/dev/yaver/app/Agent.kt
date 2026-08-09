@@ -106,6 +106,7 @@ object Agent {
         append("Then you receive:\n<tool_response>{\"added\": true, \"due\": \"2026-08-11T10:00:00+03:00\"}</tool_response>\n\n")
         append("You (now, and only now, in the past tense):\nEklendi — yarın 10:00, yarım saat önce hatırlatırım.\n\n")
         append("Never write \"ekliyorum\" or \"I'll add that\" without the call in the same reply. Either call the tool or say you have not.\n\n")
+        append("Close the tag: `</tool_call>`. If you forget it the call still works, but closing it is safer.\n\n")
 
         append("## Never invent specifics\n\n")
         append("- Never state a price, date, figure or URL you did not read from a tool result in this conversation.\n")
@@ -257,6 +258,28 @@ object Agent {
     fun parseCalls(text: String): List<Call> {
         val calls = mutableListOf<Call>()
         for (m in CALL_RE.findAll(text)) calls.add(parseOne(m.groupValues[2]))
+
+        // Models drop the closing tag constantly — the JSON is complete, the
+        // wrapper is not. Refusing that is pedantry: the intent is unambiguous
+        // and throwing it away costs the user a whole turn.
+        if (calls.isEmpty()) {
+            val open = text.lastIndexOf("<tool_call>", ignoreCase = true)
+            if (open >= 0 && !text.substring(open).contains("</tool_call>", ignoreCase = true)) {
+                val body = text.substring(open + "<tool_call>".length)
+                balancedJson(body)?.let { calls.add(parseOne(it)) }
+            }
+        }
+
+        // Some emit the JSON with no wrapper at all, which is just as clear.
+        if (calls.isEmpty()) {
+            balancedJson(text)?.let { candidate ->
+                if (candidate.contains("\"name\"") &&
+                    (candidate.contains("\"arguments\"") || candidate.contains("\"parameters\""))) {
+                    calls.add(parseOne(candidate))
+                }
+            }
+        }
+
         for (m in FN_TAG_RE.findAll(text)) {
             val args = try { JSONObject(m.groupValues[2].trim().ifEmpty { "{}" }) }
                        catch (e: Exception) {
@@ -268,6 +291,36 @@ object Agent {
             calls.add(Call(m.groupValues[1], args))
         }
         return calls
+    }
+
+    /**
+     * The first complete JSON object in a string, by counting braces.
+     *
+     * Trailing prose after the object is common, and so is a missing closing
+     * wrapper; both are handled by finding where the object actually ends
+     * rather than trusting a delimiter to be there.
+     */
+    private fun balancedJson(text: String): String? {
+        val start = text.indexOf('{')
+        if (start < 0) return null
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until text.length) {
+            val c = text[i]
+            when {
+                escaped -> escaped = false
+                c == '\\' && inString -> escaped = true
+                c == '"' -> inString = !inString
+                inString -> { }
+                c == '{' -> depth++
+                c == '}' -> {
+                    depth--
+                    if (depth == 0) return text.substring(start, i + 1)
+                }
+            }
+        }
+        return null
     }
 
     /**
@@ -288,6 +341,8 @@ object Agent {
         .replace(CALL_RE, "")
         .replace(FN_TAG_RE, "")
         .replace(Regex("<(tool_call|function_call|tool_use)>[\\s\\S]*$"), "")
+        // A bare JSON call with no wrapper would otherwise be shown as prose.
+        .replace(Regex("^\\s*\\{\\s*"name"[\\s\\S]*$"), "")
         .replace(Regex("<function\\s*=[\\s\\S]*$"), "")
         .trim()
 
