@@ -974,6 +974,72 @@ object Tools {
             "find" to "show_places", "here" to "where_am_i"))
     )
 
+    // ── which capabilities are loaded ────────────────────────────────────────
+    //
+    // This grew from sixteen tools to fifty-one, one useful addition at a time,
+    // and nobody looked at the total. Fifty-one schemas is three thousand
+    // tokens and, more to the point, fifty-one things for a small model to
+    // choose between — which is a harder problem than any single one of them.
+    //
+    // Rather than guess which ones matter, this is a setting. Turn off what
+    // you do not use and both problems shrink together.
+
+    val SETS: LinkedHashMap<String, Pair<String, List<String>>> = linkedMapOf(
+        "core" to ("Tasks, memory, search — always on" to listOf(
+            "add_task", "list_tasks", "update_task", "complete_task", "delete_task",
+            "remember", "recall", "forget", "web_search", "browse_open",
+            "calculate", "read_forwards")),
+        "calendar" to ("Calendar" to listOf(
+            "calendar_read", "calendar_add", "calendar_update", "calendar_delete")),
+        "messages" to ("WhatsApp and SMS" to listOf(
+            "read_messages", "list_chats", "draft_message")),
+        "files" to ("Documents and reports" to listOf(
+            "render_html", "write_file", "read_file", "list_files")),
+        "browser" to ("Real browser" to listOf(
+            "browser_open", "browser_state", "browser_click", "browser_type",
+            "browser_scroll", "browser_back", "browser_dismiss_consent", "browser_show")),
+        "research" to ("Parallel sub-agents" to listOf("delegate", "deep_research")),
+        "media" to ("Images, places, location" to listOf(
+            "find_images", "show_places", "where_am_i")),
+        "profile" to ("Profile and past conversations" to listOf(
+            "read_profile", "update_profile", "search_history",
+            "memory_status", "consolidate_memory")),
+        "goals" to ("Long-running goals" to listOf("set_goal", "note_progress", "list_goals")),
+        "skills" to ("Written procedures" to listOf(
+            "create_skill", "list_skills", "read_skill", "delete_skill")),
+        "routines" to ("Recurring jobs" to listOf(
+            "add_routine", "list_routines", "delete_routine"))
+    )
+
+    const val ENABLED_SETS = "enabledSets"
+
+    /**
+     * Everything on by default.
+     *
+     * This exists so you can turn things off and see what changes, not so I
+     * can decide for you which capabilities matter. Out of the box the app
+     * behaves exactly as it did before the setting existed.
+     */
+    private val DEFAULT_SETS = SETS.keys.joinToString(",")
+
+    fun enabledSets(): Set<String> {
+        val saved = Store.setting(ENABLED_SETS, DEFAULT_SETS)
+        return (setOf("core") + saved.split(",").map { it.trim() }.filter { it.isNotEmpty() })
+    }
+
+    fun setEnabled(name: String, on: Boolean) {
+        val current = enabledSets().toMutableSet()
+        if (on) current.add(name) else current.remove(name)
+        current.remove("core")
+        Store.setSetting(ENABLED_SETS, current.joinToString(","))
+    }
+
+    fun enabledTools(): List<Tool> {
+        val on = enabledSets()
+        val names = SETS.filterKeys { it in on }.values.flatMap { it.second }.toSet()
+        return primitives.filter { it.name in names }
+    }
+
     /** Primitives that stay as they are — single-purpose and used constantly. */
     private val STANDALONE = setOf(
         "web_search", "browse_open", "calculate", "find_images",
@@ -1001,7 +1067,7 @@ object Tools {
      * The facades still resolve, so a model that calls the merged form gets
      * what it asked for. They are simply not what we advertise.
      */
-    fun schemaText(): String = primitives.joinToString("\n\n") { tool ->
+    fun schemaText(): String = enabledTools().joinToString("\n\n") { tool ->
         val params = tool.parameters.entries.joinToString("\n") { "    ${it.key}: ${it.value}" }
         "- ${tool.name}: ${tool.description}" + if (params.isNotEmpty()) "\n$params" else ""
     }

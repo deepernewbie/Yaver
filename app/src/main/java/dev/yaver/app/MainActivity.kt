@@ -1602,6 +1602,59 @@ class MainActivity : Activity() {
         val personaField = labelled("Standing instructions", Store.setting(Store.PERSONA),
             "e.g. Reply in Turkish. Keep summaries short.")
 
+        // Capability sets. Every tool loaded is a schema in the prompt and one
+        // more thing for the model to choose between, so this is the single
+        // biggest lever on how well a weaker model behaves.
+        content.addView(rowLabel("Capabilities", soft, 12f))
+        content.addView(rowLabel(
+            "Each set adds tools to every prompt. Fewer tools means a smaller " +
+            "prompt and less for the model to choose between — which matters a " +
+            "lot on smaller models. Turn off what you do not use.",
+            faint, 11f))
+
+        val sizeLabel = rowLabel("", signal, 11f)
+        fun refreshSize() {
+            val tools = Tools.enabledTools().size
+            val schema = Tools.schemaText().length / 4
+            sizeLabel.text = "$tools tools loaded · ~$schema tokens of schema in every prompt"
+        }
+
+        Tools.SETS.forEach { (key, pair) ->
+            val (label, names) = pair
+            val always = key == "core"
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(4), 0, dp(4))
+            }
+            val box = TextView(this).apply {
+                text = if (always || key in Tools.enabledSets()) "☑" else "☐"
+                textSize = 18f
+                setTextColor(if (always) faint else signal)
+                setPadding(0, 0, dp(10), 0)
+            }
+            val main = TextView(this).apply {
+                text = "$label  ·  ${names.size}"
+                textSize = 13f
+                setTextColor(if (always) faint else ink)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            if (!always) {
+                val toggle = View.OnClickListener {
+                    val nowOn = key !in Tools.enabledSets()
+                    Tools.setEnabled(key, nowOn)
+                    box.text = if (nowOn) "☑" else "☐"
+                    refreshSize()
+                }
+                box.setOnClickListener(toggle)
+                main.setOnClickListener(toggle)
+            }
+            row.addView(box)
+            row.addView(main)
+            content.addView(row)
+        }
+        refreshSize()
+        content.addView(sizeLabel)
+
         content.addView(rowLabel("Calendar access", soft, 12f))
         content.addView(rowLabel(
             if (Calendar.canRead(this)) "Granted" else "Not granted",

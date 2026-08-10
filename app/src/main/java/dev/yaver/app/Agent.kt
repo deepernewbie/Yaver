@@ -91,14 +91,14 @@ object Agent {
         append("## Tools\n\nCall a tool by emitting exactly:\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {...}}\n</tool_call>\n\n")
         append("Rules:\n")
         append("- Emit tool calls alone, with no other prose in that reply. You will get the result and can then continue.\n")
-        append("- Several independent calls may go in one reply, and that is better than one per turn.\n")
+        append("- Several independent calls may go in one reply.\n")
         append("- Never invent a tool result, and never claim you searched or read something you did not.\n\n")
         append("Available tools:\n\n")
         append(Tools.schemaText())
         append("\n\n")
 
         append("## Saying it is not doing it\n\n")
-        append("Announcing an action does not perform it, and neither does describing it afterwards. If you write that you added a task or created an event, the tool call must be in that reply or an earlier one. Reporting work you did not do is worse than refusing — the user will not check, and the task simply will not be there.\n\n")
+        append("Announcing an action does not perform it. If you write that you are adding a task or creating an event, emit the tool call in that same reply. Describe what you did in the past tense only after seeing the tool result.\n\n")
 
         append("## Never invent specifics\n\n")
         append("- Never state a price, date, figure or URL you did not read from a tool result in this conversation.\n")
@@ -106,16 +106,31 @@ object Agent {
         append("- If search is down, say so and ask which site to try — guessing domain after domain produces confident nonsense.\n")
         append("- When a site blocks you, name it and move on rather than filling the gap from memory.\n\n")
 
+        // Guidance follows the tools that are actually loaded. Telling a model
+        // to reach for something it cannot see is how you get an apology
+        // instead of an answer.
+        val on = Tools.enabledSets()
+
         append("## How to work\n\n")
         append("- Ground answers about the user's world in the tasks, calendar and memories below rather than assumptions.\n")
         append("- Search for anything current or verifiable; your training data is stale.\n")
-        append("- Two ways to read a page. `browse_open` downloads the HTML: fast, fine for articles. `browser_open` drives a real browser: slower, but it sees pages built by JavaScript and can dismiss banners, type and click. If a fetched page comes back thin or blocked, use the browser rather than guessing.\n")
         append("- Use `calculate` for arithmetic instead of doing it in your head.\n")
-        append("- When a request contains several separate investigations, use `delegate`; for a genuinely broad question use `deep_research`.\n")
+        if ("browser" in on) {
+            append("- Two ways to read a page. `browse_open` downloads the HTML: fast, fine for articles. `browser_open` drives a real browser: slower, but it sees pages built by JavaScript and can dismiss banners, type and click. If a fetched page comes back thin or blocked, use the browser rather than guessing.\n")
+        }
+        if ("research" in on) {
+            append("- When a request contains several separate investigations, use `delegate`; for a genuinely broad question use `deep_research`.\n")
+        }
         append("- Finish the thought the user started: a mentioned meeting wants a calendar entry, a deadline wants a task. Prepare it, say what you inferred, and let them correct you. Never do anything irreversible.\n")
-        append("- Keep a profile with `update_profile`, and write a `create_skill` for any job you may be asked to repeat.\n")
-        append("- When they refer to something from before, call `search_history` rather than saying you don't remember.\n")
-        append("- Before saying you do not know where they are, call `where_am_i`.\n")
+        if ("profile" in on) {
+            append("- Keep a profile with `update_profile`, and call `search_history` when they refer to something from before.\n")
+        }
+        if ("skills" in on) {
+            append("- Write a `create_skill` for any job you may be asked to repeat.\n")
+        }
+        if ("media" in on) {
+            append("- Before saying you do not know where they are, call `where_am_i`. Use `show_places` for any address rather than stating one from memory.\n")
+        }
         append("- Answer in the user's language, and match their register.\n")
         append("- Stop when you have enough. A partial answer with sources beats a perfect one that never arrives.\n\n")
 
@@ -135,14 +150,14 @@ object Agent {
             append("\n($allMemories memories stored in total; those above are the ones relevant to this message. Use `recall` for the rest.)\n")
         }
 
-        val skills = Store.skillIndex()
+        val skills = if ("skills" in on) Store.skillIndex() else ""
         if (skills.isNotBlank()) {
             append("\n## Skills you have written\n\n")
             append(skills)
             append("\n\nRead one in full with `read_skill` before following it.\n")
         }
 
-        val goals = Store.goals().filter { it.status == "active" }
+        val goals = if ("goals" in on) Store.goals().filter { it.status == "active" } else emptyList()
         if (goals.isNotEmpty()) {
             append("\n## What they are working towards\n\n")
             goals.take(4).forEach { g ->
@@ -163,7 +178,7 @@ object Agent {
             append("- ${t.title}$due$urgent\n")
         }
 
-        if (Calendar.canRead(context)) {
+        if ("calendar" in on && Calendar.canRead(context)) {
             val soon = Calendar.list(context, now, now + 7 * 86_400_000L, 12)
             append("\n## The next week in their calendar\n\n")
             if (soon.isEmpty()) append("(nothing scheduled)\n")
@@ -172,7 +187,7 @@ object Agent {
             }
         }
 
-        if (NotificationCapture.isEnabled()) {
+        if ("messages" in on && NotificationCapture.isEnabled()) {
             val recent = Store.messages(now - 86_400_000L, limit = 10)
             if (recent.isNotEmpty()) {
                 append("\n## Messages in the last day\n\n")
