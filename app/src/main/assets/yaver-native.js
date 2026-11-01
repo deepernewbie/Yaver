@@ -168,6 +168,12 @@
       try { A.mailOpen(abs(url), silent); } catch (e) { return null; }
       return mailWin;
     }
+    /* "Open Outlook on the web": show the mail screen that is already logged in instead of a new browser */
+    try {
+      if (url && typeof EWS !== "undefined" && EWS.origin && mailWin && !mailWin.closed && new URL(abs(url)).host === new URL(EWS.origin).host) {
+        A.mailShow(); return fakeWin();
+      }
+    } catch (e) {}
     if (url) openAny(url);
     return fakeWin();
   };

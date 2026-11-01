@@ -6467,7 +6467,7 @@ if (typeof exportState === "function") { const _walk = VFS.walk.bind(VFS); const
         page and forwards yaver's requests to the server's Exchange Web Services with the user's own login.
         Everything else (inbox view, AI triage, search, drafts, calendar, daily plan) lives here.
    ===================================================================== */
-CFG.mail = Object.assign({ url: "https://eposta.company.com.tr/owa/", ews: "https://mail.tai.com.tr/EWS/Exchange.asmx", triage: true, poll: 1, briefAt: "", vision: true, indexMax: 1500, images: false, calView: "workweek", taskSort: "manual" }, CFG.mail || {});
+CFG.mail = Object.assign({ url: "", ews: "", triage: true, poll: 1, briefAt: "", vision: true, indexMax: 1500, images: false, calView: "workweek", taskSort: "manual" }, CFG.mail || {});
 if (!CFG.mail.pollV) { if (!+CFG.mail.poll || +CFG.mail.poll === 3) CFG.mail.poll = 1; CFG.mail.pollV = 2; try { saveCfg(); } catch {} }
 /* EWS address: where the bridge must run. It can be on a different server from the Outlook web page. */
 const ewsTarget = () => { const raw = (CFG.mail.ews || "").trim() || (CFG.mail.url || "").trim(); if (!/^https?:\/\//i.test(raw)) return null; let u; try { u = new URL(raw); } catch { return null; }

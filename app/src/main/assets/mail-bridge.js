@@ -20,10 +20,20 @@
       } catch (x) {}
       var opts = { method: q.method || "POST", credentials: "include", cache: "no-store", headers: hd };
       if (q.body != null && !/^(GET|HEAD)$/i.test(opts.method)) opts.body = q.body;
-      fetch(p, opts).then(function (r) {
-        if (q.binary) return r.arrayBuffer().then(function (ab) { post({ yaver: "res", id: id, status: r.status, b64: b64(ab), ct: r.headers.get("content-type") || "" }); });
-        return r.text().then(function (t) { post({ yaver: "res", id: id, status: r.status, text: t }); });
-      }).catch(function (err) { post({ yaver: "res", id: id, error: String((err && err.message) || err) }); });
+      /* a dropped connection (phone switching network, server keep-alive reset) is retried twice before giving up */
+      var tries = 0;
+      (function go() {
+        tries++;
+        fetch(p, opts).then(function (r) {
+          if (q.binary) return r.arrayBuffer().then(function (ab) { post({ yaver: "res", id: id, status: r.status, b64: b64(ab), ct: r.headers.get("content-type") || "" }); });
+          return r.text().then(function (t) { post({ yaver: "res", id: id, status: r.status, text: t }); });
+        }).catch(function (err) {
+          /* never repeat something that changes the mailbox (send, create, delete, move…): it may already have happened */
+          var changes = /SendItem|CreateItem|DeleteItem|UpdateItem|MoveItem|CopyItem|CreateAttachment|DeleteAttachment|MarkAsJunk|action=(Send|Create|Delete|Update|Move|Copy)/i.test(String(q.body || "") + " " + p);
+          if (tries < 3 && !changes) { setTimeout(go, tries * 1500); return; }
+          post({ yaver: "res", id: id, error: "mail server " + location.host + " could not be reached (" + String((err && err.message) || err) + (navigator.onLine === false ? ", phone is offline" : "") + "). Open Mail → Show login screen and check that your inbox is visible." });
+        });
+      })();
     };
   }
   var ow = false;

@@ -67,7 +67,10 @@
   /* =========================== 2. company mail =========================== */
   safe(function () {
     var _connect = EWS.connect.bind(EWS);
-    EWS.connect = function (via) { try { A.setPref("mailVia", via === "owa" ? "owa" : "ews"); } catch (e) {} return _connect(via); };
+    EWS.connect = function (via) {
+      try { A.setPref("mailVia", via === "owa" ? "owa" : "ews"); A.setPref("mailUrl", CFG.mail.url || ""); A.setPref("mailEws", CFG.mail.ews || ""); } catch (e) {}
+      return _connect(via);
+    };
     var _raw = EWS.raw.bind(EWS);
     EWS.raw = function (body, o) {
       if (!this.alive()) return Promise.reject(new Error(T("Mail is not connected. Open Mail and tap Connect: log in on the screen that opens and yaver connects by itself.", "E-posta bağlı değil. Posta'yı açıp Bağlan'a dokunun: açılan ekranda oturum açın, yaver kendiliğinden bağlanır.")));
@@ -132,6 +135,15 @@
       if (!el.isConnected) StartAsk.add(el, 2); else { el.classList.add("ask-card"); el.style.order = 2; }
     };
   });
+  /* Mail addresses are whatever you typed in Mail → setup; yaver keeps them until you change them.
+     Only the filler example values that older builds stored as real settings are cleared. */
+  safe(function () {
+    var filler = /^https:\/\/eposta\.company\.com\.tr\/owa\/?$/i;
+    if (CFG.mail.url && filler.test(CFG.mail.url.trim())) { CFG.mail.url = ""; saveCfg(); }
+    /* the phone keeps a copy too, so the addresses survive if the page storage is ever reset */
+    if (!CFG.mail.url && !CFG.mail.ews && (pref("mailUrl") || pref("mailEws"))) { CFG.mail.url = pref("mailUrl"); CFG.mail.ews = pref("mailEws"); saveCfg(); }
+  });
+
   /* automatic reconnect at start: open the mail screen hidden; it connects if the login is still valid */
   var autoVia = "";
   safe(function () {
