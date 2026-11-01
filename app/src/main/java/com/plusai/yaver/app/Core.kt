@@ -38,6 +38,7 @@ class YaverApp : Application() {
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             runCatching {
                 File(filesDir, "last-crash.txt").writeText("Thread: ${thread.name}\n" + android.util.Log.getStackTraceString(error))
+                Diag.e("crash", "thread ${thread.name}: " + android.util.Log.getStackTraceString(error).take(1000))
             }
             previous?.uncaughtException(thread, error)
         }

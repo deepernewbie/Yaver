@@ -196,6 +196,9 @@ object Bridge {
         "schedule.list" -> Schedule.all()
         "schedule.cancel" -> { Schedule.remove(a.optInt("id")); true }
         "workspace.list" -> Workspace.list(Workspace.root).ifEmpty { "" }
+        "diag.save" -> Workspace.write("logs", "yaver-log-" + java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date()) + ".txt", Diag.report().toByteArray())
+        "diag.get" -> Diag.report().takeLast(60000)
+        "diag.clear" -> { Diag.clear(); true }
         "crash.last" -> File(Y.app.filesDir, "last-crash-shown.txt").let { if (it.exists()) it.readText().take(8000) else "" }
         "cookies.clear" -> { CookieManager.getInstance().removeAllCookies(null); CookieManager.getInstance().flush(); Mail.reset(); true }
         // ---- mail

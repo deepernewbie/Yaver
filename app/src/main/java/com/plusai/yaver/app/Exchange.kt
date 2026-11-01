@@ -128,8 +128,8 @@ class EwsTransport(private val url: String, private val user: String, private va
  * cookies and logs in again by itself when the session expires. Talks to /owa/service.svc in JSON; EWS SOAP
  * fragments are converted to that JSON and the answers back to an EWS-shaped DOM (ported from yaver's adapter).
  */
-class OwaTransport(private val origin: String, private val user: String, private val pass: String) : MailTransport {
-    override val label = "Outlook web ${URL(origin).host}"
+class OwaTransport(private val origin: String, private val user: String, private val pass: String, private val web: Boolean = false) : MailTransport {
+    override val label = "Outlook web ${URL(origin).host}" + if (web) " (web)" else ""
     private val fix = HashMap<String, MutableSet<String>>()
 
     private val host = URL(origin).host
@@ -147,7 +147,23 @@ class OwaTransport(private val origin: String, private val user: String, private
      * gateways (F5 /my.policy, ADFS, two-factor) need the sign-in page, so they raise [LoginRequired].
      */
     @Synchronized fun login(cancel: Cancel? = null) {
-        val r0 = Http.request("$origin/owa/", headers = ua() + ("Accept" to "text/html"), cancel = cancel)
+        if (web) {
+            // the session belongs to the sign-in page; look at /owa/ the way the browser does
+            val r = WebOwa.send(origin, "$origin/owa/", mapOf("Accept" to "text/html"), null, 30000, cancel)
+            Diag.i("owa", "web check /owa/ → ${r.code} redirected=${r.redirected} canary=${loggedIn()} ${r.text.length}B")
+            if (r.redirected || r.code == 0 || r.code == 401 || r.code == 440) throw signInNeeded(host)
+            if (Regex("my\\.policy|/vdesk/|logon\\.aspx|type=.password", RegexOption.IGNORE_CASE).containsMatchIn(r.text)) throw signInNeeded(host)
+            return
+        }
+        // redirects are followed by hand and never into a gateway: touching its policy page could end the session
+        var r0 = Http.request("$origin/owa/", headers = ua() + ("Accept" to "text/html"), follow = false, cancel = cancel)
+        var hops = 0
+        while (r0.code in 300..399 && hops++ < 6) {
+            val loc = URL(URL(r0.url), r0.header("location") ?: break).toString()
+            Diag.i("owa", "login redirect ${r0.code} → ${Diag.url(loc)}")
+            if (isGateway(loc) && !loc.contains("logon.aspx", true)) throw signInNeeded(URL(loc).host + URL(loc).path)
+            r0 = Http.request(loc, headers = ua() + ("Accept" to "text/html"), follow = false, cancel = cancel)
+        }
         val final0 = r0.url
         val u0 = URL(final0)
         val p0 = u0.path.lowercase()
@@ -225,15 +241,23 @@ class OwaTransport(private val origin: String, private val user: String, private
         for (attempt in 0..2) {
             if (!loggedIn()) login(cancel)
             val canary = Http.cookie("$origin/owa/", "X-OWA-CANARY") ?: ""
-            r = Http.request(
-                "$origin/owa/service.svc?action=$op&EP=1&ID=-1&AC=1", "POST",
-                ua() + mapOf("Content-Type" to "application/json; charset=utf-8", "Action" to op, "X-OWA-CANARY" to canary, "X-Requested-With" to "XMLHttpRequest", "Accept" to "application/json"),
-                req.toString().toByteArray(), follow = false, timeoutMs = timeoutMs, cancel = cancel
-            )
+            val url = "$origin/owa/service.svc?action=$op&EP=1&ID=-1&AC=1"
+            val hdr = mapOf("Content-Type" to "application/json; charset=utf-8", "Action" to op, "X-OWA-CANARY" to canary, "X-Requested-With" to "XMLHttpRequest", "Accept" to "application/json")
+            var toLogon: Boolean
+            if (web) {
+                val w = WebOwa.send(origin, url, hdr, req.toString(), timeoutMs, cancel)
+                r = HttpResp(w.code, mapOf("Content-Type" to listOf("application/json; charset=utf-8")), w.text.toByteArray(), url)
+                toLogon = w.redirected || w.code == 0
+                if (toLogon) { Diag.i("owa", "$op web → redirected to sign-in"); throw signInNeeded(host) }
+            } else {
+                r = Http.request(url, "POST", ua() + hdr, req.toString().toByteArray(), follow = false, timeoutMs = timeoutMs, cancel = cancel)
+                toLogon = r.code in 300..399 && isGateway(r.header("location") ?: "")
+            }
             val code = r.code
-            val toLogon = code in 300..399 && isGateway(r.header("location") ?: "")
+            Diag.i("owa", "$op ${if (web) "web" else "native"} → $code")
             if (code == 449) continue // new canary was set in a cookie: just retry
             if (code == 440 || code == 401 || toLogon) {
+                if (web) throw signInNeeded(host)
                 if (attempt == 2) throw AuthException(Y.t("The Outlook web session ended and logging in again did not work.", "Outlook web oturumu kapandı ve yeniden oturum açılamadı."))
                 Http.setCookie("$origin/owa/", "X-OWA-CANARY=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/")
                 login(cancel)

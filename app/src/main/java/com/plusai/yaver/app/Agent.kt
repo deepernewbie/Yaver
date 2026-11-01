@@ -64,6 +64,7 @@ object Agent {
         if (background) sb.append("- This is a background run (a reminder or scheduled task): the user is not watching. Do the task and finish with a short result; it is delivered as a notification. Actions that need the user's confirmation are refused here — say what is left for them.\n")
         sb.append("\n## How to work\n")
         sb.append("- Use your tools instead of guessing. For anything current (news, prices, people in roles, schedules, opening hours) search the web, read the best pages with read_page, and cite them as markdown links.\n")
+        sb.append("- When a task needs a website that has no API — filling a search form, clicking through a portal, checking a tracking or booking page, anything that only works in a browser — use the browser tool: open the page, act on the numbered elements, and read the result. If the site needs the user's sign-in or a captcha, hand it over with browser action=user.\n")
         sb.append("- Company e-mail and calendar: tools mail, calendar and people. Mail ids come from list/search; quote them exactly. When you mention an e-mail, give its subject and sender. Sending e-mail, meeting invitations and responses are always confirmed by the user in a dialog — just call the tool.\n")
         sb.append("- The phone: phone_calendar (the phone's own calendars), phone_alarm, phone_reminder, phone_notify, phone_open (apps, maps, dialer, SMS, e-mail composer), phone_info, phone_clipboard, phone_speak. schedule_task runs a request again and again (every N minutes/hours or daily at a time).\n")
         sb.append("- Files the user attaches are saved in the workspace; read them with read_document (PDF, Word, Excel, PowerPoint, text). run_code runs JavaScript or Python (numpy, pandas, matplotlib…) for calculations, data and charts; files it writes are saved in the workspace and pictures it makes are shown to the user with ![](path).\n")
@@ -206,6 +207,7 @@ object Agent {
                     cancel.check()
                     val args = try { if (t.args.isBlank()) JSONObject() else JSONObject(t.args) } catch (e: Exception) { JSONObject().put("_raw", t.args) }
                     listener?.onToolStart(t.name, args)
+                    Diag.i("tool", "${t.name} " + clip(t.args, 300))
                     var ok = true
                     val result = try {
                         val tool = Tools.get(t.name) ?: throw IllegalArgumentException("unknown tool ${t.name}")
@@ -215,6 +217,7 @@ object Agent {
                         throw e
                     } catch (e: Throwable) {
                         ok = false
+                        Diag.e("tool", "${t.name} failed", e)
                         "Error: " + (e.message ?: e.toString())
                     }
                     c.messages.put(JSONObject().put("role", "tool").put("tool_call_id", t.id).put("name", t.name).put("content", clip(result, 20000)).put("ok", ok))
@@ -228,6 +231,7 @@ object Agent {
             Convos.save(c)
             throw e
         } catch (e: Throwable) {
+            Diag.e("agent", "run failed", e)
             closeOpenCalls(c, "(not run: error)")
             val msg = "⚠️ " + (e.message ?: e.toString())
             c.messages.put(JSONObject().put("role", "assistant").put("content", msg).put("local", true).put("error", true))

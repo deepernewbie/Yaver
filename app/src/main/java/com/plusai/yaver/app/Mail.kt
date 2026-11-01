@@ -42,6 +42,8 @@ object Mail {
             val tries = ArrayList<Pair<String, () -> MailTransport>>()
             val owaO = owaOrigin
             val ews1 = if (Cfg.mailEws.startsWith("http")) ewsUrl(Cfg.mailEws) else null
+            // the signed-in page's own way first: gateways (F5, ADFS) accept it exactly like the browser
+            if (owaO != null) tries.add("web:$owaO" to { OwaTransport(owaO, user, pass, web = true) })
             if (owaO != null) tries.add("owa:$owaO" to { OwaTransport(owaO, user, pass) })
             if (ews1 != null) tries.add("ews:$ews1" to { EwsTransport(ews1, user, pass) })
             if (owaO != null && ews1 == null && user.isNotEmpty()) tries.add("ews:$owaO/EWS/Exchange.asmx" to { EwsTransport("$owaO/EWS/Exchange.asmx", user, pass) })
@@ -53,6 +55,7 @@ object Mail {
                 cancel?.check()
                 try {
                     status = Y.t("Connecting…", "Bağlanılıyor…")
+                    Diag.i("mail", "connect try $key")
                     val t = make()
                     val e = Exchange(t)
                     e.probe(cancel)
@@ -61,12 +64,15 @@ object Mail {
                     needsSignIn = false
                     status = t.label
                     lastError = ""
+                    Diag.i("mail", "connected via $key")
                     return e
                 } catch (e: CancelledException) {
                     throw e
                 } catch (e: LoginRequired) {
+                    Diag.i("mail", "$key: sign-in needed (${e.message})")
                     signIn = e
                 } catch (e: Throwable) {
+                    Diag.e("mail", "$key failed", e)
                     errors.add("${key.substringBefore(':').uppercase()} ${try { URL(key.substringAfter(':')).host } catch (x: Exception) { "" }}: ${e.message}")
                 }
             }
@@ -106,7 +112,6 @@ object Mail {
         needsSignIn = false
         Prefs.put("mail.loginNotified", "0")
         reset()
-        owaOrigin?.let { Cfg.mailMode = "owa:$it" }
     }
 }
 

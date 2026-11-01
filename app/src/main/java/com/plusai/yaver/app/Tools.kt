@@ -43,6 +43,7 @@ object Tools {
         WebTools.register()
         MailTools.register()
         PhoneTools.register()
+        Browser.register()
         ready = true
     }
 

@@ -110,6 +110,7 @@
   var TOOLS = {
     web_search: ["search", "Searched the web", "Web'de arandı", "query"],
     read_page: ["book-open", "Read a page", "Sayfa okundu", "url"],
+    browser: ["globe", "Browser", "Tarayıcı", "action"],
     http_request: ["globe", "Called a web service", "Web servisi çağrıldı", "url"],
     open_in_browser: ["external-link", "Opened a page", "Sayfa açıldı", "url"],
     mail: ["mail", "Mail", "Posta", "action"],
@@ -136,12 +137,13 @@
     phone_clipboard: ["copy", "Clipboard", "Pano", "action"],
     phone_speak: ["volume-2", "Spoke aloud", "Sesli okundu", ""]
   };
-  var ACTIONS = { list: ["list", "listele"], search: ["search", "ara"], read: ["read", "oku"], get_attachment: ["attachment", "ek"], draft: ["draft", "taslak"], send: ["send", "gönder"], send_now: ["send", "gönder"], mark_read: ["mark read", "okundu"], delete: ["delete", "sil"], move: ["move", "taşı"], archive: ["archive", "arşivle"], free: ["free time", "boş zaman"], create: ["create", "oluştur"], respond: ["respond", "yanıtla"], cancel: ["cancel", "iptal"], add: ["add", "ekle"], replace: ["update", "güncelle"], remove: ["remove", "kaldır"], calendars: ["calendars", "takvimler"], alarm: ["alarm", "alarm"], timer: ["timer", "zamanlayıcı"] };
+  var ACTIONS = { list: ["list", "listele"], search: ["search", "ara"], read: ["read", "oku"], get_attachment: ["attachment", "ek"], draft: ["draft", "taslak"], send: ["send", "gönder"], send_now: ["send", "gönder"], mark_read: ["mark read", "okundu"], delete: ["delete", "sil"], move: ["move", "taşı"], archive: ["archive", "arşivle"], free: ["free time", "boş zaman"], create: ["create", "oluştur"], respond: ["respond", "yanıtla"], cancel: ["cancel", "iptal"], add: ["add", "ekle"], replace: ["update", "güncelle"], remove: ["remove", "kaldır"], calendars: ["calendars", "takvimler"], alarm: ["alarm", "alarm"], timer: ["timer", "zamanlayıcı"],
+    open: ["open", "aç"], click: ["click", "tıkla"], type: ["type", "yaz"], select: ["choose", "seç"], check: ["tick", "işaretle"], press: ["key", "tuş"], scroll: ["scroll", "kaydır"], back: ["back", "geri"], forward: ["forward", "ileri"], reload: ["reload", "yenile"], wait: ["wait", "bekle"], text: ["read", "oku"], elements: ["look", "incele"], find: ["find", "bul"], screenshot: ["screenshot", "ekran görüntüsü"], user: ["your turn", "sizde"], close: ["close", "kapat"] };
   function stepInfo(name, args) {
     var d = TOOLS[name] || ["wrench", name, name, ""];
     var label = T(d[1], d[2]);
     var target = "";
-    if (d[3] === "action" && args && args.action) { var a = ACTIONS[args.action]; label += " · " + (a ? T(a[0], a[1]) : args.action); target = args.query || args.subject || args.title || ""; }
+    if (d[3] === "action" && args && args.action) { var a = ACTIONS[args.action]; label += " · " + (a ? T(a[0], a[1]) : args.action); target = args.query || args.subject || args.title || args.url || args.text || args.why || (args.id ? "#" + args.id : "") || ""; }
     else if (d[3] && args) target = args[d[3]] || "";
     if (name === "read_page" && target) { try { target = new URL(target).host.replace(/^www\./, ""); } catch (e) {} }
     if (name === "read_page" && !target && args && args.link) target = "#" + args.link;
@@ -569,7 +571,8 @@
       h("div", { class: "btnstack" },
         notSet ? h("button", { class: "btn p", onclick: function () { openSettings("mail"); } }, icon("settings", "s"), T("Set up mail", "Postayı ayarla"))
           : h("button", { class: "btn p", onclick: function () { signInMail(); } }, icon("log-in", "s"), T("Sign in", "Oturum aç")),
-        notSet ? null : h("button", { class: "btn", onclick: function () { loadMail(true); } }, icon("refresh-cw", "s"), T("Try again", "Yeniden dene")))));
+        notSet ? null : h("button", { class: "btn", onclick: function () { loadMail(true); } }, icon("refresh-cw", "s"), T("Try again", "Yeniden dene")),
+        notSet ? null : h("button", { class: "btn ghost", onclick: shareLog }, icon("share-2", "s"), T("Share diagnostic log", "Tanılama günlüğünü paylaş")))));
   }
 
   function signInMail() {
@@ -815,10 +818,21 @@
       row({ icon: "upload", label: T("Import a yaver export", "yaver dışa aktarımını içe al"), sub: ".zip", onclick: function () { call("import.zip").then(function (m) { if (m) toast(m); refreshConvos(); }).catch(function (e) { toast(e.message); }); } }),
       row({ icon: "folder", label: T("Files", "Dosyalar"), sub: T("Attachments, downloads and files yaver made", "Ekler, indirilenler ve yaver'in oluşturduğu dosyalar"), onclick: function () { call("workspace.list").then(function (t) { sheet({ title: T("Files", "Dosyalar"), body: h("div", { class: "res", style: "display:block;white-space:pre;font-size:12.5px;overflow:auto;max-height:55vh" }, t || T("(empty)", "(boş)")), actions: [[T("Close", "Kapat")]] }); }); } }),
       row({ icon: "log-in", label: T("Sign out everywhere", "Her yerden çıkış yap"), sub: T("Clears the mail session and website sign-ins", "Posta oturumunu ve site girişlerini temizler"), onclick: function () { sheet({ title: T("Sign out everywhere?", "Her yerden çıkılsın mı?"), actions: [[T("Cancel", "İptal")], [T("Sign out", "Çıkış yap"), "danger", function () { call("cookies.clear").then(function () { refreshState().then(renderSettings); toast(T("Signed out", "Çıkış yapıldı")); }); }]] }); } }),
+      row({ icon: "file-text", label: T("Diagnostic log", "Tanılama günlüğü"), sub: T("What yaver did: mail sign-in, connections, tools, errors. No passwords.", "yaver'in yaptıkları: posta oturumu, bağlantılar, araçlar, hatalar. Şifre içermez."), wrap: true, onclick: diagSheet }),
       row({ icon: "info", label: T("Last crash report", "Son çökme raporu"), onclick: function () { call("crash.last").then(function (t) { sheet({ title: T("Last crash report", "Son çökme raporu"), body: h("div", { class: "res", style: "display:block;white-space:pre-wrap;font-size:12px;max-height:50vh;overflow:auto" }, t || T("No crash recorded.", "Kayıtlı çökme yok.")), actions: t ? [[T("Copy", "Kopyala"), "p", function () { call("copy", { text: t }); }], [T("Close", "Kapat")]] : [[T("Close", "Kapat")]] }); }); } })
     ], "yaver " + st.version));
     if (focus === "mail") setTimeout(function () { var el = document.getElementById("s-mail"); if (el) el.scrollIntoView(); }, 300);
   }
+
+  function diagSheet() {
+    var box = h("div", { class: "res", style: "display:block;white-space:pre-wrap;font-size:11.5px;line-height:1.45;max-height:52vh;overflow:auto" }, T("Loading…", "Yükleniyor…"));
+    sheet({ title: T("Diagnostic log", "Tanılama günlüğü"), text: T("Share it to show what happened. Passwords, codes and keys are never written to it.", "Ne olduğunu göstermek için paylaşın. Şifreler, kodlar ve anahtarlar asla yazılmaz."), body: box,
+      actions: [[T("Clear", "Temizle"), "", function () { call("diag.clear").then(function () { toast(T("Log cleared", "Günlük temizlendi")); }); }],
+        [T("Copy", "Kopyala"), "", function () { call("diag.get").then(function (t) { call("copy", { text: t }); toast(T("Copied", "Kopyalandı")); }); return false; }],
+        [T("Share", "Paylaş"), "p", function () { shareLog(); }]] });
+    call("diag.get").then(function (t) { box.textContent = t || T("(empty)", "(boş)"); box.scrollTop = box.scrollHeight; });
+  }
+  function shareLog() { call("diag.save").then(function (p) { return call("share.file", { path: p }); }).catch(function (e) { toast(e.message); }); }
 
   function totpSheet() {
     var M = S.state.mail;

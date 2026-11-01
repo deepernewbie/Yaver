@@ -134,6 +134,7 @@ class MailLoginActivity : Activity() {
         hint = TextView(this).apply { textSize = 13f; setTextColor(p.muted); text = Y.t("Sign in as usual. yaver continues by itself when your inbox appears.", "Her zamanki gibi oturum açın. Gelen kutunuz görününce yaver kendiliğinden devam eder.") }
         foot.addView(hint, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         if (Cfg.mailTotp.isNotEmpty()) foot.addView(U.pill(this, Y.t("Fill code", "Kodu doldur"), true) { fill(true) })
+        foot.addView(U.pill(this, Y.t("Connect", "Bağlan"), Cfg.mailTotp.isEmpty()) { tryConnect(true) })
         root.addView(foot, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         setContentView(root)
         if (origin.isEmpty()) { hint.text = Y.t("Add your Outlook web address in Settings → Mail first.", "Önce Ayarlar → Posta'ya Outlook web adresinizi girin."); return }
@@ -149,7 +150,14 @@ class MailLoginActivity : Activity() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) { progress.progress = newProgress; progress.visibility = if (newProgress >= 100) View.INVISIBLE else View.VISIBLE }
         }
         web.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) { url?.let { sub.text = Uri.parse(it).host + Uri.parse(it).path.orEmpty().take(40) } }
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) { Diag.i("login", "page ${Diag.url(url)}"); url?.let { sub.text = Uri.parse(it).host + Uri.parse(it).path.orEmpty().take(40) } }
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) { view?.postDelayed({ probePage() }, 800) }
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?) {
+                if (request?.isForMainFrame == true) Diag.e("login", "load error ${error?.errorCode} ${error?.description} at ${Diag.url(request.url?.toString())}")
+            }
+            override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: android.webkit.WebResourceResponse?) {
+                if (request?.isForMainFrame == true) Diag.e("login", "HTTP ${errorResponse?.statusCode} at ${Diag.url(request.url?.toString())}")
+            }
             override fun onPageFinished(view: WebView?, url: String?) {
                 fill(false)
                 view?.postDelayed({ fill(false) }, 1200)
@@ -163,6 +171,7 @@ class MailLoginActivity : Activity() {
             }
         }
         web.loadUrl(if (Mail.owaOrigin != null) "$origin/owa/" else Cfg.mailEws)
+        web.postDelayed(ticker, 3000)
     }
 
     private fun askHttpAuth(handler: HttpAuthHandler, host: String) {
@@ -207,23 +216,52 @@ class MailLoginActivity : Activity() {
         }
     }
 
-    private fun checkDone(url: String) {
+    private var lastTry = 0L
+    private var lastProbeLog = 0L
+    private val ticker = object : Runnable {
+        override fun run() {
+            if (done || isFinishing) return
+            probePage()
+            web.postDelayed(this, 2000)
+        }
+    }
+
+    /** Looks at the page: on the mail server, past the sign-in steps, no password or code field showing → try to connect. */
+    private fun probePage() {
         if (done || origin.isEmpty()) return
+        val url = web.url ?: return
         val u = Uri.parse(url)
         val path = (u.path ?: "").lowercase()
-        val sameHost = u.host == Uri.parse(origin).host
-        val inOwa = sameHost && path.startsWith("/owa") && !path.contains("/auth") && !path.contains("logon")
-        val canary = Http.cookie("$origin/owa/", "X-OWA-CANARY") != null
-        if ((inOwa && canary) || (sameHost && path.startsWith("/ews/"))) {
-            done = true
-            CookieManager.getInstance().flush()
-            hint.text = Y.t("Signed in — connecting yaver…", "Oturum açıldı — yaver bağlanıyor…")
-            Mail.signedIn()
-            Y.bg {
-                val ok = try { Mail.connect(); true } catch (e: Throwable) { Y.ui { hint.text = (e.message ?: "").take(200) }; false }
-                Y.ui {
-                    if (ok) { U.toast(this, Y.t("Mail connected", "Posta bağlandı")); Bridge.emit("mail", JSONObject().put("connected", true)); setResult(RESULT_OK); finish() }
-                    else done = false
+        val sameHost = u.host.equals(Uri.parse(origin).host, true)
+        val gate = Regex("my\\.policy|/vdesk|logon|/auth|adfs|/f5-|login", RegexOption.IGNORE_CASE).containsMatchIn(path)
+        if (!sameHost || gate) return
+        web.evaluateJavascript("(function(){var v=[].slice.call(document.querySelectorAll('input')).filter(function(e){return e.offsetParent!==null&&(e.type==='password'||/otp|code|token|challenge/i.test((e.name||'')+(e.id||'')));});return v.length===0&&document.readyState!=='loading';})()") { r ->
+            if (r == "true") tryConnect(false) else if (System.currentTimeMillis() - lastProbeLog > 15000) { lastProbeLog = System.currentTimeMillis(); Diag.i("login", "on ${Diag.url(url)}: sign-in fields still showing") }
+        }
+    }
+
+    private fun checkDone(url: String) { probePage() }
+
+    private fun tryConnect(force: Boolean) {
+        if (done) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastTry < 8000) return
+        Diag.i("login", "signed in? trying to connect (force=$force) at ${Diag.url(web.url)}")
+        lastTry = now
+        done = true
+        CookieManager.getInstance().flush()
+        hint.text = Y.t("Signed in — connecting yaver…", "Oturum açıldı — yaver bağlanıyor…")
+        Mail.signedIn()
+        Y.bg {
+            val err = try { Mail.connect(); null } catch (e: Throwable) { e.message ?: e.toString() }
+            Y.ui {
+                if (isFinishing) return@ui
+                if (err == null) {
+                    U.toast(this, Y.t("Mail connected", "Posta bağlandı")); Bridge.emit("mail", JSONObject().put("connected", true)); setResult(RESULT_OK); finish()
+                } else {
+                    done = false
+                    Diag.e("login", "connect after sign-in: $err")
+                    hint.text = Y.t("Not connected yet: ", "Henüz bağlanamadı: ") + err.removePrefix("SIGNIN:").take(220)
                 }
             }
         }
@@ -234,6 +272,7 @@ class MailLoginActivity : Activity() {
 
 /** yaver's own browser for links. */
 class BrowserActivity : Activity() {
+    private var agent = false
     private lateinit var web: WebView
     private lateinit var progress: ProgressBar
     private lateinit var sub: TextView
@@ -282,6 +321,15 @@ class BrowserActivity : Activity() {
                 dm?.enqueue(r); U.toast(this, Y.t("Downloading ", "İndiriliyor: ") + name)
             } catch (e: Throwable) { U.toast(this, e.message ?: "download failed") }
         }
+        if (intent.getBooleanExtra("agent", false)) {
+            agent = true
+            val foot = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setBackgroundColor(p.surface); setPadding(U.dp(context, 16), U.dp(context, 10), U.dp(context, 12), U.dp(context, 10)) }
+            val why = intent.getStringExtra("why").orEmpty().ifBlank { Y.t("yaver needs you to do something on this page.", "yaver bu sayfada sizin bir şey yapmanızı istiyor.") }
+            foot.addView(TextView(this).apply { textSize = 13f; setTextColor(p.text); text = why + "\n" + Y.t("Tap Done when finished — yaver continues from here.", "Bitince Bitti'ye dokunun — yaver buradan devam eder.") }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            foot.addView(U.pill(this, Y.t("Done", "Bitti"), true) { finish() })
+            root.addView(foot, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            st.userAgentString = Mail.ua
+        }
         val t = (intent.getStringExtra("url") ?: "").trim()
         web.loadUrl(if (t.startsWith("http")) t else "https://duckduckgo.com/?q=" + Uri.encode(t))
     }
@@ -289,5 +337,5 @@ class BrowserActivity : Activity() {
     @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
     override fun onBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
 
-    override fun onDestroy() { try { web.destroy() } catch (_: Throwable) {}; super.onDestroy() }
+    override fun onDestroy() { if (agent) Browser.userDone(try { web.url } catch (_: Throwable) { null }); try { web.destroy() } catch (_: Throwable) {}; super.onDestroy() }
 }
