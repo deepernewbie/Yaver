@@ -1,0 +1,48 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.plusai.yaver'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.plusai.yaver"
+        minSdk 26
+        targetSdk 34
+        versionCode 1          // raise this on every release
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        release {
+            storeFile     file("${rootProject.projectDir}/app/release.keystore")
+            storePassword System.getenv("APP_KEYSTORE_PASSWORD") ?: "android"
+            keyAlias      System.getenv("APP_KEY_ALIAS")         ?: "androiddebugkey"
+            keyPassword   System.getenv("APP_KEY_PASSWORD")      ?: "android"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false      // @JavascriptInterface methods must keep their names
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+}
