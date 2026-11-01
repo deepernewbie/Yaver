@@ -69,23 +69,6 @@ object Y {
     fun dark(c: Context) = (c.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 }
 
-/** Colours for light and dark mode. */
-class Palette(c: Context) {
-    val dark = Y.dark(c)
-    val bg = if (dark) Color.parseColor("#0f1218") else Color.parseColor("#f6f7fb")
-    val surface = if (dark) Color.parseColor("#1a1f29") else Color.WHITE
-    val bar = if (dark) Color.parseColor("#141924") else Color.parseColor("#1f2430")
-    val text = if (dark) Color.parseColor("#e7e9ee") else Color.parseColor("#1b1f27")
-    val muted = if (dark) Color.parseColor("#8f98a8") else Color.parseColor("#6b7280")
-    val accent = Color.parseColor("#6d5dfc")
-    val user = if (dark) Color.parseColor("#2b2f5c") else Color.parseColor("#e6e3ff")
-    val tool = if (dark) Color.parseColor("#171c25") else Color.parseColor("#eef0f5")
-    val code = if (dark) Color.parseColor("#0b0e13") else Color.parseColor("#eceef3")
-    val error = Color.parseColor("#d93b3b")
-    val ok = Color.parseColor("#1a8f5a")
-    val line = if (dark) Color.parseColor("#2a3140") else Color.parseColor("#dfe3ea")
-}
-
 object Keys {
     const val ACTION = "yaver_action"
     const val PAYLOAD = "yaver_payload"

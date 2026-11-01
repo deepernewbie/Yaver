@@ -34,6 +34,8 @@ object Cfg {
     var mailOwa: String get() = s("mailOwa", ""); set(v) = ps("mailOwa", v.trim())
     var mailUser: String get() = s("mailUser", ""); set(v) = ps("mailUser", v.trim())
     var mailPass: String get() = secret("mailPass"); set(v) = putSecret("mailPass", v)
+    var mailTotp: String get() = secret("mailTotp"); set(v) = putSecret("mailTotp", Totp.secretFrom(v))
+    var mailAutoSubmit: Boolean get() = s("mailAutoSubmit", "1") == "1"; set(v) = ps("mailAutoSubmit", if (v) "1" else "0")
     var mailMode: String get() = s("mailMode", ""); set(v) = ps("mailMode", v)
     var mailPoll: Int get() = s("mailPoll", "3").toIntOrNull() ?: 3; set(v) = ps("mailPoll", v.toString())
     var mailNotify: Boolean get() = s("mailNotify", "1") == "1"; set(v) = ps("mailNotify", if (v) "1" else "0")

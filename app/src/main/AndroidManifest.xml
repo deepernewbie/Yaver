@@ -98,10 +98,6 @@
             </intent-filter>
         </activity>
 
-        <activity android:name=".app.ConvosActivity" android:exported="false" />
-        <activity android:name=".app.SettingsActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
-        <activity android:name=".app.MemoryActivity" android:exported="false" />
-        <activity android:name=".app.MailActivity" android:exported="false" />
         <activity android:name=".app.MailLoginActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".app.BrowserActivity"

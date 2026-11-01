@@ -13,7 +13,10 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 import javax.xml.parsers.DocumentBuilderFactory
 
-class AuthException(msg: String) : RuntimeException(msg)
+open class AuthException(msg: String) : RuntimeException(msg)
+
+/** The server wants the user on its own sign-in page (gateway, authenticator, company login). */
+class LoginRequired(msg: String) : AuthException(msg)
 class MailException(msg: String, val code: String = "") : RuntimeException(msg)
 
 /** Sends one EWS operation (a SOAP body fragment with m:/t: prefixes) and returns the answer as a DOM. */
@@ -129,26 +132,42 @@ class OwaTransport(private val origin: String, private val user: String, private
     override val label = "Outlook web ${URL(origin).host}"
     private val fix = HashMap<String, MutableSet<String>>()
 
+    private val host = URL(origin).host
+    private fun ua() = mapOf("User-Agent" to Mail.ua)
+
     private fun loggedIn(): Boolean = Http.cookie("$origin/owa/", "X-OWA-CANARY") != null
 
-    /** Forms login (/owa/auth.owa). */
+    private fun signInNeeded(where: String) = LoginRequired(
+        Y.t("Sign in to your mail once on its own page ($where) — your password is filled in for you; enter the authenticator code if asked.",
+            "Postaya kendi sayfasında bir kez oturum açın ($where) — şifreniz otomatik doldurulur; istenirse doğrulama kodunu girin.")
+    )
+
+    /**
+     * Makes sure there is a mail session. Plain Exchange forms login is done here with the saved password;
+     * gateways (F5 /my.policy, ADFS, two-factor) need the sign-in page, so they raise [LoginRequired].
+     */
     @Synchronized fun login(cancel: Cancel? = null) {
-        val r0 = Http.request("$origin/owa/", headers = mapOf("Accept" to "text/html"), cancel = cancel)
+        val r0 = Http.request("$origin/owa/", headers = ua() + ("Accept" to "text/html"), cancel = cancel)
         val final0 = r0.url
-        if (!final0.contains("/auth/", true) && !final0.contains("logon", true) && URL(final0).host == URL(origin).host && loggedIn()) return
-        if (URL(final0).host != URL(origin).host) throw AuthException(Y.t("This mail server logs in through another site (${URL(final0).host}). Use “Log in on the web page” in Settings → Mail once.", "Bu posta sunucusu başka bir site üzerinden oturum açıyor (${URL(final0).host}). Ayarlar → Posta'daki “Web sayfasında oturum aç”ı bir kez kullanın."))
-        if (user.isEmpty() || pass.isEmpty()) throw AuthException(Y.t("Outlook web needs your user name and password (Settings → Mail).", "Outlook web için kullanıcı adı ve şifre gerekiyor (Ayarlar → Posta)."))
+        val u0 = URL(final0)
+        val p0 = u0.path.lowercase()
+        if (u0.host == host && p0.startsWith("/owa") && !p0.contains("/auth") && !p0.contains("logon") && loggedIn()) return
+        if (u0.host != host || p0.contains("my.policy") || p0.startsWith("/vdesk") || p0.contains("adfs") || !p0.contains("logon.aspx")) throw signInNeeded(u0.host + u0.path)
+        if (user.isEmpty() || pass.isEmpty()) throw signInNeeded(u0.host)
         Http.setCookie(origin, "PBack=0; path=/")
         Http.setCookie(origin, "PrivateComputer=true; path=/")
         val form = linkedMapOf(
             "destination" to "$origin/owa/", "flags" to "4", "forcedownlevel" to "0", "trusted" to "4",
             "username" to user, "password" to pass, "passwordText" to "", "isUtf8" to "1"
         )
-        val r = Http.postForm("$origin/owa/auth.owa", form, mapOf("Referer" to final0, "Origin" to origin), cancel = cancel)
+        val r = Http.postForm("$origin/owa/auth.owa", form, ua() + mapOf("Referer" to final0, "Origin" to origin), cancel = cancel)
         if (r.url.contains("reason=2") || r.url.contains("logon.aspx", true) && !loggedIn()) throw AuthException(Y.t("Outlook web did not accept the user name or password.", "Outlook web kullanıcı adını veya şifreyi kabul etmedi."))
-        if (!loggedIn()) Http.request("$origin/owa/", headers = mapOf("Accept" to "text/html"), cancel = cancel)
-        if (r.code >= 400 && !loggedIn()) throw AuthException("Outlook web login failed (HTTP ${r.code})")
+        if (!loggedIn()) Http.request("$origin/owa/", headers = ua() + ("Accept" to "text/html"), cancel = cancel)
+        if (!loggedIn()) throw signInNeeded(host)
     }
+
+    private fun isGateway(loc: String) = loc.contains("logon", true) || loc.contains("/auth", true) || loc.contains("my.policy", true) || loc.contains("/vdesk", true) || loc.contains("adfs", true) ||
+        (loc.startsWith("http") && try { URL(loc).host != host } catch (e: Exception) { false })
 
     private fun tz(): String = when (ZoneId.systemDefault().id) {
         "Europe/Istanbul" -> "Turkey Standard Time"
@@ -208,11 +227,11 @@ class OwaTransport(private val origin: String, private val user: String, private
             val canary = Http.cookie("$origin/owa/", "X-OWA-CANARY") ?: ""
             r = Http.request(
                 "$origin/owa/service.svc?action=$op&EP=1&ID=-1&AC=1", "POST",
-                mapOf("Content-Type" to "application/json; charset=utf-8", "Action" to op, "X-OWA-CANARY" to canary, "X-Requested-With" to "XMLHttpRequest", "Accept" to "application/json"),
+                ua() + mapOf("Content-Type" to "application/json; charset=utf-8", "Action" to op, "X-OWA-CANARY" to canary, "X-Requested-With" to "XMLHttpRequest", "Accept" to "application/json"),
                 req.toString().toByteArray(), follow = false, timeoutMs = timeoutMs, cancel = cancel
             )
             val code = r.code
-            val toLogon = code in 300..399 && (r.header("location") ?: "").let { it.contains("logon", true) || it.contains("/auth", true) }
+            val toLogon = code in 300..399 && isGateway(r.header("location") ?: "")
             if (code == 449) continue // new canary was set in a cookie: just retry
             if (code == 440 || code == 401 || toLogon) {
                 if (attempt == 2) throw AuthException(Y.t("The Outlook web session ended and logging in again did not work.", "Outlook web oturumu kapandı ve yeniden oturum açılamadı."))
@@ -235,6 +254,7 @@ class OwaTransport(private val origin: String, private val user: String, private
             return null
         }
         if (json == null) {
+            if (Regex("my\\.policy|/vdesk/|logon\\.aspx|<form[^>]+password", RegexOption.IGNORE_CASE).containsMatchIn(text)) throw signInNeeded(host)
             if (resp.code >= 500 && depth < 6) { nextFix()?.let { f.add(it); return send(root, op, depth + 1, timeoutMs, cancel) } }
             throw MailException("web mail HTTP ${resp.code}: " + Html.toText(text).take(160).ifEmpty { "empty answer" })
         }
