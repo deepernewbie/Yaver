@@ -1,0 +1,36 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>yaver import</title></head>
+<body>
+<script>
+/* One-time import: reads what the previous (web) version of yaver stored on this phone and hands it to the native app. */
+(function () {
+  var M = window.YaverMigrate;
+  function finish(o) { try { M.done(JSON.stringify(o)); } catch (e) { M.done(JSON.stringify({ error: String(e) })); } }
+  var out = { cfg: null, secrets: null, files: {} };
+  try { out.cfg = localStorage.getItem("hx:cfg"); out.secrets = localStorage.getItem("hx:secrets"); } catch (e) {}
+  var req;
+  try { req = indexedDB.open("yaver-vfs", 1); } catch (e) { finish(out); return; }
+  req.onupgradeneeded = function () { try { req.transaction.abort(); } catch (e) {} };
+  req.onerror = function () { finish(out); };
+  req.onsuccess = function () {
+    var db = req.result;
+    if (!db.objectStoreNames.contains("files")) { finish(out); return; }
+    var all = db.transaction(["files"], "readonly").objectStore("files").getAll();
+    all.onsuccess = function () {
+      var total = 0;
+      (all.result || []).forEach(function (r) {
+        if (!r || typeof r.p !== "string" || r.p.indexOf("/.yaver/") !== 0) return;
+        if (!/\.(md|json|txt)$/i.test(r.p)) return;
+        var d = r.d;
+        if (typeof d !== "string") { try { d = new TextDecoder().decode(d); } catch (e) { return; } }
+        if (total + d.length > 40 * 1024 * 1024) return;
+        total += d.length;
+        out.files[r.p] = d;
+      });
+      finish(out);
+    };
+    all.onerror = function () { finish(out); };
+  };
+})();
+</script>
+</body></html>

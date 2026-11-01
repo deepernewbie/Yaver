@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Company mail servers often use a certificate from the company's own authority, installed on the phone by IT.
+     Trust those user-installed authorities too, and allow plain http for local model servers (Ollama, LM Studio). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

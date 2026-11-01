@@ -11,8 +11,8 @@ android {
         applicationId "com.plusai.yaver"
         minSdk 26
         targetSdk 34
-        versionCode 4          // raise this on every release
-        versionName "1.0.3"
+        versionCode 10         // raise this on every release
+        versionName "2.0"
     }
 
     signingConfigs {
@@ -43,11 +43,11 @@ android {
     }
 }
 
-// The GitHub repository still holds an older Yaver app under app/src/main/java/dev/yaver/
-// (VibeForge adds and replaces files but never deletes them). Those files need libraries this app
-// does not use, so they are left out of the build.
+// The repository still holds older versions of yaver (the web-page wrapper in com/plusai/yaver/*.kt and an
+// even older app under dev/yaver/). VibeForge never deletes files, so they are left out of the build here.
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     exclude('**/dev/yaver/**')
+    exclude('**/com/plusai/yaver/*.kt')
 }
 
 dependencies {

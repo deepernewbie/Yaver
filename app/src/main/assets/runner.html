@@ -1,0 +1,80 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>yaver code runner</title></head>
+<body>
+<script>
+/* Hidden code engine for yaver's run_code tool. The app's screens are native; this page only executes code. */
+(function () {
+  "use strict";
+  var R = window.YaverRunner;
+  var py = null, pyLoading = null;
+  function b64ToBytes(b) { var s = atob(b), u = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
+  function bytesToB64(u) { var s = ""; for (var i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
+  function done(id, obj) { try { R.done(id, JSON.stringify(obj)); } catch (e) {} }
+
+  function loadPy() {
+    if (py) return Promise.resolve(py);
+    if (pyLoading) return pyLoading;
+    pyLoading = new Promise(function (res, rej) {
+      var s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js";
+      s.onload = function () { loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" }).then(function (p) { py = p; res(p); }, rej); };
+      s.onerror = function () { pyLoading = null; rej(new Error("could not download Python (no internet?)")); };
+      document.head.appendChild(s);
+    });
+    return pyLoading;
+  }
+
+  window.runJob = async function (id, json) {
+    var job = JSON.parse(json), out = [], files = job.files || {};
+    var log = function () { out.push(Array.prototype.map.call(arguments, function (a) { try { return typeof a === "string" ? a : JSON.stringify(a, null, 2); } catch (e) { return String(a); } }).join(" ")); };
+    try {
+      if (job.language === "javascript" || job.language === "js") {
+        var written = {};
+        var fsApi = {
+          read: function (n) { if (!(n in files)) throw new Error("no file " + n); return new TextDecoder().decode(b64ToBytes(files[n])); },
+          readBytes: function (n) { if (!(n in files)) throw new Error("no file " + n); return b64ToBytes(files[n]); },
+          write: function (n, data) { var u = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data); written[n] = bytesToB64(u); },
+          list: function () { return Object.keys(files); }
+        };
+        var con = { log: log, info: log, warn: log, error: log, table: log };
+        var AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+        var fn = new AsyncFunction("console", "fs", job.code);
+        var r = await fn(con, fsApi);
+        if (r !== undefined) log(r);
+        done(id, { ok: true, out: out.join("\n"), files: written });
+        return;
+      }
+      R.progress(id, "Loading Python…");
+      var p = await loadPy();
+      try { p.FS.mkdir("/work"); } catch (e) {}
+      p.FS.chdir("/work");
+      var before = {};
+      for (var name in files) { p.FS.writeFile("/work/" + name, b64ToBytes(files[name])); }
+      p.FS.readdir("/work").forEach(function (n) { if (n !== "." && n !== "..") { try { before[n] = p.FS.stat("/work/" + n).mtime.getTime(); } catch (e) {} } });
+      p.setStdout({ batched: function (s) { out.push(s); } });
+      p.setStderr({ batched: function (s) { out.push(s); } });
+      R.progress(id, "Loading packages…");
+      await p.loadPackagesFromImports(job.code);
+      R.progress(id, "Running…");
+      var pre = "import os\nos.environ['MPLBACKEND']='AGG'\n";
+      var post = "\ntry:\n    import matplotlib.pyplot as _plt\n    for _i in _plt.get_fignums():\n        _plt.figure(_i).savefig(f'/work/figure_{_i}.png', dpi=120, bbox_inches='tight')\n    _plt.close('all')\nexcept Exception:\n    pass\n";
+      await p.runPythonAsync(pre);
+      var res = await p.runPythonAsync(job.code);
+      if (res !== undefined && res !== null) { try { out.push(String(res)); } catch (e) {} }
+      await p.runPythonAsync(post);
+      var written2 = {};
+      p.FS.readdir("/work").forEach(function (n) {
+        if (n === "." || n === "..") return;
+        var st; try { st = p.FS.stat("/work/" + n); } catch (e) { return; }
+        if (p.FS.isDir(st.mode)) return;
+        if (!(n in before) || before[n] !== st.mtime.getTime()) { if (st.size < 30 * 1024 * 1024) written2[n] = bytesToB64(p.FS.readFile("/work/" + n)); }
+      });
+      done(id, { ok: true, out: out.join("\n"), files: written2 });
+    } catch (e) {
+      done(id, { ok: false, out: out.join("\n"), error: String((e && e.message) || e) });
+    }
+  };
+  try { R.ready(); } catch (e) {}
+})();
+</script>
+</body></html>
