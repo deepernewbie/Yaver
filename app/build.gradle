@@ -48,6 +48,11 @@ android {
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     exclude('**/dev/yaver/**')
     exclude('**/com/plusai/yaver/*.kt')
+    // screens of the first native version, replaced by the interface in assets/app
+    exclude('**/com/plusai/yaver/app/MailActivity.kt')
+    exclude('**/com/plusai/yaver/app/Screens.kt')
+    exclude('**/com/plusai/yaver/app/SettingsActivity.kt')
+    exclude('**/com/plusai/yaver/app/Ui.kt')
 }
 
 dependencies {
