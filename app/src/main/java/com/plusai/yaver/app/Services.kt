@@ -86,6 +86,7 @@ class AgentService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Y.init(this)
+        try { Wiring.init(); Heartbeats.start(this) } catch (e: Throwable) { Diag.e("service", "heartbeats", e) }
         if (intent?.action == "stop") {
             running = false
             timer?.shutdownNow(); timer = null
@@ -110,7 +111,10 @@ class AgentService : Service() {
         if (timer == null && Prefs.on("alwaysOn", true)) {
             val t = Executors.newSingleThreadScheduledExecutor()
             timer = t
-            t.scheduleWithFixedDelay({ try { MailWatch.check(this) } catch (e: Throwable) { android.util.Log.w("yaver", "mail check: $e") } }, 20, maxOf(1, Cfg.mailPoll).toLong() * 60, TimeUnit.SECONDS)
+            t.scheduleWithFixedDelay({
+                try { MailWatch.check(this) } catch (e: Throwable) { android.util.Log.w("yaver", "mail check: $e") }
+                try { MailPlus.onMailCheck(this) } catch (e: Throwable) { Diag.e("mailx", "background check", e) }
+            }, 20, maxOf(1, Cfg.mailPoll).toLong() * 60, TimeUnit.SECONDS)
         }
         return if (Prefs.on("alwaysOn", true)) START_STICKY else START_NOT_STICKY
     }
@@ -146,6 +150,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Y.init(context)
         try { Schedule.rearmAll(context) } catch (_: Throwable) {}
+        try { Heartbeats.arm(context) } catch (e: Throwable) { Diag.e("boot", "heartbeats", e) }
         if (Prefs.on("alwaysOn", true)) AgentService.start(context)
     }
 }

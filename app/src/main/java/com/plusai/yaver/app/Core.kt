@@ -47,6 +47,11 @@ class YaverApp : Application() {
         Y.main.post { try { android.webkit.CookieManager.getInstance().setAcceptCookie(true) } catch (_: Throwable) {} }
         Notifier.createChannels(this)
         Shortcuts.publish(this)
+        // the harness: hooks between modules, heartbeats, idle-time learning, connected folders
+        try { Wiring.init() } catch (e: Throwable) { Diag.e("app", "wiring", e) }
+        try { Heartbeats.start(this) } catch (e: Throwable) { Diag.e("app", "heartbeats", e) }
+        try { Learn.start() } catch (e: Throwable) { Diag.e("app", "learn", e) }
+        try { Folders.init() } catch (e: Throwable) { Diag.e("app", "folders", e) }
     }
 }
 

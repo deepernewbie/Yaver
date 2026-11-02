@@ -329,6 +329,7 @@ object Schedule {
 class ScheduleReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Y.init(context)
+        if (intent.action == Heartbeats.ACTION) { Heartbeats.onAlarm(context); return }
         Schedule.fire(context, intent.getIntExtra("id", 0))
     }
 }

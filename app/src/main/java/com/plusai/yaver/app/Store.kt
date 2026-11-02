@@ -14,17 +14,23 @@ class Convo(
     val messages: JSONArray,
     var summary: String = "",
     var summaryUpTo: Int = 0,
-    var background: Boolean = false
+    var background: Boolean = false,
+    /** The frozen base system prompt (Prompt.build), stored on the first turn. */
+    var system: String = "",
+    /** Conversation language (ISO-639-1), set by Lang. */
+    var lang: String? = null
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("title", title).put("created", created).put("updated", updated)
         .put("summary", summary).put("summaryUpTo", summaryUpTo).put("background", background)
+        .put("system", system).put("lang", lang ?: JSONObject.NULL)
         .put("messages", messages)
 
     companion object {
         fun fromJson(j: JSONObject) = Convo(
             j.getString("id"), j.optString("title", "Chat"), j.optLong("created"), j.optLong("updated"),
-            j.optJSONArray("messages") ?: JSONArray(), j.optString("summary", ""), j.optInt("summaryUpTo", 0), j.optBoolean("background", false)
+            j.optJSONArray("messages") ?: JSONArray(), j.optString("summary", ""), j.optInt("summaryUpTo", 0), j.optBoolean("background", false),
+            j.optString("system", ""), if (j.isNull("lang")) null else j.optString("lang", "").ifEmpty { null }
         )
 
         fun create(title: String = Y.t("New chat", "Yeni sohbet"), background: Boolean = false): Convo {
@@ -79,12 +85,19 @@ object Convos {
         (0 until idx.length()).map { idx.getJSONObject(it) }.sortedByDescending { it.optLong("updated") }
     }
 
-    fun delete(id: String) = synchronized(lock) {
-        File(dir, "$id.json").delete()
-        val idx = index()
-        val keep = JSONArray()
-        for (i in 0 until idx.length()) if (idx.getJSONObject(i).optString("id") != id) keep.put(idx.getJSONObject(i))
-        File(dir, "index.json").writeText(keep.toString())
+    fun delete(id: String) {
+        synchronized(lock) {
+            File(dir, "$id.json").delete()
+            val idx = index()
+            val keep = JSONArray()
+            for (i in 0 until idx.length()) if (idx.getJSONObject(i).optString("id") != id) keep.put(idx.getJSONObject(i))
+            File(dir, "index.json").writeText(keep.toString())
+        }
+        // per-conversation harness state lives outside the convo file
+        for ((what, f) in listOf<Pair<String, () -> Unit>>(
+            "ctx" to { Compactor.forget(id) }, "state" to { ConvoState.delete(id) }, "harness" to { Harness.forgetConvo(id) },
+            "heartbeats" to { Heartbeats.clearConvo(id) }, "children" to { Children.clearConvo(id) }, "followups" to { FollowUps.clear(id) }
+        )) try { f() } catch (e: Throwable) { Diag.e("convos", "delete $what of $id", e) }
     }
 
     fun rename(id: String, title: String) {
@@ -123,39 +136,32 @@ object Convos {
     }
 }
 
-/** Long-term memory: facts about the user (profile) and notes yaver keeps for itself. */
+/**
+ * Long-term memory. The store is MemoryX (MemoryPlus.kt: tiers, pins, trash, retrieval); this object keeps the old
+ * API ("notes" = MemoryX's "memory" target) and reads the legacy file memory.json, which MemoryX imports once.
+ */
 object Memory {
     private val file: File get() = File(Y.app.filesDir, "memory.json")
     private val lock = Any()
 
-    private fun load(): JSONObject {
+    /** Entries of the legacy store (memory.json), for MemoryX's one-time import. */
+    fun legacyEntries(target: String): List<String> {
         synchronized(lock) {
-            if (file.exists()) try { return JSONObject(file.readText()) } catch (_: Exception) {}
-            return JSONObject().put("user", JSONArray()).put("notes", JSONArray())
+            if (!file.exists()) return emptyList()
+            val a = try { JSONObject(file.readText()).optJSONArray(if (target == "user") "user" else "notes") } catch (_: Exception) { null } ?: return emptyList()
+            return (0 until a.length()).map { a.optString(it) }
         }
     }
 
-    private fun store(j: JSONObject) = synchronized(lock) { file.writeText(j.toString()) }
+    fun entries(target: String): MutableList<String> = MemoryX.entries(target).toMutableList()
 
-    fun entries(target: String): MutableList<String> {
-        val a = load().optJSONArray(if (target == "user") "user" else "notes") ?: JSONArray()
-        return (0 until a.length()).map { a.getString(it) }.toMutableList()
-    }
-
-    fun set(target: String, list: List<String>) {
-        val j = load()
-        j.put(if (target == "user") "user" else "notes", JSONArray(list))
-        store(j)
-    }
+    fun set(target: String, list: List<String>) = MemoryX.save(target, list.map { it.trim() }.filter { it.isNotEmpty() })
 
     fun add(target: String, text: String): String {
         val t = text.trim()
         if (t.isEmpty()) throw IllegalArgumentException("content is empty")
-        val l = entries(target)
-        if (l.any { it == t }) return Y.t("Already in memory.", "Zaten hafızada.")
-        l.add(t)
-        set(target, l)
-        return Y.t("Saved to memory.", "Hafızaya kaydedildi.")
+        val r = MemoryX.uiAdd(target, t)
+        return if (r.optBoolean("ok")) Y.t("Saved to memory.", "Hafızaya kaydedildi.") else r.optString("error")
     }
 
     private fun find(l: List<String>, old: String): Int {
@@ -179,20 +185,5 @@ object Memory {
         return "Removed."
     }
 
-    fun promptBlock(): String {
-        val u = entries("user")
-        val n = entries("notes")
-        val sb = StringBuilder()
-        if (u.isNotEmpty()) sb.append("## About the user\n").append(u.joinToString("\n") { "- $it" }).append("\n\n")
-        if (n.isNotEmpty()) {
-            sb.append("## Your memory notes\n")
-            var total = 0
-            for (e in n.asReversed()) { // newest first, bounded
-                if (total > 12000) break
-                sb.append("- ").append(e).append("\n")
-                total += e.length
-            }
-        }
-        return sb.toString()
-    }
+    fun promptBlock(): String = MemoryX.block()
 }

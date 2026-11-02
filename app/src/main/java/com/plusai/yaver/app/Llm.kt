@@ -18,6 +18,9 @@ class LlmException(msg: String, val status: Int = 0) : RuntimeException(msg)
 
 /** OpenAI-compatible chat completions (OpenRouter, OpenAI, Groq, Together, Ollama, LM Studio…), streaming and tool calls. */
 object Llm {
+    /** The server accepts stream_options.include_usage (token counts while streaming); off after an HTTP 400. */
+    @Volatile private var usageOk = true
+
     private fun headers(): Map<String, String> {
         val h = HashMap<String, String>()
         h["Content-Type"] = "application/json"
@@ -60,17 +63,21 @@ object Llm {
         }
         body.put("temperature", temperature ?: Cfg.temperature)
         if (maxTokens > 0) body.put("max_tokens", maxTokens)
-        if (stream) body.put("stream", true)
+        if (stream) { body.put("stream", true); if (usageOk) body.put("stream_options", JSONObject().put("include_usage", true)) }
         val waits = intArrayOf(2, 5, 12, 25)
         var attempt = 0
+        var droppedUsage = false
         var lastErr: Throwable? = null
         while (true) {
             cancel?.check()
             try {
-                return once(body, stream, onDelta, onThink, cancel)
+                val r = once(body, stream, onDelta, onThink, cancel)
+                if (droppedUsage) usageOk = false
+                return r
             } catch (e: LlmException) {
                 lastErr = e
                 val retry = e.status == 0 || e.status == 408 || e.status == 429 || e.status >= 500
+                if (e.status == 400 && body.has("stream_options")) { body.remove("stream_options"); droppedUsage = true; continue }
                 if (e.status == 400 && body.has("tool_choice")) { body.remove("tool_choice"); continue }
                 if (!retry || attempt >= waits.size) throw e
             } catch (e: CancelledException) {

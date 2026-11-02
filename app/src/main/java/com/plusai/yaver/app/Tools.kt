@@ -33,18 +33,41 @@ fun JSONObject.int(k: String, d: Int): Int = if (has(k) && !isNull(k)) optDouble
 object Tools {
     private val map = LinkedHashMap<String, Tool>()
     @Volatile private var ready = false
+    private var building = false
 
     fun add(t: Tool) { map[t.name] = t }
     fun get(name: String): Tool? { ensure(); return map[name] }
 
     @Synchronized fun ensure() {
-        if (ready) return
+        if (ready || building) return
+        building = true
+        // later registrations replace earlier tools of the same name
         CoreTools.register()
         WebTools.register()
         MailTools.register()
         PhoneTools.register()
         Browser.register()
+        FileTools.register()     // read_file, write_file, patch, search_files
+        Shell.register()         // terminal
+        CodeEngine.register()    // execute_code
+        WebPlus.register()       // web_extract, fetch, download_file, page_images, browser_* aliases, browser_use
+        HtmlRun.register()       // run_html
+        DocsPlus.register()      // read_document
+        Rag.register()           // search_documents
+        Archive.register()       // unpack_archive, pack_archive
+        Folders.register()       // folder
+        Planning.register()      // todo, clarify, goal, present_plan, present_files
+        Skills.register()        // skills_list, skill_view, skill_manage
+        Harness.register()       // harness
+        Research.register()      // deep_research
+        Subagents.register()     // delegate_task, subagents
+        Heartbeats.register()    // heartbeat
+        MailPlus.register()      // mail, calendar
+        TaskBoard.register()     // task_board
+        Everything.register()    // search_all
+        MemoryX.register()       // memory, session_search — last
         ready = true
+        building = false
     }
 
     fun schemas(subagent: Boolean = false): JSONArray {
@@ -60,35 +83,9 @@ object Tools {
     }
 }
 
-/** Memory, past chats, files, documents, pictures, code and helpers. */
+/** Files, documents, pictures, code and helpers (memory, past chats and delegation live in MemoryPlus.kt / Subagents.kt). */
 object CoreTools {
     fun register() {
-        Tools.add(Tool(
-            "memory",
-            "Long-term memory that is shown to you in every conversation. target=user: facts about the user (name, job, family, preferences, how they like answers). target=notes: things you should remember (projects, people, decisions, standing instructions). action=add (content), replace (old_text = a unique part of the entry, content = new text), remove (old_text), list. Keep entries short and factual; do not store secrets like passwords.",
-            P.props("action" to P.s("add | replace | remove | list", "add", "replace", "remove", "list"), "target" to P.s("user | notes", "user", "notes"), "content" to P.s("Text to store"), "old_text" to P.s("Unique part of the existing entry")),
-            listOf("action")
-        ) { a, _ ->
-            val target = if (a.str("target") == "user") "user" else "notes"
-            when (a.str("action")) {
-                "add" -> Memory.add(target, a.str("content"))
-                "replace" -> Memory.replace(target, a.str("old_text"), a.str("content"))
-                "remove" -> Memory.remove(target, a.str("old_text"))
-                else -> Memory.entries(target).let { l -> if (l.isEmpty()) "(empty)" else l.mapIndexed { i, s -> "${i + 1}. $s" }.joinToString("\n") }
-            }
-        })
-
-        Tools.add(Tool(
-            "search_conversations",
-            "Search the user's earlier conversations with you by words. Returns matching chats with a snippet.",
-            P.props("query" to P.s("Words to look for")), listOf("query")
-        ) { a, ctx ->
-            val r = Convos.search(a.str("query"), 8, ctx.convo.id)
-            if (r.isEmpty()) "No earlier conversation matches." else r.joinToString("\n\n") { (m, snip) ->
-                "• \"${m.optString("title")}\" (${java.text.DateFormat.getDateInstance().format(java.util.Date(m.optLong("updated")))})\n  $snip"
-            }
-        })
-
         Tools.add(Tool(
             "list_files", "List the files in yaver's workspace (attachments are in uploads/, mail attachments in mail/, code output in outputs/).",
             P.props("path" to P.s("Folder (default: the whole workspace)")), emptyList()
@@ -134,6 +131,7 @@ object CoreTools {
             if (f == Workspace.root.canonicalFile) throw IllegalArgumentException("refusing to delete the whole workspace")
             if (!ctx.approve(Y.t("Delete", "Sil") + ": " + Workspace.rel(f), emptyList(), danger = true)) return@Tool ctx.denied("delete ${Workspace.rel(f)}")
             f.deleteRecursively()
+            WsChange.notify(Workspace.rel(f))
             "Deleted ${Workspace.rel(f)}."
         })
 
@@ -177,22 +175,5 @@ object CoreTools {
             CodeRunner.run(a.str("language").ifEmpty { "python" }, a.optString("code"), a.list("files"), a.int("timeout", 120), ctx.cancel)
         })
 
-        Tools.add(Tool(
-            "delegate_task",
-            "Give a self-contained subtask to a helper agent with a fresh context (research, reading several documents, comparing sources). It has the same tools except delegation and returns a report. Use it to keep this conversation short.",
-            P.props("goal" to P.s("What the helper must achieve and deliver"), "context" to P.s("Everything it needs to know")), listOf("goal"),
-            subagentOk = false
-        ) { a, ctx ->
-            if (ctx.depth > 0) throw IllegalStateException("helpers cannot delegate further")
-            val sub = Convo.create("helper", background = true)
-            ctx.progress(Y.t("Helper is working…", "Yardımcı çalışıyor…"))
-            val sublistener = object : AgentListener {
-                override fun onToolStart(name: String, args: JSONObject) { ctx.progress("↳ $name") }
-                override fun approve(title: String, details: String, danger: Boolean) = ctx.listener?.approve(title, details, danger) ?: false
-            }
-            val r = Agent.run(sub, "Task: ${a.str("goal")}\n\nContext: ${a.str("context")}\n\nWork step by step with your tools, then answer with a complete report (sources as links).", listener = sublistener, cancel = ctx.cancel, background = ctx.background, depth = 1)
-            Convos.delete(sub.id)
-            r
-        })
     }
 }

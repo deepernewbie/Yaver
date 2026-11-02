@@ -79,13 +79,20 @@ object Workspace {
         val f = unique(File(root, dirName), safeName(name))
         val ins = c.contentResolver.openInputStream(uri) ?: throw IOException("cannot read $uri")
         ins.use { i -> f.outputStream().use { o -> i.copyTo(o) } }
+        changed(rel(f))
         return rel(f)
     }
 
     fun write(dirName: String, name: String, bytes: ByteArray): String {
         val f = unique(File(root, dirName), safeName(name))
         f.writeBytes(bytes)
+        if (dirName != Spill.DIR) changed(rel(f))
         return rel(f)
+    }
+
+    /** Re-index documents and sync connected folders after a workspace change (never throws). */
+    fun changed(path: String?) {
+        try { WsChange.notify(path) } catch (e: Throwable) { Diag.e("workspace", "change hook", e) }
     }
 
     /** A picture as a data URL for the model, shrunk to at most 1600 px. */

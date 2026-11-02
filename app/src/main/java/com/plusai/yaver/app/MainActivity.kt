@@ -92,9 +92,16 @@ class MainActivity : Activity() {
         Bridge.host = this
         PermGate.activity = this
         Bridge.emit("resume", Bridge.state())
+        Learn.touch()
+        try { Folders.onForeground() } catch (e: Throwable) { Diag.e("folders", "foreground", e) }
     }
 
-    override fun onPause() { resumedNow = false; super.onPause() }
+    override fun onPause() {
+        resumedNow = false
+        try { Folders.onBackground() } catch (e: Throwable) { Diag.e("folders", "background", e) }
+        try { OSync.flush() } catch (e: Throwable) { Diag.e("osync", "flush", e) }
+        super.onPause()
+    }
 
     override fun onDestroy() {
         if (Bridge.host === this) { Bridge.host = null; Bridge.onHostGone() }
@@ -157,6 +164,7 @@ class MainActivity : Activity() {
                     if (Y.tr) i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "tr-TR")
                     startActivityForResult(i, REQ_SPEECH)
                 }
+                "folder.connect" -> { pending[Folders.REQ_PICK] = id; startActivityForResult(Folders.pickIntent(), Folders.REQ_PICK) }
                 "mail.login" -> { pending[REQ_LOGIN] = id; startActivityForResult(Intent(this, MailLoginActivity::class.java), REQ_LOGIN) }
                 "import.zip" -> { pending[REQ_ZIP] = id; startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), REQ_ZIP) }
                 "open.link" -> { openLink(a.str("url")); Bridge.ret(id, true, true) }
@@ -200,10 +208,15 @@ class MainActivity : Activity() {
             }
             REQ_SPEECH -> Bridge.ret(id, true, if (resultCode == RESULT_OK) data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull() ?: "" else "")
             REQ_LOGIN -> Bridge.ret(id, true, Bridge.mailState())
+            Folders.REQ_PICK -> {
+                val u = data?.data
+                if (resultCode != RESULT_OK || u == null) { Bridge.ret(id, true, ""); return }
+                Folders.add(u) { msg -> Diag.i("folders", msg); Bridge.ret(id, true, msg) }
+            }
             REQ_ZIP -> {
                 val u = data?.data
                 if (resultCode != RESULT_OK || u == null) { Bridge.ret(id, true, ""); return }
-                Y.bg { try { Bridge.ret(id, true, Migration.importZip(u).ifEmpty { Y.t("Nothing new to import.", "İçe alınacak yeni bir şey yok.") }) } catch (e: Throwable) { Bridge.ret(id, false, e.message ?: "") } }
+                Y.bg { try { Bridge.ret(id, true, Migration.importZip(u).also { Workspace.changed(null) }.ifEmpty { Y.t("Nothing new to import.", "İçe alınacak yeni bir şey yok.") }) } catch (e: Throwable) { Bridge.ret(id, false, e.message ?: "") } }
             }
         }
     }

@@ -119,7 +119,8 @@ object Bridge {
 
     // ---------------------------------------------------------------- chat
 
-    private fun listener(id: String, run: Run) = object : AgentListener {
+    fun listener(id: String, run: Run) = object : AgentListener {
+        override fun onNote(text: String) { emit("note", JSONObject().put("convoId", id).put("text", text)) }
         override fun onDelta(text: String) { run.text.append(text); emit("run", JSONObject().put("convoId", id).put("phase", "delta").put("text", text)) }
         override fun onStep() { run.text.setLength(0); emit("run", JSONObject().put("convoId", id).put("phase", "step")) }
         override fun onToolStart(name: String, args: JSONObject) { run.status = name; emit("run", JSONObject().put("convoId", id).put("phase", "tool").put("name", name).put("args", args)) }
@@ -144,14 +145,21 @@ object Bridge {
         if (!Cfg.llmReady) throw IllegalStateException(Y.t("Choose a model first (Settings → Model).", "Önce bir model seçin (Ayarlar → Model)."))
         val id = a.str("convoId")
         val c = (if (id.isNotEmpty()) Convos.load(id) else null) ?: Convo.create()
-        if (runs.containsKey(c.id)) throw IllegalStateException(Y.t("yaver is still working on this chat.", "yaver bu sohbette hâlâ çalışıyor."))
         val att = a.list("attachments")
+        Learn.touch()
+        if (runs.containsKey(c.id)) {
+            // a turn is running: the message joins it at the next safe point (or starts the next turn)
+            val t = a.optString("text").trim() + if (att.isNotEmpty()) "\n[Attached files saved in the workspace: ${att.joinToString(", ")}]" else ""
+            if (t.isBlank()) throw IllegalStateException(Y.t("yaver is still working on this chat.", "yaver bu sohbette hâlâ çalışıyor."))
+            Turns.steer(c.id, t)
+            return JSONObject().put("convoId", c.id).put("title", c.title).put("queued", true)
+        }
         val images = att.filter { Workspace.isImage(it) }
         val files = att.filter { !Workspace.isImage(it) }
         val text = a.optString("text").trim().ifEmpty { Y.t("(see the attachments)", "(eklere bakın)") }
         val speak = a.optBoolean("speak")
         val run = Run(Cancel())
-        runs[c.id] = run
+        if (runs.putIfAbsent(c.id, run) != null) { Turns.steer(c.id, text); return JSONObject().put("convoId", c.id).put("title", c.title).put("queued", true) }
         if (!c.background) Prefs.put("currentConvo", c.id)
         Y.bg {
             var answer = ""
@@ -159,7 +167,7 @@ object Bridge {
             try { answer = Agent.run(c, text, images, files, listener(c.id, run), run.cancel) }
             catch (e: CancelledException) { }
             catch (e: Throwable) { err = e.message ?: e.toString() }
-            runs.remove(c.id)
+            runs.remove(c.id, run)
             emit("run", JSONObject().put("convoId", c.id).put("phase", "done").put("error", err ?: JSONObject.NULL))
             if (speak && answer.isNotBlank()) Speaker.speak(answer.take(2500))
             val h = host
@@ -180,7 +188,9 @@ object Bridge {
         "convos.load" -> {
             val c = Convos.load(a.str("id")) ?: throw IllegalArgumentException("not found")
             val r = runs[c.id]
-            c.toJson().put("running", r != null).put("live", r?.text?.toString() ?: "").put("status", r?.status ?: "")
+            c.toJson().apply { remove("system") }.put("running", r != null).put("live", r?.text?.toString() ?: "").put("status", r?.status ?: "")
+                .put("followups", JSONObject().put("items", JSONArray(FollowUps.get(c.id))).put("labels", FollowUps.labels()))
+                .put("planning", Planning.state(c.id))
         }
         "convos.delete" -> { Convos.delete(a.str("id")); true }
         "convos.rename" -> { Convos.rename(a.str("id"), a.str("title")); true }
@@ -191,12 +201,37 @@ object Bridge {
         "speak" -> { Speaker.speak(a.str("text")); true }
         "speak.stop" -> { Speaker.stop(); true }
         "copy" -> { Phone.onMain { Y.app.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("yaver", a.optString("text"))) }; true }
-        "memory.get" -> JSONObject().put("user", JSONArray(Memory.entries("user"))).put("notes", JSONArray(Memory.entries("notes")))
-        "memory.set" -> { Memory.set(a.str("target"), a.list("list")); true }
+        "memory.get" -> JSONObject().put("user", JSONArray(MemoryX.entries("user"))).put("notes", JSONArray(MemoryX.entries("memory")))
+        "memory.set" -> { MemoryX.save(if (a.str("target") == "user") "user" else "memory", a.list("list")); true }
         "schedule.list" -> Schedule.all()
         "schedule.cancel" -> { Schedule.remove(a.optInt("id")); true }
         "workspace.list" -> Workspace.list(Workspace.root).ifEmpty { "" }
-        "diag.save" -> Workspace.write("logs", "yaver-log-" + java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date()) + ".txt", Diag.report().toByteArray())
+        "convo.export" -> {
+            val c = Convos.load(a.str("id")) ?: throw IllegalArgumentException("not found")
+            val md = StringBuilder("# ${c.title}\n\n")
+            for (i in 0 until c.messages.length()) {
+                val m = c.messages.optJSONObject(i) ?: continue
+                when (m.optString("role")) {
+                    "user" -> md.append("## 🧑 ").append(Y.t("You", "Siz")).append("\n\n").append(m.optString("display", m.optString("content"))).append("\n\n")
+                    "assistant" -> {
+                        if (m.optString("content").isNotBlank()) md.append("## 🤖 yaver\n\n").append(m.optString("content")).append("\n\n")
+                        val tc = m.optJSONArray("tool_calls")
+                        if (tc != null) for (k in 0 until tc.length()) { val f = tc.optJSONObject(k)?.optJSONObject("function") ?: continue; md.append("> 🔧 `").append(f.optString("name")).append("` ").append(f.optString("arguments").take(600)).append("\n\n") }
+                    }
+                    "tool" -> md.append("<details><summary>").append(m.optString("name")).append(if (m.optBoolean("ok", true)) " ✓" else " ✗").append("</summary>\n\n```\n").append(m.optString("content").take(4000)).append("\n```\n</details>\n\n")
+                }
+            }
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date())
+            val base = c.title.replace(Regex("[^\\p{L}\\p{N} _-]"), "").trim().take(40).ifEmpty { "sohbet" } + "-" + stamp
+            val mdPath = Workspace.write("exports", "$base.md", md.toString().toByteArray())
+            val full = c.toJson().put("diagnostics", Diag.report().takeLast(80000))
+            val jsPath = Workspace.write("exports", "$base.json", full.toString(1).toByteArray())
+            val saved = try { Workspace.exportToDownloads(Y.app, Workspace.resolve(mdPath)); Workspace.exportToDownloads(Y.app, Workspace.resolve(jsPath)) } catch (e: Throwable) { Diag.e("export", "downloads", e); "" }
+            JSONObject().put("md", mdPath).put("json", jsPath).put("saved", saved)
+        }
+        "diag.save" -> Workspace.write("logs", "yaver-log-" + java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date()) + ".txt", Diag.report().toByteArray()).also { p ->
+            try { Workspace.exportToDownloads(Y.app, Workspace.resolve(p)) } catch (e: Throwable) { Diag.e("export", "log to downloads", e) }
+        }
         "diag.get" -> Diag.report().takeLast(60000)
         "diag.clear" -> { Diag.clear(); true }
         "crash.last" -> File(Y.app.filesDir, "last-crash-shown.txt").let { if (it.exists()) it.readText().take(8000) else "" }
@@ -232,7 +267,138 @@ object Bridge {
                 .put("organizer", e.organizer?.short ?: "").put("allDay", e.allDay).put("response", e.response).put("cancelled", e.cancelled).put("meeting", e.meeting) })
         }
         "mail.respond" -> { Mail.use { it.respond(a.str("id"), a.str("response"), a.str("message")) }; true }
+        else -> if (MailPlus.handles(m)) MailPlus.dispatch(m, a) else harness(m, a)
+    }
+
+    // ---------------------------------------------------------------- harness methods (planning, learning, memory, context…)
+
+    private fun convo(a: JSONObject, key: String = "convoId"): Convo = Convos.load(a.str(key)) ?: throw IllegalArgumentException(Y.t("Conversation not found", "Sohbet bulunamadı"))
+    private fun entry(a: JSONObject) = a.optString("entry").ifEmpty { a.optString("text").ifEmpty { a.optString("id") } }
+
+    private fun harness(m: String, a: JSONObject): Any? = when (m) {
+        "ask.answer" -> {
+            val v = a.opt("answer")
+            Ask.answer(a.optInt("reqId"), when (v) { is JSONObject -> v; null, JSONObject.NULL -> null; else -> JSONObject().put("text", v.toString()) })
+            true
+        }
+        "plan.approve" -> {
+            val id = a.str("convoId")
+            val go = Planning.approvePlan(id)
+            val ok = Turns.start(id, go, Y.t("Plan approved", "Plan onaylandı"), "plan")
+            Diag.i("planning", "plan approved for $id (started=$ok)")
+            JSONObject().put("started", ok)
+        }
+        "planning.state" -> Planning.state(a.str("convoId"))
+        "command" -> command(a.str("convoId"), a.optString("text").trim())
+        "feedback" -> {
+            val c = convo(a)
+            val idx = a.optInt("idx", -1); val vote = a.optInt("vote", 0)
+            if (a.has("comment") && !a.isNull("comment")) {
+                val note = Learn.feedback(c, idx, vote, a.optString("comment"))
+                JSONObject().put("fb", c.messages.optJSONObject(idx)?.optInt("fb", 0) ?: 0).put("askNote", false).put("note", note)
+            } else Learn.toggle(c, idx, vote).put("placeholder", Learn.feedbackPlaceholder())
+        }
+        "followups.get" -> JSONObject().put("items", JSONArray(FollowUps.get(a.str("convoId")))).put("labels", FollowUps.labels()).put("on", FollowUps.enabled)
+        "followups.set" -> {
+            if (a.has("on")) FollowUps.enabled = a.optBoolean("on")
+            if (a.optBoolean("hide") || a.optBoolean("clear")) FollowUps.clear(a.str("convoId"))
+            JSONObject().put("on", FollowUps.enabled)
+        }
+        "learn.state" -> learnState()
+        "learn.set" -> {
+            if (a.has("learn")) LearnSettings.learn = a.optBoolean("learn")
+            if (a.has("every")) Harness.setAuto(a.optInt("every", 0) > 0, a.optInt("every", 0))
+            learnState()
+        }
+        "s1.state" -> Gates.log(0).put("backends", JSONArray(S1Cfg.BACKENDS.map { JSONObject().put("id", it.first).put("label", it.second) }))
+        "s1.set" -> {
+            S1Cfg.apply(a)
+            if (a.has("gate")) S1Cfg.setGate(a.str("gate"), a.optBoolean("on", true))
+            if (a.optBoolean("resetStats")) S1.resetStats()
+            if (a.optBoolean("clearLog")) S1.clearLog()
+            Gates.log(0)
+        }
+        "gates.log" -> Gates.log(a.int("limit", 200))
+        "ctx.set" -> {
+            if (a.has("autoCompact")) CtxCfg.autoCompact = a.optBoolean("autoCompact")
+            if (a.has("compactAt")) CtxCfg.compactAt = a.optInt("compactAt", 90)
+            if (a.has("keepTurns")) CtxCfg.keepTurns = a.optInt("keepTurns", 3)
+            if (a.has("window")) CtxCfg.window = a.optInt("window", 0)
+            JSONObject().put("autoCompact", CtxCfg.autoCompact).put("compactAt", CtxCfg.compactAt).put("keepTurns", CtxCfg.keepTurns).put("window", CtxCfg.window)
+        }
+        "ctx.stats" -> if (a.str("convoId").isEmpty() || a.str("convoId") == "_new") JSONObject().put("autoCompact", CtxCfg.autoCompact).put("compactAt", CtxCfg.compactAt).put("keepTurns", CtxCfg.keepTurns).put("window", CtxCfg.window) else Compactor.stats(convo(a))
+        "followups.clear" -> { FollowUps.clear(a.str("convoId")); true }
+        "ctx.compact" -> {
+            val c = convo(a)
+            if (runs.containsKey(c.id)) throw IllegalStateException(Y.t("Stop the running task first", "Önce çalışan işi durdurun"))
+            val notes = ArrayList<String>()
+            val log = Compactor.compactNow(c, a.optString("focus"), null) { notes.add(it) }
+            Diag.i("ctx", "compact now ${c.id}: " + notes.joinToString(" "))
+            JSONObject().put("log", log ?: JSONObject.NULL).put("note", notes.joinToString("\n")).put("stats", Compactor.stats(c))
+        }
+        "lessons.screen" -> Harness.screen(a.str("convoId").ifEmpty { null }, a.str("filter").ifEmpty { "all" }, a.optString("q"))
+        "lessons.enable" -> Harness.setEnabled(a.str("kind"), a.str("id"), a.optBoolean("on", true))
+        "lessons.delete" -> Harness.delete(a.str("kind"), a.str("id"))
+        "lessons.edit" -> Harness.edit(a.str("kind"), a.str("id"), a.optString("title"), a.optString("content"))
+        "lessons.undo" -> Harness.undo(a.str("id"), a.str("convoId").ifEmpty { null })
+        "lessons.sleep" -> { Y.bg { try { Learn.sleep(true) } catch (e: Throwable) { Diag.e("learn", "sleep", e); emit("toast", JSONObject().put("text", e.message ?: e.toString())) } }; true }
+        "memory.list" -> MemoryX.uiList(a.str("target").ifEmpty { "memory" })
+        "memory.add" -> MemoryX.uiAdd(a.str("target").ifEmpty { "memory" }, a.optString("text"))
+        "memory.edit" -> MemoryX.uiEdit(a.str("target").ifEmpty { "memory" }, a.optString("entry").ifEmpty { a.optString("id") }, a.optString("text"))
+        "memory.pin" -> MemoryX.uiPin(a.str("target").ifEmpty { "memory" }, entry(a), a.optBoolean("on", true))
+        "memory.tier" -> MemoryX.uiToggleTier(entry(a))
+        "memory.delete" -> MemoryX.uiDelete(a.str("target").ifEmpty { "memory" }, entry(a))
+        "memory.trash" -> MemoryX.uiTrash()
+        "memory.restore" -> MemoryX.uiRestore(a.str("id"))
+        "memory.forget" -> MemoryX.uiForget(a.str("id"))
+        "memory.emptyTrash" -> MemoryX.uiEmptyTrash()
+        "memory.reindex" -> MemoryX.uiReindex()
+        "skills.list" -> Skills.listJson()
+        "folders.state" -> Folders.state()
+        "folders.sync" -> Folders.sync(a.str("name").ifEmpty { null })
+        "folders.remove" -> Folders.remove(a.str("name"))
+        "folders.deletes" -> Folders.resolveDeletes(a.str("name"), a.optBoolean("delete"))
         else -> throw IllegalArgumentException("unknown method $m")
+    }
+
+    private fun learnState() = JSONObject().put("learn", LearnSettings.learn).put("every", Harness.every()).put("followups", FollowUps.enabled)
+        .put("sleepLog", JSONArray(Learn.sleepLog().take(10))).put("failures", Learn.failures().size)
+
+    /** Slash commands typed in the composer. Returns {note?, send?, started?}: [send] is sent by the UI as the user's message. */
+    private fun command(convoId: String, text: String): JSONObject {
+        val out = JSONObject()
+        val m = Regex("^/(\\w+)\\s*([\\s\\S]*)$").find(text) ?: return out.put("send", text)
+        val cmd = m.groupValues[1]; val rest = m.groupValues[2].trim()
+        val busy = runs.containsKey(convoId)
+        Diag.i("command", "/$cmd ${clip(rest, 80)}")
+        when (cmd) {
+            "plan", "goal", "autonomous" -> {
+                val c = convo(JSONObject().put("convoId", convoId))
+                val r = Planning.command(c, text, busy) ?: return out.put("send", text)
+                r.note?.let { out.put("note", it) }
+                val s = r.send
+                if (s != null) {
+                    if (r.internal) out.put("started", Turns.start(convoId, s, r.label ?: s.take(60), if (cmd == "goal") "goal" else "auto"))
+                    else out.put("send", s)
+                }
+            }
+            "compact" -> {
+                val c = convo(JSONObject().put("convoId", convoId))
+                if (busy) out.put("note", Y.t("Stop the running task first", "Önce çalışan işi durdurun"))
+                else { val notes = ArrayList<String>(); Compactor.compactNow(c, rest, null) { notes.add(it) }; out.put("note", notes.joinToString("\n").ifEmpty { Y.t("🗜 Nothing to compact yet — the conversation is short.", "🗜 Henüz sıkıştırılacak bir şey yok — konuşma kısa.") }) }
+            }
+            "refine", "harness" -> {
+                val c = convo(JSONObject().put("convoId", convoId))
+                Harness.command(c, text, busy)?.let { out.put("note", it) }
+            }
+            "heartbeat" -> out.put("note", Heartbeats.command(convoId, rest))
+            "heartbeats" -> out.put("note", Heartbeats.listNote(convoId))
+            "subagents" -> out.put("note", Children.command(convoId, rest))
+            "btw" -> SideQuestion.command(convoId, rest)?.let { out.put("note", it) }
+            "today" -> out.put("send", MailPlus.dailyPlanPrompt())
+            else -> out.put("send", text)
+        }
+        return out
     }
 
     private fun boxJson(b: MailBox) = JSONObject().put("name", b.name).put("email", b.email)
@@ -240,7 +406,7 @@ object Bridge {
         .put("received", Exchange.parseTime(h.received)).put("read", h.read).put("attachments", h.attachments).put("importance", h.importance).put("preview", h.preview)
 
     /** Methods that need the screen (pickers, voice, system pages) — run on the main thread by the host. */
-    val UI_METHODS = setOf("files.pick", "voice.listen", "mail.login", "import.zip", "open.link", "open.file", "share.text", "share.file", "system.open", "settings.native")
+    val UI_METHODS = setOf("folder.connect", "files.pick", "voice.listen", "mail.login", "import.zip", "open.link", "open.file", "share.text", "share.file", "system.open", "settings.native")
 
     class Api {
         @JavascriptInterface fun call(id: Int, method: String?, args: String?) {
