@@ -18,6 +18,9 @@ class LlmException(msg: String, val status: Int = 0) : RuntimeException(msg)
 
 /** OpenAI-compatible chat completions (OpenRouter, OpenAI, Groq, Together, Ollama, LM Studio…), streaming and tool calls. */
 object Llm {
+    /** Live progress of the current streamed call on this thread: reasoning chars, tool being prepared, argument chars, number of calls. */
+    val info = ThreadLocal<((Int, String, Int, Int) -> Unit)?>()
+
     /** The server accepts stream_options.include_usage (token counts while streaming); off after an HTTP 400. */
     @Volatile private var usageOk = true
 
@@ -115,7 +118,7 @@ object Llm {
             val c = delta.optString("content", "")
             if (c.isNotEmpty() && c != "null") { content.append(c); onDelta?.invoke(c) }
             val r = delta.optString("reasoning", "").ifEmpty { delta.optString("reasoning_content", "") }
-            if (r.isNotEmpty() && r != "null") { reasoning.append(r); onThink?.invoke(r) }
+            if (r.isNotEmpty() && r != "null") { reasoning.append(r); onThink?.invoke(r); info.get()?.invoke(reasoning.length, calls.values.lastOrNull()?.get(1) ?: "", calls.values.sumOf { it[2].length }, calls.size) }
             val tc = delta.optJSONArray("tool_calls")
             if (tc != null) for (i in 0 until tc.length()) {
                 val t = tc.getJSONObject(i)
@@ -130,6 +133,7 @@ object Llm {
                     val a = f.optString("arguments", "")
                     if (a != "null") slot[2] = slot[2] + a
                 }
+                info.get()?.invoke(reasoning.length, slot[1], calls.values.sumOf { it[2].length }, calls.size)
             }
         }
         if (code !in 200..299) {

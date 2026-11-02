@@ -7,6 +7,8 @@ import org.json.JSONObject
 interface AgentListener {
     fun onDelta(text: String) {}
     fun onThinking(text: String) {}
+    /** Live status while the model works: hidden reasoning characters, the tool call being written and its size. */
+    fun onThinkInfo(reasoning: Int, tool: String, args: Int, calls: Int) {}
     fun onStep() {}
     fun onToolStart(name: String, args: JSONObject) {}
     fun onToolEnd(name: String, result: String, ok: Boolean) {}
@@ -191,7 +193,7 @@ object Agent {
     fun run(
         c: Convo, text: String, images: List<String> = emptyList(), files: List<String> = emptyList(),
         listener: AgentListener? = null, cancel: Cancel = Cancel(), background: Boolean = false, depth: Int = 0, label: String? = null,
-        internal: String? = null, systemExtra: String? = null, allowedTools: Set<String>? = null, maxSteps: Int = 0
+        internal: String? = null, systemExtra: String? = null, allowedTools: Set<String>? = null, maxSteps: Int = 0, display: String? = null
     ): String {
         val isSub = depth > 0
         val isInternal = internal != null
@@ -255,7 +257,7 @@ object Agent {
             if (route.recall) content += try { MemoryX.recallBlock(text, c.id) } catch (_: Throwable) { "" }
             content += Lang.onUserMessage(c, text, isInternal)
             content += "\n\n" + Prompt.nowNote()
-            um = userMessage(content, images, files).put("display", text)
+            um = userMessage(content, images, files).put("display", display ?: text)
             if (route.chips.isNotEmpty()) um.put("s1", route.chipsJson())
             if (memInfo != null) um.put("mem", memInfo)
             if (internal != null) um.put("internal", internal)
@@ -361,6 +363,7 @@ object Agent {
             if (!isSub && iter > 0) deliverPending(c, st, turn)
             val tools = toolsNow()
             Compactor.auto(c, tools, model, cancel, isSub, { t -> note(t); Diag.i("ctx", t) }, progress, st.userText)
+            Llm.info.set(if (listener == null) null else { a, b, cc, d -> listener.onThinkInfo(a, b, cc, d) })
             val (r, sent) = Compactor.chatWithRetry(c, tools, model, cancel, isSub, st, { t -> note(t); Diag.i("ctx", t) }, progress) { tl ->
                 Llm.chat(requestMessages(c, systemExtra, isSub), if (empty >= 3 || tl.length() == 0) null else tl, model,
                     onDelta = { listener?.onDelta(it) }, onThink = { listener?.onThinking(it) }, cancel = cancel, stream = if (empty >= 2) false else Cfg.stream)

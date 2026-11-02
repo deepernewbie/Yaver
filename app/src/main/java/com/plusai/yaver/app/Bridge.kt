@@ -122,6 +122,13 @@ object Bridge {
     fun listener(id: String, run: Run) = object : AgentListener {
         override fun onNote(text: String) { emit("note", JSONObject().put("convoId", id).put("text", text)) }
         override fun onDelta(text: String) { run.text.append(text); emit("run", JSONObject().put("convoId", id).put("phase", "delta").put("text", text)) }
+        private var lastInfo = 0L
+        override fun onThinkInfo(reasoning: Int, tool: String, args: Int, calls: Int) {
+            val now = System.currentTimeMillis()
+            if (now - lastInfo < 350) return
+            lastInfo = now
+            emit("run", JSONObject().put("convoId", id).put("phase", "think").put("reasoning", reasoning).put("tool", tool).put("args", args).put("calls", calls))
+        }
         override fun onStep() { run.text.setLength(0); emit("run", JSONObject().put("convoId", id).put("phase", "step")) }
         override fun onToolStart(name: String, args: JSONObject) { run.status = name; emit("run", JSONObject().put("convoId", id).put("phase", "tool").put("name", name).put("args", args)) }
         override fun onToolEnd(name: String, result: String, ok: Boolean) { run.status = ""; emit("run", JSONObject().put("convoId", id).put("phase", "toolEnd").put("name", name).put("ok", ok)) }
@@ -164,7 +171,7 @@ object Bridge {
         Y.bg {
             var answer = ""
             var err: String? = null
-            try { answer = Agent.run(c, text, images, files, listener(c.id, run), run.cancel) }
+            try { answer = Agent.run(c, text, images, files, listener(c.id, run), run.cancel, display = a.optString("display").trim().ifEmpty { null }) }
             catch (e: CancelledException) { }
             catch (e: Throwable) { err = e.message ?: e.toString() }
             runs.remove(c.id, run)
@@ -320,13 +327,25 @@ object Bridge {
         }
         "gates.log" -> Gates.log(a.int("limit", 200))
         "ctx.set" -> {
+            // the UI sends {key, value}; plain {autoCompact: …} also works
+            if (a.has("key")) a.put(a.str("key"), a.opt("value"))
+            if (a.has("window")) {
+                val w = a.optInt("window", 0)
+                // a window set by hand also lifts the token budget to use it (the user can lower "Context budget" again)
+                if (w > 0) { val usable = ((w - Compactor.outReserve(w)) * 0.92).toInt(); if (Cfg.contextTokens < usable) Cfg.contextTokens = usable }
+            }
             if (a.has("autoCompact")) CtxCfg.autoCompact = a.optBoolean("autoCompact")
             if (a.has("compactAt")) CtxCfg.compactAt = a.optInt("compactAt", 90)
             if (a.has("keepTurns")) CtxCfg.keepTurns = a.optInt("keepTurns", 3)
             if (a.has("window")) CtxCfg.window = a.optInt("window", 0)
             JSONObject().put("autoCompact", CtxCfg.autoCompact).put("compactAt", CtxCfg.compactAt).put("keepTurns", CtxCfg.keepTurns).put("window", CtxCfg.window)
         }
-        "ctx.stats" -> if (a.str("convoId").isEmpty() || a.str("convoId") == "_new") JSONObject().put("autoCompact", CtxCfg.autoCompact).put("compactAt", CtxCfg.compactAt).put("keepTurns", CtxCfg.keepTurns).put("window", CtxCfg.window) else Compactor.stats(convo(a))
+        "ctx.stats" -> if (a.str("convoId").isEmpty() || a.str("convoId") == "_new") JSONObject().put("autoCompact", CtxCfg.autoCompact).put("compactAt", CtxCfg.compactAt).put("keepTurns", CtxCfg.keepTurns).put("window", CtxCfg.window).put("windowSource", if (CtxCfg.window > 0) "set" else "").put("budget", Compactor.budget()) else Compactor.stats(convo(a))
+        "mail.title" -> {
+            val id = a.str("id")
+            MailIndex.entry(id)?.let { e -> JSONObject().put("subject", e.s).put("from", e.fr?.let { it.name.ifEmpty { it.email } } ?: "") }
+                ?: try { val m = Mail.use { it.get(id) }; JSONObject().put("subject", m.h.subject).put("from", m.h.from?.let { it.name.ifEmpty { it.email } } ?: "") } catch (e: Throwable) { JSONObject() }
+        }
         "followups.clear" -> { FollowUps.clear(a.str("convoId")); true }
         "ctx.compact" -> {
             val c = convo(a)

@@ -171,17 +171,19 @@ object Notifier {
         return PendingIntent.getActivity(c, id, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
-    fun show(c: Context, title: String, text: String, action: String? = null, payload: String? = null, channel: String = CH_MAIN, pi: PendingIntent? = null): Int {
+    fun show(c: Context, title: String, text: String, action: String? = null, payload: String? = null, channel: String = CH_MAIN, pi: PendingIntent? = null,
+             actions: ((Int) -> List<Notification.Action>)? = null): Int {
         if (!canPost(c)) return -1
         val id = ids.incrementAndGet()
-        val n = Notification.Builder(c, channel)
+        val b = Notification.Builder(c, channel)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setContentTitle(title)
             .setContentText(text)
             .setStyle(Notification.BigTextStyle().bigText(text))
             .setAutoCancel(true)
             .setContentIntent(pi ?: intent(c, action, payload, id))
-            .build()
+        actions?.invoke(id)?.forEach { b.addAction(it) }
+        val n = b.build()
         c.getSystemService(NotificationManager::class.java)?.notify(id, n)
         return id
     }

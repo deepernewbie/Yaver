@@ -651,3 +651,6 @@ button.kcard:active { background: var(--sunken); }
 .pb-row .ib.sm { width: 32px; height: 32px; color: var(--ink-2); }
 .u .qcap { display: flex; align-items: center; gap: 5px; margin-top: 4px; font-size: 12px; color: var(--muted); }
 .toast.act.on { pointer-events: auto; }
+.md a.mlink { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 1px 9px 1px 7px; margin: 1px 0; border-radius: 999px; background: var(--violet-soft); color: var(--violet-ink); text-decoration: none; font-weight: 600; font-size: .94em; vertical-align: baseline; }
+.md a.mlink span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.md a.mlink .i { width: 14px; height: 14px; flex: none; }

@@ -141,8 +141,10 @@ object MailWatch {
         Prefs.put("mail.seenInit", "1")
         if (first || fresh.isEmpty()) return
         if (fresh.size <= 3) for (m in fresh) {
-            Notifier.show(c, "📬 " + (m.from?.short ?: "?"), m.subject + if (m.preview.isNotBlank()) "\n" + m.preview.replace(Regex("\\s+"), " ").take(200) else "", "mail_open", m.id, Notifier.CH_MAIL)
-        } else Notifier.show(c, "📬 " + Y.t("${fresh.size} new e-mails", "${fresh.size} yeni e-posta"), fresh.take(6).joinToString("\n") { "${it.from?.short ?: "?"}: ${it.subject}" }, "mail", null, Notifier.CH_MAIL)
+            Notifier.show(c, "📬 " + (m.from?.short ?: "?"), m.subject + if (m.preview.isNotBlank()) "\n" + m.preview.replace(Regex("\\s+"), " ").take(200) else "", "mail_open", m.id, Notifier.CH_MAIL,
+                actions = { nid -> MailActions.forMail(c, m.id, nid) })
+        } else Notifier.show(c, "📬 " + Y.t("${fresh.size} new e-mails", "${fresh.size} yeni e-posta"), fresh.take(6).joinToString("\n") { "${it.from?.short ?: "?"}: ${it.subject}" }, "mail", null, Notifier.CH_MAIL,
+            actions = { nid -> MailActions.forMany(c, fresh.map { it.id }, nid) })
     }
 }
 
@@ -172,5 +174,60 @@ class YaverTileService : TileService() {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         if (Build.VERSION.SDK_INT >= 34) startActivityAndCollapse(PendingIntent.getActivity(this, 201, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
         else startActivityAndCollapse(i)
+    }
+}
+
+
+/** Buttons on new-mail notifications: ask yaver, mark read, delete (one e-mail); summarize, mark all read (several). */
+object MailActions {
+    const val ACTION = "com.plusai.yaver.MAIL_ACTION"
+    private fun broadcast(c: Context, what: String, ids: List<String>, nid: Int, req: Int): PendingIntent =
+        PendingIntent.getBroadcast(c, req, Intent(c, MailActionReceiver::class.java).setAction(ACTION).putExtra("what", what)
+            .putExtra("ids", ids.toTypedArray()).putExtra("nid", nid), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    private fun act(label: String, pi: PendingIntent) = android.app.Notification.Action.Builder(null as Icon?, label, pi).build()
+
+    private fun open(c: Context, action: String, payload: String, nid: Int, req: Int): PendingIntent {
+        val i = Intent(c, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra(Keys.ACTION, action).putExtra(Keys.PAYLOAD, payload).putExtra(Keys.NOTIF_ID, nid)
+        return PendingIntent.getActivity(c, req, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    fun forMail(c: Context, id: String, nid: Int): List<android.app.Notification.Action> = listOf(
+        act(Y.t("Ask yaver", "yaver'e sor"), open(c, "mail_ask", id, nid, nid * 10 + 1)),
+        act(Y.t("Mark read", "Okundu"), broadcast(c, "read", listOf(id), nid, nid * 10 + 2)),
+        act(Y.t("Delete", "Sil"), broadcast(c, "delete", listOf(id), nid, nid * 10 + 3))
+    )
+
+    fun forMany(c: Context, ids: List<String>, nid: Int): List<android.app.Notification.Action> = listOf(
+        act(Y.t("Summarize", "Özetle"), open(c, "mail_summary", ids.joinToString(","), nid, nid * 10 + 1)),
+        act(Y.t("Mark all read", "Tümü okundu"), broadcast(c, "read", ids, nid, nid * 10 + 2))
+    )
+}
+
+class MailActionReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        Y.init(context)
+        val what = intent.getStringExtra("what") ?: return
+        val ids = intent.getStringArrayExtra("ids")?.toList().orEmpty()
+        val nid = intent.getIntExtra("nid", -1)
+        val nm = context.getSystemService(android.app.NotificationManager::class.java)
+        nm?.cancel(nid)
+        val pending = goAsync()
+        Y.bg {
+            try {
+                for (id in ids) {
+                    when (what) {
+                        "read" -> { Mail.use { it.markRead(id, true) }; try { MailIndex.markRead(id, true) } catch (_: Throwable) {} }
+                        "delete" -> { Mail.use { it.remove(id, false) }; try { MailIndex.forget(id) } catch (_: Throwable) {} }
+                    }
+                }
+                Diag.i("mail", "notification action $what ×${ids.size}")
+                Bridge.emit("mail.changed", org.json.JSONObject().put("what", what))
+                Y.ui { android.widget.Toast.makeText(context, if (what == "delete") Y.t("Moved to Deleted Items", "Silinmiş Öğeler'e taşındı") else Y.t("Marked as read", "Okundu olarak işaretlendi"), android.widget.Toast.LENGTH_SHORT).show() }
+            } catch (e: Throwable) {
+                Diag.e("mail", "notification action $what", e)
+                Notifier.show(context, Y.t("Could not do it", "Yapılamadı"), (e.message ?: e.toString()).removePrefix("SIGNIN:").take(300), if (e is LoginRequired) "mail_login" else "mail", null, Notifier.CH_MAIL)
+            } finally { pending.finish() }
+        }
     }
 }

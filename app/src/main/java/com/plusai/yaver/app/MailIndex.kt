@@ -169,6 +169,7 @@ object MailIndex {
     }
 
     fun count(): Int = synchronized(lock) { load().size }
+    fun entry(id: String): MailEntry? = synchronized(lock) { load()[id] }
     fun max(): Int = maxOf(200, MailPlusCfg.indexMax)
     private fun all(): List<MailEntry> = synchronized(lock) { load().values.toList() }
 

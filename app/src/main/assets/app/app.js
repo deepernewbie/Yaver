@@ -88,7 +88,37 @@
 
   /* ------------------------------------------------------------ markdown */
   if (window.marked) marked.setOptions({ gfm: true, breaks: false });
+  /* e-mail references: [subject](mail:id) links and bare Exchange item ids (AAMk…/AQMk…) become chips with the subject */
+  var MAIL_ID = /(?:AAMk|AQMk|AAQk)[A-Za-z0-9+\/_-]{30,}={0,2}/g, MAIL_SUBJ = {};
+  function isMailId(t) { return /^(?:AAMk|AQMk|AAQk)[A-Za-z0-9+\/_-]{30,}={0,2}$/.test(String(t || "").trim()); }
+  function mailChip(id, label) {
+    var generic = !label || isMailId(label) || /^(e-?mail|mail|link|here|burada|bu e-posta|e-posta)$/i.test(label);
+    var span = h("span", null, generic ? (MAIL_SUBJ[id] || T("e-mail", "e-posta")) : label);
+    var a = h("a", { class: "mlink", href: "mail:" + id, "data-mail": id }, icon("mail", "xs"), span);
+    if (generic && !MAIL_SUBJ[id]) {
+      call("mail.title", { id: id }).then(function (r) {
+        if (r && r.subject) { MAIL_SUBJ[id] = r.subject + (r.from ? " — " + r.from : ""); document.querySelectorAll('a.mlink[data-mail="' + id.replace(/"/g, "") + '"] span').forEach(function (el) { if (!el.dataset.fixed) el.textContent = MAIL_SUBJ[id]; }); }
+      }).catch(function () {});
+    } else span.dataset.fixed = generic ? "" : "1";
+    return a;
+  }
+  function mailChips(root) {
+    root.querySelectorAll('a[href^="mail:"],a[href^="#mail:"]').forEach(function (a) {
+      var id = decodeURIComponent(a.getAttribute("href").replace(/^#?mail:/, "")); a.parentNode.replaceChild(mailChip(id, a.textContent.trim()), a);
+    });
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [], n;
+    while ((n = walker.nextNode())) if (MAIL_ID.test(n.nodeValue) && !n.parentNode.closest("a,pre,code")) nodes.push(n), MAIL_ID.lastIndex = 0; else MAIL_ID.lastIndex = 0;
+    nodes.forEach(function (tn) {
+      var txt = tn.nodeValue, frag = document.createDocumentFragment(), last = 0, m;
+      MAIL_ID.lastIndex = 0;
+      while ((m = MAIL_ID.exec(txt))) { frag.appendChild(document.createTextNode(txt.slice(last, m.index).replace(/\(?\s*(mail\s*)?id\s*[:=]\s*$/i, ""))); frag.appendChild(mailChip(m[0])); last = MAIL_ID.lastIndex; }
+      frag.appendChild(document.createTextNode(txt.slice(last).replace(/^\s*\)/, "")));
+      tn.parentNode.replaceChild(frag, tn);
+    });
+  }
+
   function md(text) {
+    text = String(text || "").replace(/\]\(\s*mail:/g, "](#mail:");
     var html = window.marked ? marked.parse(String(text || "")) : String(text || "").replace(/[&<]/g, function (c) { return c === "&" ? "&amp;" : "&lt;"; });
     if (window.DOMPurify) html = DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
     var box = h("div", { class: "md", html: html });
@@ -101,11 +131,12 @@
     box.querySelectorAll("pre").forEach(function (p) {
       p.appendChild(h("button", { class: "cp", "aria-label": T("Copy", "Kopyala"), onclick: function (e) { e.stopPropagation(); call("copy", { text: p.innerText }); toast(T("Copied", "Kopyalandı")); } }, icon("copy", "xs")));
     });
+    mailChips(box);
     box.addEventListener("click", function (e) {
       var a = e.target.closest("a"); if (!a) return;
       e.preventDefault();
       var href = a.getAttribute("href") || "";
-      if (/^mail:/.test(href)) openMail(href.slice(5));
+      if (/^#?mail:/.test(href)) openMail(decodeURIComponent(href.replace(/^#?mail:/, "")));
       else if (/^task:/.test(href)) taskSheet(href.slice(5));
       else if (href) call("open.link", { url: href });
     });
@@ -183,7 +214,7 @@
     var d = TOOLS[name] || ["wrench", name, name, ""];
     var label = T(d[1], d[2]);
     var target = "";
-    if (d[3] === "action" && args && args.action) { var a = ACTIONS[args.action]; label += " · " + (a ? T(a[0], a[1]) : args.action); target = args.query || args.subject || args.title || args.url || args.text || args.why || (args.id ? "#" + args.id : "") || ""; }
+    if (d[3] === "action" && args && args.action) { var a = ACTIONS[args.action]; label += " · " + (a ? T(a[0], a[1]) : args.action); target = args.query || args.subject || args.title || args.url || args.text || args.why || (args.id && String(args.id).length < 12 ? "#" + args.id : "") || ""; }
     else if (d[3] && args) target = args[d[3]] || "";
     if (name === "read_page" && target) { try { target = new URL(target).host.replace(/^www\./, ""); } catch (e) {} }
     if (name === "read_page" && !target && args && args.link) target = "#" + args.link;
@@ -272,7 +303,7 @@
       var live = h("div", { id: "live" });
       if (S.live) live.appendChild(md(S.live));
       t.appendChild(live);
-      t.appendChild(h("div", { class: "status", id: "lstatus" }, h("div", { class: "spin" }), h("span", null, S.liveStatus || (S.liveTool ? stepInfo(S.liveTool.name, S.liveTool.args).label + "…" : (S.live ? T("Writing…", "Yazıyor…") : T("Thinking…", "Düşünüyor…"))))));
+      t.appendChild(h("div", { class: "status", id: "lstatus" }, h("div", { class: "spin" }), h("span", null, S.liveStatus || (S.liveTool ? stepInfo(S.liveTool.name, S.liveTool.args).label + "…" : (S.live ? T("Writing…", "Yazıyor…") : (waitText() || T("Thinking…", "Düşünüyor…")))))));
     }
     // collapse long traces
     th.querySelectorAll(".trace").forEach(function (tr) {
@@ -389,15 +420,16 @@
     S.fbAsk = null;
     // show it at once
     if (!S.convo) S.convo = { id: "", title: String(t).slice(0, 60), messages: [] };
-    S.convo.messages = (S.convo.messages || []).concat([opts.label ? { role: "user", content: t, label: opts.label } : { role: "user", content: t, display: t, images: atts.filter(function (a) { return a.image; }).map(function (a) { return a.path; }), files: atts.filter(function (a) { return !a.image; }).map(function (a) { return a.path; }) }]);
+    S.convo.messages = (S.convo.messages || []).concat([opts.label ? { role: "user", content: t, label: opts.label } : { role: "user", content: t, display: opts.display || t, images: atts.filter(function (a) { return a.image; }).map(function (a) { return a.path; }), files: atts.filter(function (a) { return !a.image; }).map(function (a) { return a.path; }) }]);
     var tmpId = S.convoId || "_new";
     if (tmpId === "_new") moveSide("", "_new");
-    S.running[tmpId] = true; S.convoId = tmpId;
+    S.running[tmpId] = true; S.convoId = tmpId; S.wait = { t0: Date.now(), info: null };
     if (!steering) { S.live = ""; S.liveTool = null; S.liveStatus = ""; }
     renderThread(); syncSend();
     var args = { convoId: tmpId === "_new" ? "" : tmpId, text: t, attachments: atts.map(function (a) { return a.path; }), speak: speak };
     if (opts.label) args.label = opts.label;
     if (opts.internal) args.internal = true;
+    if (opts.display) args.display = opts.display;
     call("chat.send", args).then(function (r) {
       r = r || {};
       if (r.steered || r.queued) {
@@ -498,6 +530,22 @@
   }
 
   /* ------------------------------------------------------------ events from the core */
+  /* live status while the model works, as in the original: hidden reasoning characters, the tool call being written, seconds */
+  function fmtK(n) { return n >= 1000 ? (n / 1000).toFixed(1).replace(".", S.lang === "tr" ? "," : ".") + (S.lang === "tr" ? " bin" : "k") : String(n); }
+  function waitText() {
+    var w = S.wait; if (!w) return "";
+    var sec = Math.round((Date.now() - w.t0) / 1000), i = w.info, t = "";
+    if (i && i.tool) t = T("preparing a tool call: ", "araç çağrısı hazırlanıyor: ") + i.tool + (i.calls > 1 ? " (+" + (i.calls - 1) + ")" : "") + (i.args ? " · " + fmtK(i.args) + T(" chars", " karakter") : "") + (i.reasoning ? T(" · thinking ", " · düşünme ") + fmtK(i.reasoning) : "");
+    else if (i && i.reasoning) t = T("thinking · ", "düşünüyor · ") + fmtK(i.reasoning) + T(" chars", " karakter");
+    else t = T("waiting for the model", "model yanıtı bekleniyor");
+    return t + (sec >= 2 ? " · " + sec + T(" s", " sn") : "");
+  }
+  function waitTick() {
+    if (!S.running[S.convoId] || S.live || S.liveStatus || S.liveTool) return;
+    var st = $("#lstatus span"); if (st) st.textContent = waitText() || T("Thinking…", "Düşünüyor…");
+  }
+  setInterval(waitTick, 1000);
+
   function onEvent(type, d) {
     d = d || {};
     if (type === "run") {
@@ -514,6 +562,8 @@
       }
       S.running[id] = true;
       if (id !== S.convoId) return;
+      if (d.phase !== "delta" && d.phase !== "think" && d.phase !== "progress") { S.wait = { t0: Date.now(), info: null }; }
+      if (d.phase === "think") { if (!S.wait) S.wait = { t0: Date.now(), info: null }; S.wait.info = d; waitTick(); return; }
       if (d.phase === "delta") { S.live += d.text; S.liveStatus = ""; renderLive(); }
       else if (d.phase === "step") { S.live = ""; loadConvo(id); }
       else if (d.phase === "tool") { S.liveTool = { name: d.name, args: d.args || {} }; S.liveStatus = ""; renderThread(); }
@@ -837,6 +887,17 @@
     else if (a === "open_convo" && d.text) { closeAllPages(); loadConvo(d.text); }
     else if (a === "mail") openMailPage();
     else if (a === "mail_open" && d.text) openMail(d.text);
+    else if (a === "mail_ask" && d.text) {
+      toast(T("Opening the e-mail…", "E-posta açılıyor…"));
+      call("mail.get", { id: d.text }).then(function (m) { askAbout(m); }).catch(function () { askAbout({ id: d.text, subject: "", from: null }); });
+    }
+    else if (a === "mail_summary" && d.text) {
+      closeAllPages(); newChat();
+      var ids = d.text.split(",");
+      send(T("Summarize my new e-mails (mail ids: " + ids.join(", ") + "): for each, who sent it, what it is about and whether I need to do something. Most important first.",
+        "Yeni e-postalarımı özetle (mail id'leri: " + ids.join(", ") + "): her biri için kimden geldi, ne hakkında ve benim bir şey yapmam gerekiyor mu. En önemlisi önce."),
+        { display: T("Summarize my " + ids.length + " new e-mails", ids.length + " yeni e-postamı özetle") });
+    }
     else if (a === "crash") sheet({ title: T("yaver closed unexpectedly last time", "yaver geçen sefer beklenmedik şekilde kapandı"), text: T("This report helps fix it. Copy it and send it along.", "Bu rapor sorunun çözülmesine yardım eder. Kopyalayıp iletin."), body: h("div", { class: "res", style: "display:block;white-space:pre-wrap;font-size:12px;max-height:40vh;overflow:auto" }, d.text), actions: [[T("Copy report", "Raporu kopyala"), "p", function () { call("copy", { text: d.text }); toast(T("Copied", "Kopyalandı")); }], [T("Close", "Kapat")]] });
   }
 
@@ -1149,8 +1210,9 @@
 
   function askAbout(m) {
     closeAllPages(); newChat();
+    var who = m.from && (m.from.name || m.from.email) || "";
     send(T("Look at this e-mail (mail id=" + m.id + ", subject \"" + m.subject + "\" from " + (m.from && (m.from.name || m.from.email)) + "). Summarize it, tell me what is expected of me and suggest a reply.",
-      "Şu e-postaya bak (mail id=" + m.id + ", konu \"" + m.subject + "\", gönderen " + (m.from && (m.from.name || m.from.email)) + "). Özetle, benden ne bekleniyor söyle ve bir yanıt öner."));
+      "Şu e-postaya bak (mail id=" + m.id + ", konu \"" + m.subject + "\", gönderen " + (m.from && (m.from.name || m.from.email)) + "). Özetle, benden ne bekleniyor söyle ve bir yanıt öner."), { display: T("About “" + m.subject + "” from " + who + ": summarize it, what is expected of me, and suggest a reply.", "“" + m.subject + "” (" + who + ") e-postasını özetle, benden ne bekleniyor söyle ve bir yanıt öner.") });
   }
 
   function composeSheet(kind, m) {
@@ -1802,7 +1864,8 @@
         row({ icon: "minimize-2", label: T("Compact automatically", "Otomatik sıkıştır"), sub: T("Summarize older messages when the chat gets long", "Sohbet uzayınca eski mesajları özetle"), toggle: autoC, onToggle: function (on) { setX("ctx.set", { key: "autoCompact", value: on }); } }),
         row({ icon: "gauge", label: T("Compact at", "Sıkıştırma eşiği"), value: "%" + at, onclick: function () { optionsSheet(T("Compact when the context is", "Bağlam şu orana gelince sıkıştır"), [60, 70, 80, 85, 90, 95].map(function (n) { return [String(n), "%" + n]; }), String(at), function (v) { setX("ctx.set", { key: "compactAt", value: +v }); }); } }),
         row({ icon: "messages-square", label: T("Turns kept word for word", "Aynen korunan turlar"), value: String(keep), onclick: function () { optionsSheet(T("Recent turns kept word for word", "Aynen korunan son turlar"), [1, 2, 3, 4, 5, 8, 12].map(function (n) { return [String(n), String(n)]; }), String(keep), function (v) { setX("ctx.set", { key: "keepTurns", value: +v }); }); } }),
-        row({ icon: "layers", label: T("Model context window", "Model bağlam penceresi"), sub: win ? T("Set by you", "Sizin ayarınız") : T("Automatic: from the service or learned", "Otomatik: hizmetten veya öğrenilir"), value: win ? k(win) : (C.window ? T("auto · ", "otomatik · ") + k(C.window) : T("auto", "otomatik")), onclick: function () { editSheet({ title: T("Model context window", "Model bağlam penceresi"), type: "number", inputmode: "numeric", value: win ? String(win) : "", placeholder: T("auto", "otomatik"), help: T("Tokens. Leave empty for automatic — set it only if compaction starts too late.", "Token. Otomatik için boş bırakın — yalnızca sıkıştırma geç başlıyorsa ayarlayın."), save: function (v) { setX("ctx.set", { key: "window", value: Math.max(0, parseInt(v, 10) || 0) }); } }); } })
+        row({ icon: "layers", label: T("Model context window", "Model bağlam penceresi"), sub: win ? T("Set by you", "Sizin ayarınız") : T("Automatic: from the service or learned", "Otomatik: hizmetten veya öğrenilir"), value: win ? k(win) : (C.window ? T("auto · ", "otomatik · ") + k(C.window) : T("auto", "otomatik")), onclick: function () { editSheet({ title: T("Model context window", "Model bağlam penceresi"), type: "number", inputmode: "numeric", value: win ? String(win) : "", placeholder: T("auto", "otomatik"), help: T("Tokens. Leave empty for automatic — set it only if compaction starts too late.", "Token. Otomatik için boş bırakın — yalnızca sıkıştırma geç başlıyorsa ayarlayın."), save: function (v) { var n = Math.max(0, parseInt(String(v).replace(/[^0-9]/g, ""), 10) || 0); setX("ctx.set", { key: "window", value: n }, function () { refreshState().then(function () { renderSettings(); toast(n ? T("Context window: " + k(n), "Bağlam penceresi: " + k(n)) : T("Context window: automatic", "Bağlam penceresi: otomatik")); }); }); } }); } }),
+        row({ icon: "gauge", label: T("Context budget", "Bağlam bütçesi"), sub: T("Most tokens sent per request; the meter in the chat counts against this", "İstek başına gönderilen en fazla token; sohbetteki gösterge buna göre sayar"), wrap: true, value: k((S.state.llm || {}).contextTokens || 48000), onclick: function () { optionsSheet(T("Context budget (tokens)", "Bağlam bütçesi (token)"), [16000, 32000, 48000, 64000, 96000, 128000, 200000].map(function (n) { return [String(n), k(n)]; }), String((S.state.llm || {}).contextTokens || 48000), function (v) { setCfg("contextTokens", Number(v)).then(function () { renderSettings(); }); }); } })
       ]));
 
       var s1 = X.s1 || {}, cfg = s1.cfg || s1, be = cfg.backend || "off";
