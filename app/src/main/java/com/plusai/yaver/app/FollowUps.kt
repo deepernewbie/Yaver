@@ -76,7 +76,8 @@ object FollowUps {
             val sys = "You suggest what the user will most likely ask next, right after the assistant's answer below. Give exactly 4 short follow-up requests, written as the user would type them to the assistant (imperative, at most 12 words, specific to this result — mention the actual file, topic or item), each something the assistant can do with its tools (files, web, code, mail, calendar, tasks). Make them different from each other: e.g. go deeper, fix/improve, export/share, a logical next step. Do not repeat what was already done. Write them in $language. Output only a JSON array of 4 strings."
             val user = "User asked: ${clip(userText, 800)}\n\nTools used: ${tools.joinToString(", ").ifEmpty { "none" }}" +
                 (if (files.isNotEmpty()) "\nFiles written: ${files.take(8).joinToString(", ")}" else "") +
-                "\n\nAssistant's final answer:\n${clip(last.optString("content"), 2500)}"
+                "\n\nAssistant's final answer:\n${clip(last.optString("content"), 2500)}" +
+                "\n\nWrite the 4 requests in $language only, whatever the language of the text above."
             val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", sys)).put(JSONObject().put("role", "user").put("content", user))
             val r = Llm.chat(msgs, null, Cfg.fastModel.ifEmpty { Cfg.model }, cancel = cancel, maxTokens = 1500, stream = false)
             val t = r.content.ifEmpty { r.reasoning }.replace(Regex("```(?:json)?"), "")
@@ -84,6 +85,16 @@ object FollowUps {
             Regex("\\[[\\s\\S]*\\]").find(t)?.let { m -> try { val a = JSONArray(m.value); raw = (0 until a.length()).map { a.opt(it)?.toString() ?: "" } } catch (_: Exception) {} }
             if (raw == null) raw = t.split("\n").map { it.replace(Regex("^\\s*(?:[-*•]|\\d+[.)])\\s*"), "").replace(Regex("^[\"']|[\"'],?$"), "").trim() }.filter { it.length > 3 }
             items = raw!!.map { it.trim() }.filter { it.isNotEmpty() && it.length <= 160 }.distinct().take(4)
+            // the fast model sometimes answers in English anyway: translate once into the wanted language
+            val wantCode = when (language) { "Turkish" -> "tr"; "English" -> "en"; else -> null }
+            val got = if (items.isNotEmpty()) Lang.detect(items.joinToString(". ")) else null
+            if (wantCode != null && got != null && got != wantCode) {
+                Diag.i("followups", "came in $got, translating to $language")
+                val tr = Llm.chat(JSONArray().put(JSONObject().put("role", "system").put("content", "Translate each string of the JSON array into $language. Keep the meaning, names and file names. Output only a JSON array of strings."))
+                    .put(JSONObject().put("role", "user").put("content", JSONArray(items).toString())), null, Cfg.fastModel.ifEmpty { Cfg.model }, cancel = cancel, maxTokens = 800, stream = false)
+                val tt = tr.content.ifEmpty { tr.reasoning }.replace(Regex("```(?:json)?"), "")
+                Regex("\\[[\\s\\S]*\\]").find(tt)?.let { m -> try { val a2 = JSONArray(m.value); val l = (0 until a2.length()).map { a2.optString(it).trim() }.filter { it.isNotEmpty() && it.length <= 160 }; if (l.size >= 2) items = l.take(4) } catch (_: Exception) {} }
+            }
         } catch (e: CancelledException) {
             items = emptyList()
         } catch (e: Throwable) {

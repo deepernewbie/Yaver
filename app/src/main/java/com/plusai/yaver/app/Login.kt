@@ -134,6 +134,7 @@ class MailLoginActivity : Activity() {
         hint = TextView(this).apply { textSize = 13f; setTextColor(p.muted); text = Y.t("Sign in as usual. yaver continues by itself when your inbox appears.", "Her zamanki gibi oturum açın. Gelen kutunuz görününce yaver kendiliğinden devam eder.") }
         foot.addView(hint, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         if (Cfg.mailTotp.isNotEmpty()) foot.addView(U.pill(this, Y.t("Fill code", "Kodu doldur"), true) { fill(true) })
+        foot.addView(U.pill(this, Y.t("New session", "Yeni oturum"), false) { newSession(false) })
         foot.addView(U.pill(this, Y.t("Connect", "Bağlan"), Cfg.mailTotp.isEmpty()) { tryConnect(true) })
         root.addView(foot, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         setContentView(root)
@@ -159,6 +160,7 @@ class MailLoginActivity : Activity() {
                 if (request?.isForMainFrame == true) Diag.e("login", "HTTP ${errorResponse?.statusCode} at ${Diag.url(request.url?.toString())}")
             }
             override fun onPageFinished(view: WebView?, url: String?) {
+                checkGatewayError(url ?: "")
                 fill(false)
                 view?.postDelayed({ fill(false) }, 1200)
                 checkDone(url ?: "")
@@ -170,8 +172,36 @@ class MailLoginActivity : Activity() {
                 askHttpAuth(handler, host ?: "")
             }
         }
-        web.loadUrl(if (Mail.owaOrigin != null) "$origin/owa/" else Cfg.mailEws)
+        // the session already ended: start from a clean slate, or the gateway keeps answering with the dead session
+        if (Mail.needsSignIn || intent.getBooleanExtra("fresh", false)) { Diag.i("login", "session had ended: clearing the gateway cookies first"); MailSession.clear(origin) }
+        web.loadUrl(startUrl())
         web.postDelayed(ticker, 3000)
+    }
+
+    private fun startUrl() = if (Mail.owaOrigin != null) "$origin/owa/" else Cfg.mailEws
+    private var resets = 0
+
+    /** Fresh session: forget the old gateway/OWA cookies and open the sign-in page again. */
+    private fun newSession(auto: Boolean) {
+        resets++
+        autoSubmits = 0; lastAutoUrl = ""; done = false
+        MailSession.clear(origin)
+        try { web.clearCache(false) } catch (_: Throwable) {}
+        hint.text = Y.t("Started a new session — sign in again.", "Yeni oturum başlatıldı — yeniden oturum açın.")
+        Diag.i("login", "new session (${if (auto) "gateway error page" else "button"})")
+        web.postDelayed({ web.loadUrl(startUrl()) }, 600)
+    }
+
+    /** F5 / gateway error pages ("Access was denied…", "session could not be established", "start a new session"). */
+    private fun checkGatewayError(url: String) {
+        if (origin.isEmpty()) return
+        web.evaluateJavascript("(function(){var t=(document.body&&document.body.innerText||'').slice(0,4000);return /access (was |is )?denied|access policy|group policy|session could not be|session has (expired|been terminated|timed out)|start a new session|new session|oturum(unuz)? (sona erdi|kurulamad|zaman aşımı)|erişim reddedildi|yeni oturum|errorcode|error code/i.test(t)&&t.length<3500&&!document.querySelector('input[type=password]');})()") { r ->
+            if (r == "true") {
+                Diag.e("login", "gateway error page at ${Diag.url(url)}")
+                if (resets < 2) newSession(true)
+                else hint.text = Y.t("The mail gateway refuses a new session. Wait a few minutes (it may still count the old session) or ask IT.", "Posta ağ geçidi yeni oturuma izin vermiyor. Birkaç dakika bekleyin (eski oturumu hâlâ sayıyor olabilir) ya da BT'ye danışın.")
+            }
+        }
     }
 
     private fun askHttpAuth(handler: HttpAuthHandler, host: String) {
@@ -338,4 +368,25 @@ class BrowserActivity : Activity() {
     override fun onBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
 
     override fun onDestroy() { if (agent) Browser.userDone(try { web.url } catch (_: Throwable) { null }); try { web.destroy() } catch (_: Throwable) {}; super.onDestroy() }
+}
+
+
+/** Cookies of the mail server and its gateway (F5 MRHSession, LastMRH_Session, F5_ST, OWA cadata/canary…). */
+object MailSession {
+    fun clear(origin: String) {
+        val cm = CookieManager.getInstance()
+        val host = try { Uri.parse(origin).host ?: "" } catch (e: Throwable) { "" }
+        val names = LinkedHashSet<String>()
+        for (path in listOf("/", "/owa/", "/my.policy", "/vdesk/", "/ews/")) cm.getCookie(origin + path)?.split(";")?.forEach { p -> p.substringBefore('=').trim().takeIf { it.isNotEmpty() }?.let { names.add(it) } }
+        val parent = host.substringAfter('.', "").takeIf { it.contains('.') }
+        for (n in names) for (path in listOf("/", "/owa", "/owa/", "/my.policy", "/vdesk", "/ews")) {
+            val dead = "$n=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=$path"
+            cm.setCookie(origin, dead)
+            cm.setCookie(origin, "$dead; Secure")
+            if (parent != null) { cm.setCookie(origin, "$dead; Domain=.$parent"); cm.setCookie(origin, "$dead; Domain=$host") }
+        }
+        cm.flush()
+        Mail.reset()
+        Diag.i("login", "cleared ${names.size} cookies for $host")
+    }
 }
