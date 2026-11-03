@@ -50,6 +50,7 @@ class YaverApp : Application() {
         // the harness: hooks between modules, heartbeats, idle-time learning, connected folders
         try { Wiring.init() } catch (e: Throwable) { Diag.e("app", "wiring", e) }
         try { Heartbeats.start(this) } catch (e: Throwable) { Diag.e("app", "heartbeats", e) }
+        try { MailKeepAlive.arm(this) } catch (e: Throwable) { Diag.e("app", "keepalive", e) }
         try { Learn.start() } catch (e: Throwable) { Diag.e("app", "learn", e) }
         try { Folders.init() } catch (e: Throwable) { Diag.e("app", "folders", e) }
     }

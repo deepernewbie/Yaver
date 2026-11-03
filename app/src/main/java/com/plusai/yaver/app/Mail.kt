@@ -94,13 +94,19 @@ object Mail {
     }
 
     /** Runs a mailbox operation; on an ended session it reconnects once, then asks the user to sign in. */
+    /** Connects; when the session has ended, tries a silent sign-in once before asking the user. */
+    private fun connectOrRelogin(cancel: Cancel?): Exchange = try { connect(cancel) } catch (l: LoginRequired) {
+        Diag.i("mail", "session ended (${MailKeepAlive.lifeNote()})")
+        if (SilentLogin.canTry() && SilentLogin.run(cancel)) connect(cancel) else throw l
+    }
+
     fun <T> use(cancel: Cancel? = null, f: (Exchange) -> T): T {
-        val e = try { connect(cancel) } catch (l: LoginRequired) { askToSignIn(l.message ?: ""); throw l }
+        val e = try { connectOrRelogin(cancel) } catch (l: LoginRequired) { askToSignIn(l.message ?: ""); throw l }
         return try {
             f(e)
         } catch (a: AuthException) {
             reset()
-            try { f(connect(cancel)) } catch (a2: AuthException) { askToSignIn(a2.message ?: ""); throw a2 }
+            try { f(connectOrRelogin(cancel)) } catch (a2: AuthException) { askToSignIn(a2.message ?: ""); throw a2 }
         } catch (io: java.io.IOException) {
             reset()
             f(connect(cancel))
@@ -110,6 +116,8 @@ object Mail {
     /** Called after a successful sign-in on the page. */
     fun signedIn() {
         needsSignIn = false
+        Prefs.put("mail.signedInAt", System.currentTimeMillis().toString())
+        try { MailKeepAlive.arm(Y.app) } catch (_: Throwable) {}
         Prefs.put("mail.loginNotified", "0")
         reset()
     }

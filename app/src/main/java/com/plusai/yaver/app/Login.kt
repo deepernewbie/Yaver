@@ -108,7 +108,11 @@ class MailLoginActivity : Activity() {
 
     inner class Capture {
         @JavascriptInterface fun creds(user: String?, pass: String?) {
-            if (!pass.isNullOrEmpty()) { Cfg.mailPass = pass; if (!user.isNullOrBlank()) Cfg.mailUser = user.trim() }
+            if (pass.isNullOrEmpty() || pass.length < 3) return
+            // an authenticator code typed into a password-type box must never replace the saved password
+            if (Regex("^\\d{4,8}$").matches(pass) && Cfg.mailPass.isNotEmpty() && Cfg.mailPass.length > pass.length) { Diag.i("login", "ignored a code-like value as password"); return }
+            if (pass != Cfg.mailPass) Diag.i("login", "password captured from the sign-in page (${pass.length} chars)")
+            Cfg.mailPass = pass; if (!user.isNullOrBlank()) Cfg.mailUser = user.trim()
         }
         @JavascriptInterface fun filled(what: String?) { Y.ui { hint.text = what ?: "" } }
     }
@@ -223,24 +227,7 @@ class MailLoginActivity : Activity() {
             .put("msgPw", Y.t("Password filled in by yaver", "Şifre yaver tarafından dolduruldu"))
             .put("msgCode", Y.t("Authenticator code filled in", "Doğrulama kodu dolduruldu"))
             .put("msgAsk", Y.t("Enter the code from your authenticator app", "Doğrulama uygulamanızdaki kodu girin"))
-        val js = """
-(function(a){try{
- function vis(e){return e&&e.offsetParent!==null&&!e.disabled&&e.type!=='hidden';}
- function set(e,v){if(!e||!v)return false;if(e.value===v)return true;e.focus();var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');d.set.call(e,v);e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return true;}
- var ins=[].slice.call(document.querySelectorAll('input')).filter(vis);
- var pw=ins.filter(function(e){return e.type==='password';})[0];
- var user=ins.filter(function(e){return /user|login|email|account|kullan/i.test((e.name||'')+(e.id||'')+(e.autocomplete||''))&&e.type!=='password';})[0]||(pw?ins.filter(function(e){return (e.type==='text'||e.type==='email')&&e!==pw;})[0]:null);
- var otp=ins.filter(function(e){var k=(e.name||'')+' '+(e.id||'')+' '+(e.autocomplete||'')+' '+(e.placeholder||'');return e!==pw&&e!==user&&(/otp|token|challenge|passcode|one-time|verification|code|kod|_F5_challenge/i.test(k)||e.inputMode==='numeric'||e.maxLength===6);})[0];
- if(!otp&&!pw){var only=ins.filter(function(e){return e.type==='text'||e.type==='tel'||e.type==='number';});if(only.length===1&&/code|kod|token|otp|verification|doğrulama|authenticator/i.test(document.body.innerText||''))otp=only[0];}
- var did=false,msg='';
- if(pw&&a.p){if(user&&a.u)set(user,a.u);if(set(pw,a.p)){did=true;msg=a.msgPw;}}
- if(otp){if(a.code){if(set(otp,a.code)){did=true;msg=a.msgCode;}}else{msg=a.msgAsk;otp.focus();}}
- if(pw&&!pw.__y){pw.__y=1;var f=pw.form;var cap=function(){YaverLogin.creds(user?user.value:'',pw.value);};if(f)f.addEventListener('submit',cap,true);[].slice.call(document.querySelectorAll('button,input[type=submit],input[type=image],a')).forEach(function(b){b.addEventListener('click',cap,true);});pw.addEventListener('keydown',function(e){if(e.key==='Enter')cap();});}
- if(msg)YaverLogin.filled(msg);
- if(did&&a.auto){var el=otp&&a.code?otp:pw;var f2=el.form;setTimeout(function(){var b=f2?f2.querySelector('[type=submit],button:not([type=button]),input[type=image]'):null;if(b)b.click();else if(f2)f2.submit();},500);return 'submitted';}
- return did?'filled':'';
-}catch(e){return '';}})($args)
-"""
+        val js = LoginJs.fill(args)
         web.evaluateJavascript(js) { r ->
             if (r?.contains("submitted") == true) { autoSubmits++; lastAutoUrl = url }
         }
@@ -389,4 +376,40 @@ object MailSession {
         Mail.reset()
         Diag.i("login", "cleared ${names.size} cookies for $host")
     }
+}
+
+
+/** The sign-in page helper, shared by the visible sign-in page and the silent re-login. */
+object LoginJs {
+    fun fill(args: JSONObject): String = """
+(function(a){try{
+ function vis(e){return e&&e.offsetParent!==null&&!e.disabled&&e.type!=='hidden';}
+ function set(e,v){if(!e||!v)return false;if(e.value===v)return true;e.focus();var d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');d.set.call(e,v);e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return true;}
+ var ins=[].slice.call(document.querySelectorAll('input')).filter(vis);
+ function lab(e){var t='';try{if(e.id){var l=document.querySelector('label[for="'+e.id+'"]');if(l)t+=' '+l.innerText;}var p=e.closest('label,td,tr,div');if(p)t+=' '+(p.innerText||'').slice(0,120);}catch(x){}return t;}
+ var OTPRX=/otp|token|challenge|passcode|one.?time|verif|code|kod|do[gğ]rulama|authenticat|totp|mfa|2fa|\bpin\b|tek kullan/i;
+ function isOtp(e){var k=(e.name||'')+' '+(e.id||'')+' '+(e.autocomplete||'')+' '+(e.placeholder||'')+' '+(e.getAttribute('aria-label')||'');if(/one-time-code/.test(e.autocomplete||''))return true;if(OTPRX.test(k))return true;if(e.inputMode==='numeric'||e.type==='tel'||e.type==='number')return true;if(e.maxLength>0&&e.maxLength<=8)return true;return e.type==='password'&&OTPRX.test(lab(e))&&!/password|parola|şifre|sifre/i.test(lab(e));}
+ var user=ins.filter(function(e){return e.type!=='password'&&!isOtp(e)&&/user|login|email|account|kullan|logon|domain/i.test((e.name||'')+(e.id||'')+(e.autocomplete||''));})[0]||null;
+ var pws=ins.filter(function(e){return e.type==='password'&&!isOtp(e);});
+ var bodyT=(document.body&&document.body.innerText||'').slice(0,3000);
+ var otpPage=/one.?time|verification code|authenticator|do[gğ]rulama kodu|tek kullan[ıi]ml[ıi]k|\bOTP\b|token code|passcode|security code|g[uü]venlik kodu/i.test(bodyT);
+ if(otpPage&&!user&&pws.length===1&&!ins.some(function(e){return e!==pws[0]&&e.type==='password';})){pws=[];}
+ var pw=pws[0]||null;
+ if(!user&&pw)user=ins.filter(function(e){return (e.type==='text'||e.type==='email')&&!isOtp(e);})[0]||null;
+ var otp=ins.filter(function(e){return e!==pw&&e!==user&&isOtp(e);})[0]||null;
+ if(!otp&&!pw&&otpPage){var only=ins.filter(function(e){return e.type==='text'||e.type==='tel'||e.type==='number'||e.type==='password';});if(only.length===1)otp=only[0];}
+ var did=false,msg='';
+ if(pw&&a.p){if(user&&a.u)set(user,a.u);if(set(pw,a.p)){did=true;msg=a.msgPw;}}
+ if(otp){if(a.code){if(set(otp,a.code)){did=true;msg=a.msgCode;}}else{msg=a.msgAsk;otp.focus();}}
+ if(pw&&!pw.__y){pw.__y=1;var f=pw.form;var cap=function(){if(!isOtp(pw))YaverLogin.creds(user?user.value:'',pw.value);};if(f)f.addEventListener('submit',cap,true);[].slice.call(document.querySelectorAll('button,input[type=submit],input[type=image],a')).forEach(function(b){b.addEventListener('click',cap,true);});pw.addEventListener('keydown',function(e){if(e.key==='Enter')cap();});}
+ if(msg)YaverLogin.filled(msg);
+ if(did&&a.auto){var el=otp&&a.code?otp:pw;var f2=el.form;setTimeout(function(){var b=f2?f2.querySelector('[type=submit],button:not([type=button]),input[type=image]'):null;if(b)b.click();else if(f2)f2.submit();},500);return 'submitted';}
+ return did?'filled':'';
+}catch(e){return '';}})($args)
+"""
+
+    /** true when the page is past the sign-in steps: no password or code field showing. */
+    const val SIGNED_IN = "(function(){var v=[].slice.call(document.querySelectorAll('input')).filter(function(e){return e.offsetParent!==null&&(e.type==='password'||/otp|code|token|challenge|passcode/i.test((e.name||'')+(e.id||'')));});return v.length===0&&document.readyState!=='loading';})()"
+
+    fun gate(path: String) = Regex("my\\.policy|/vdesk|logon|/auth|adfs|/f5-|login", RegexOption.IGNORE_CASE).containsMatchIn(path)
 }

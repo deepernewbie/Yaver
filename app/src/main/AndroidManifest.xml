@@ -134,6 +134,7 @@
 
         <receiver android:name=".app.ScheduleReceiver" android:exported="false" />
         <receiver android:name=".app.MailActionReceiver" android:exported="false" />
+        <receiver android:name=".app.KeepAliveReceiver" android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

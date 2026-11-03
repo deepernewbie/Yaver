@@ -153,6 +153,7 @@ class BootReceiver : BroadcastReceiver() {
         Y.init(context)
         try { Schedule.rearmAll(context) } catch (_: Throwable) {}
         try { Heartbeats.arm(context) } catch (e: Throwable) { Diag.e("boot", "heartbeats", e) }
+        try { MailKeepAlive.arm(context) } catch (e: Throwable) { Diag.e("boot", "keepalive", e) }
         if (Prefs.on("alwaysOn", true)) AgentService.start(context)
     }
 }
