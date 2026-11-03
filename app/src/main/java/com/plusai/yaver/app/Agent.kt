@@ -67,6 +67,8 @@ class ToolCtx(val convo: Convo, val cancel: Cancel, val background: Boolean, val
  * loop with compaction, argument checks, plan mode, loop monitor, empty-reply / wrong-language / "I don't know" handling,
  * verify-on-stop and the budget grace call; after the turn: learning, memory delta, follow-ups and background review.
  */
+private const val CONTINUE_MSG = "[harness] Your answer was cut off by the output limit. Continue it exactly where it stopped — do not repeat anything, do not add a preamble or a note about the cut; if you were inside a table, code block or list, keep its format."
+
 object Agent {
     /** Tool being run on this thread (for the smart-approval gate inside ToolCtx.approve). */
     val currentTool = ThreadLocal<String?>()
@@ -357,6 +359,10 @@ object Agent {
             return out
         }
 
+        // augment mode: the output budget grows by itself when a reply hits it, and a cut-off answer is continued
+        var outBudget = Cfg.maxOut
+        var contFrom = -1
+        var conts = 0
         for (iter in 0 until maxIter) {
             cancel.check()
             turn.iter = iter
@@ -366,7 +372,11 @@ object Agent {
             Llm.info.set(if (listener == null) null else { a, b, cc, d -> listener.onThinkInfo(a, b, cc, d) })
             val (r, sent) = Compactor.chatWithRetry(c, tools, model, cancel, isSub, st, { t -> note(t); Diag.i("ctx", t) }, progress) { tl ->
                 Llm.chat(requestMessages(c, systemExtra, isSub), if (empty >= 3 || tl.length() == 0) null else tl, model,
-                    onDelta = { listener?.onDelta(it) }, onThink = { listener?.onThinking(it) }, cancel = cancel, stream = if (empty >= 2) false else Cfg.stream)
+                    onDelta = { listener?.onDelta(it) }, onThink = { listener?.onThinking(it) }, cancel = cancel, maxTokens = outBudget, stream = if (empty >= 2) false else Cfg.stream)
+            }
+            if (r.finish == "length") {
+                val nb = if (outBudget <= 0) 16000 else minOf(64000, outBudget * 2)
+                if (nb > outBudget) { Diag.i("augment", "reply hit the output limit (${if (outBudget > 0) outBudget else "service default"}) — next call gets $nb"); if (!isSub) note(Y.t("output limit reached — the answer budget is raised to ${nb / 1000}k for this task", "cevap sınırına takıldı — bu iş için cevap bütçesi ${nb / 1000}k'ya çıkarıldı")); outBudget = nb }
             }
             if (sent !== tools) restrict = names(sent).toSet()
             Planning.countTokens(r.tokensIn + r.tokensOut); Autonomous.addTokens(r.tokensIn, r.tokensOut)
@@ -375,6 +385,7 @@ object Agent {
                 val tc = JSONArray()
                 for (t in r.toolCalls) tc.put(JSONObject().put("id", t.id).put("type", "function").put("function", JSONObject().put("name", t.name).put("arguments", t.args)))
                 am.put("tool_calls", tc)
+                contFrom = -1
                 c.messages.put(am); Convos.save(c)
                 listener?.onStep()
                 runTools(c, ctx, st, r.toolCalls, names(sent), noTools, allowed, isSub, members, { ts -> toolsets?.let { l -> if (ts !in l) { l.add(ts); if (!isSub) saveToolsets(c, l) } } }, note)
@@ -389,7 +400,8 @@ object Agent {
                 }
                 continue
             }
-            val fin = r.content
+            var fin = r.content
+            if (r.toolCalls.isEmpty() && contFrom >= 0 && fin.isBlank()) { contFrom = -1 }
             if (fin.isBlank()) {
                 // empty reply: deliver waiting messages first; else retry (2nd time without streaming, 3rd without tools), then stop
                 if (!isSub && Turns.hasPending(c.id)) { empty = 0; continue }
@@ -405,8 +417,29 @@ object Agent {
                 continue
             }
             empty = 0
+            if (contFrom >= 0 && contFrom + 1 < c.messages.length()) {
+                // continuation of a cut-off answer: join it to the answer it continues and drop the "continue" request
+                val prev = c.messages.getJSONObject(contFrom)
+                val joined = prev.optString("content") + fin
+                prev.put("content", joined)
+                c.messages.remove(contFrom + 1)
+                fin = joined
+                if (r.finish == "length" && conts < 8) { conts++; c.messages.put(harnessMsg(CONTINUE_MSG)); Convos.save(c); listener?.onStep(); continue }
+                contFrom = -1
+                Convos.save(c); listener?.onStep()
+            } else if (r.finish == "length" && conts < 8) {
+                // the answer was cut off by the output limit: keep it and ask for the rest
+                conts++
+                c.messages.put(am); contFrom = c.messages.length() - 1
+                c.messages.put(harnessMsg(CONTINUE_MSG)); Convos.save(c)
+                listener?.onStep()
+                if (!isSub) note(Y.t("the answer was cut off — continuing it", "cevap yarıda kesildi — devam ettiriliyor"))
+                Diag.i("augment", "final answer cut off (${fin.length} chars) — continuing")
+                continue
+            } else {
             c.messages.put(am); Convos.save(c)
             listener?.onStep()
+            }
             if (!isSub && Turns.hasPending(c.id)) { noTools = false; continue }
             if (!isSub) {
                 if (!langFixed) {
@@ -455,7 +488,7 @@ object Agent {
         // budget exhausted: one final call without tools to wrap up
         c.messages.put(harnessMsg("[harness] Iteration budget exhausted. Summarize what you did, what is verified, and what is left. No more tool calls." + (if (!turn.lang.isNullOrEmpty()) " Reply in ${turn.lang}." else "")))
         Diag.i("agent", "iteration budget ($maxIter) exhausted")
-        val r = Llm.chat(requestMessages(c, systemExtra, isSub), null, model, onDelta = { listener?.onDelta(it) }, cancel = cancel)
+        val r = Llm.chat(requestMessages(c, systemExtra, isSub), null, model, onDelta = { listener?.onDelta(it) }, cancel = cancel, maxTokens = Cfg.maxOut)
         c.messages.put(JSONObject().put("role", "assistant").put("content", r.content).put("ts", System.currentTimeMillis()))
         Convos.save(c)
         listener?.onStep()

@@ -654,3 +654,17 @@ button.kcard:active { background: var(--sunken); }
 .md a.mlink { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 1px 9px 1px 7px; margin: 1px 0; border-radius: 999px; background: var(--violet-soft); color: var(--violet-ink); text-decoration: none; font-weight: 600; font-size: .94em; vertical-align: baseline; }
 .md a.mlink span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
 .md a.mlink .i { width: 14px; height: 14px; flex: none; }
+/* settings: search + folding groups */
+.ssearch { position: sticky; top: 0; z-index: 2; padding: 10px 16px 6px; background: var(--bg); }
+.ssearch .search { display: flex; }
+.sgroup.fold > h4 { display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 0; padding: 12px 6px; border-radius: 12px; font-size: 14.5px; color: var(--ink); user-select: none; }
+.sgroup.fold > h4 small { font-weight: 600; font-size: 12px; color: var(--muted); background: var(--sunken); border-radius: 999px; padding: 1px 8px; }
+.sgroup.fold > h4 .chev { margin-left: auto; color: var(--muted); transition: transform .18s ease; }
+.sgroup.fold.open > h4 .chev { transform: rotate(180deg); }
+.sgroup.fold:not(.open) > .list, .sgroup.fold:not(.open) > .hint, .sgroup.fold:not(.open) > :not(h4) { display: none; }
+.searching .sgroup.fold > .list, .searching .sgroup.fold > .hint { display: block !important; }
+.searching .sgroup.fold > h4 .chev { display: none; }
+.sgroup.fold { margin-top: 6px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.sgroup.fold.open { padding-bottom: 14px; }
+@media (prefers-reduced-motion: reduce) { .sgroup.fold > h4 .chev { transition: none; } }
+.searching .warncard { display: none; }

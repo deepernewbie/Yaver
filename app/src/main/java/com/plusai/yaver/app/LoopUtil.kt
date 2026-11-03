@@ -125,6 +125,70 @@ object LoopUtil {
     fun unknownToolError(name: String, available: List<String>) = "Error: unknown tool $name. Available: ${available.joinToString(", ")}"
 
     /** The reply hit the output limit while writing the call's arguments. */
+    /** Reads a JSON string value from possibly cut-off JSON: (value, complete). Incomplete escapes at the end are dropped. */
+    fun partialString(raw: String, key: String): Pair<String, Boolean>? {
+        val m = Regex("\"" + Regex.escape(key) + "\"\\s*:\\s*\"").find(raw) ?: return null
+        val sb = StringBuilder(); var i = m.range.last + 1
+        while (i < raw.length) {
+            val ch = raw[i]
+            if (ch == '"') return Pair(sb.toString(), true)
+            if (ch == '\\') {
+                if (i + 1 >= raw.length) break
+                when (val e = raw[i + 1]) {
+                    'n' -> sb.append('\n'); 't' -> sb.append('\t'); 'r' -> sb.append('\r'); 'b' -> sb.append('\b'); 'f' -> sb.append('\u000C')
+                    'u' -> { if (i + 5 >= raw.length) break; try { sb.append(raw.substring(i + 2, i + 6).toInt(16).toChar()) } catch (_: Exception) { break }; i += 4 }
+                    else -> sb.append(e)
+                }
+                i += 2; continue
+            }
+            sb.append(ch); i++
+        }
+        return Pair(sb.toString(), false)
+    }
+
+    /**
+     * Augment mode for calls cut off by the output limit: what arrived is kept instead of thrown away.
+     * write_file → the received part is written (or appended) and the model continues with append=true;
+     * execute_code/run_code → the received code goes to a file the model completes with append=true and then runs.
+     * Returns the tool result to use, or null when nothing could be salvaged.
+     */
+    fun salvage(name: String, raw: String): String? = try { salvage0(name, raw) } catch (e: Throwable) { Diag.e("augment", "salvage $name", e); null }
+
+    private fun salvage0(name: String, raw: String): String? {
+        return when (name) {
+            "write_file" -> {
+                val path = partialString(raw, "path")?.takeIf { it.second }?.first?.trim()
+                val part = partialString(raw, "content")?.first
+                if (path.isNullOrEmpty() || part.isNullOrEmpty()) null else {
+                    val append = Regex("\"append\"\\s*:\\s*true").containsMatchIn(raw)
+                    val vp = VPath.normTool(path); val f = VPath.file(vp)
+                    if (!append && f.exists() && f.length() > 0) return null  // an overwrite still needs the normal, confirmed call
+                    f.parentFile?.mkdirs()
+                    if (append) f.appendText(part) else f.writeText(part)
+                    try { WsChange.notify(Workspace.rel(f)) } catch (_: Throwable) {}
+                    Diag.i("augment", "write_file cut off: saved ${part.length} chars to $vp (append=$append)")
+                    "[augment] Your write_file call was cut off by the output limit, so yaver ${if (append) "appended" else "saved"} the part that arrived (${part.length} characters) to $vp — nothing is lost. " +
+                        "Continue the SAME file now: call write_file with path=\"$vp\", append=true and the rest of the content, starting exactly after these last characters (do not repeat them):\n«${part.takeLast(240)}»\n" +
+                        "Keep each part under about 6000 characters and keep appending until the file is complete; then check the end of the file with read_file."
+                }
+            }
+            "execute_code", "run_code" -> {
+                val code = partialString(raw, "code")?.first
+                if (code.isNullOrEmpty() || code.length < 200) null else {
+                    val lang = partialString(raw, "language")?.first?.lowercase() ?: ""
+                    val py = lang.startsWith("py") || (name == "run_code" && lang.isEmpty())
+                    val vp = "/workspace/code/cut-" + System.currentTimeMillis() + if (py) ".py" else ".js"
+                    val f = VPath.file(vp); f.parentFile?.mkdirs(); f.writeText(code)
+                    Diag.i("augment", "$name cut off: saved ${code.length} chars of code to $vp")
+                    "[augment] Your $name call was cut off by the output limit before the code was complete, so it was NOT run. yaver saved the ${code.length} characters that arrived to $vp. " +
+                        "Finish it: call write_file with path=\"$vp\", append=true and the rest of the code, starting exactly after these last characters (do not repeat them):\n«${code.takeLast(240)}»\n" +
+                        "Add parts of under about 6000 characters until the code is complete, then run the file with the terminal tool: `${if (py) "python" else "node"} $vp`."
+                }
+            }
+            else -> null
+        }
+    }
+
     fun cutOffError(name: String) =
         "Error: your $name call was cut off before its arguments were complete (the reply hit the output limit). Nothing was done. Split the work into smaller calls: for a large file, call write_file with the first part, then call it again with append=true for each following part (keep each part under about 6000 characters)."
 
@@ -137,7 +201,8 @@ object LoopUtil {
         val raw = rawArgs ?: ""
         val parsed = jsonTry(raw.ifEmpty { "{}" })
         if (parsed == null) {
-            val err = if (state?.lastFinish == "length" || Regex("^\\s*\\{[\\s\\S]*[^}\\s]\\s*$").matches(raw)) cutOffError(name)
+            val cut = state?.lastFinish == "length" || Regex("^\\s*\\{[\\s\\S]*[^}\\s]\\s*$").matches(raw)
+            val err = if (cut) (salvage(name, raw) ?: cutOffError(name))
             else "Error: arguments were not valid JSON: ${clip(raw, 300)}. Send the call again with valid JSON arguments."
             return Pair(null, err)
         }

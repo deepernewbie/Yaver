@@ -72,7 +72,7 @@ object Compactor {
         return knownWindow(model)
     }
 
-    fun outReserve(w: Int): Int { val want = maxOf(1024, minOf(16000, CtxCfg.MAX_OUTPUT)); return if (w > 0) minOf(want, maxOf(768, (w * 0.2).toInt())) else want }
+    fun outReserve(w: Int): Int { val want = maxOf(1024, minOf(64000, if (Cfg.maxOut > 0) Cfg.maxOut else CtxCfg.MAX_OUTPUT)); return if (w > 0) minOf(want, maxOf(768, (w * 0.2).toInt())) else want }
     fun budget(model: String? = null): Int { val cap = CtxCfg.budgetCap; val w = window(model); return if (w > 0) maxOf(2000, minOf(cap, ((w - outReserve(w)) * 0.92).toInt())) else cap }
 
     // ---------------------------------------------------------------- per-conversation state (harness/ctx/<id>.json)

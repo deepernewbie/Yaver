@@ -75,7 +75,7 @@ object Bridge {
             .put("version", try { c.packageManager.getPackageInfo(c.packageName, 0).versionName } catch (e: Throwable) { "" })
             .put("llm", JSONObject().put("ready", Cfg.llmReady).put("base", Cfg.llmBase).put("hasKey", Cfg.llmKey.isNotEmpty()).put("model", Cfg.model)
                 .put("fastModel", Cfg.fastModel).put("visionModel", Cfg.visionModel).put("stream", Cfg.stream).put("sendImages", Cfg.sendImages)
-                .put("maxSteps", Cfg.maxSteps).put("contextTokens", Cfg.contextTokens))
+                .put("maxSteps", Cfg.maxSteps).put("contextTokens", Cfg.contextTokens).put("maxOut", Cfg.maxOut))
             .put("persona", Cfg.persona).put("personaDefault", Agent.defaultPersona()).put("askRisky", Cfg.askRisky)
             .put("mail", mailState())
             .put("web", JSONObject().put("searxng", Cfg.searxng).put("hasBrave", Cfg.braveKey.isNotEmpty()).put("hasTavily", Cfg.tavilyKey.isNotEmpty()))
@@ -104,6 +104,7 @@ object Bridge {
             "stream" -> Cfg.stream = b; "sendImages" -> Cfg.sendImages = b
             "maxSteps" -> s.toIntOrNull()?.let { Cfg.maxSteps = it.coerceIn(3, 100) }
             "contextTokens" -> s.toIntOrNull()?.let { Cfg.contextTokens = it.coerceIn(4000, 2000000) }
+            "maxOut" -> s.toIntOrNull()?.let { Cfg.maxOut = it.coerceIn(0, 200000) }
             "lang" -> { Cfg.lang = s; Shortcuts.publish(Y.app) }
             "persona" -> Cfg.persona = s; "askRisky" -> Cfg.askRisky = b
             "mailOwa" -> { Cfg.mailOwa = s; Mail.reset() }; "mailEws" -> { Cfg.mailEws = s; Mail.reset() }

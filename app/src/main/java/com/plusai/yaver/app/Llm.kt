@@ -169,7 +169,16 @@ object Llm {
             .put(JSONObject().put("role", "system").put("content", system))
             .put(JSONObject().put("role", "user").put("content", user))
         val r = chat(msgs, null, if (fast) Cfg.fastModel else null, cancel = cancel, maxTokens = maxTokens, stream = false)
-        return r.content.ifEmpty { r.reasoning }
+        if (r.content.isNotBlank()) return r.content
+        // a reasoning model spent the whole budget thinking: its hidden reasoning is not an answer — try once more with room, then the main model
+        Diag.i("llm", "empty answer (finish ${r.finish}, ${r.reasoning.length} reasoning chars) — retrying")
+        val r2 = chat(msgs, null, if (fast) Cfg.fastModel else null, cancel = cancel, maxTokens = maxOf(4000, maxTokens * 3), stream = false)
+        if (r2.content.isNotBlank()) return r2.content
+        if (fast && Cfg.fastModel.isNotEmpty() && Cfg.fastModel != Cfg.model) {
+            val r3 = chat(msgs, null, null, cancel = cancel, maxTokens = maxOf(4000, maxTokens * 3), stream = false)
+            if (r3.content.isNotBlank()) return r3.content
+        }
+        return ""
     }
 
     /** Looks at an image with the vision model (or the main model). */

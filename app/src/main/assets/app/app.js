@@ -1257,6 +1257,38 @@
     return b;
   }
   function group(title, rows, hint) { return h("div", { class: "sgroup" }, title ? h("h4", null, title) : null, h("div", { class: "list" }, rows), hint ? h("div", { class: "hint" }, hint) : null); }
+  /* Settings: every titled group folds open/closed (remembered), and the search box filters rows across all groups */
+  var SET_OPEN = (function () { try { return JSON.parse(localStorage.getItem("yv.setOpen") || "null") || {}; } catch (e) { return {}; } })();
+  function settingsEnhance(root) {
+    root.querySelectorAll(".sgroup").forEach(function (g) {
+      var h4 = g.querySelector(":scope > h4"); if (!h4 || g.dataset.fold) return;
+      var key = h4.textContent.trim(); g.dataset.fold = key;
+      var first = g === root.querySelector(".sgroup");
+      var open = SET_OPEN[key] != null ? SET_OPEN[key] : first;
+      g.classList.add("fold"); g.classList.toggle("open", !!open);
+      var n = g.querySelectorAll(":scope > .list > .row").length;
+      h4.textContent = ""; h4.appendChild(h("span", null, key)); if (n) h4.appendChild(h("small", null, String(n))); h4.appendChild(icon("chevron-down", "xs chev"));
+      h4.setAttribute("role", "button"); h4.setAttribute("tabindex", "0"); h4.setAttribute("aria-expanded", String(!!open));
+      var toggle = function () { var o = !g.classList.contains("open"); g.classList.toggle("open", o); h4.setAttribute("aria-expanded", String(o)); SET_OPEN[key] = o; try { localStorage.setItem("yv.setOpen", JSON.stringify(SET_OPEN)); } catch (e) {} };
+      h4.addEventListener("click", toggle); h4.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+    });
+    settingsFilter(root);
+  }
+  function settingsFilter(root) {
+    var q = (S.setQ || "").trim().toLocaleLowerCase(S.lang === "tr" ? "tr" : undefined);
+    root.classList.toggle("searching", !!q);
+    var any = false;
+    root.querySelectorAll(".sgroup").forEach(function (g) {
+      if (!q) { g.style.display = ""; g.querySelectorAll(".row").forEach(function (r) { r.style.display = ""; }); return; }
+      var title = (g.dataset.fold || "").toLocaleLowerCase(), hit = 0;
+      g.querySelectorAll(".row").forEach(function (r) { var m = title.indexOf(q) >= 0 || r.textContent.toLocaleLowerCase().indexOf(q) >= 0; r.style.display = m ? "" : "none"; if (m) hit++; });
+      g.style.display = hit ? "" : "none"; if (hit) any = true;
+    });
+    var none = root.querySelector(".snone");
+    if (q && !any) { if (!none) root.appendChild(h("div", { class: "snone empty" }, h("p", null, T("No setting matches.", "Eşleşen ayar yok.")))); }
+    else if (none) none.remove();
+  }
+
   function masked(has) { return has ? "••••••••" : T("Not set", "Ayarlanmadı"); }
 
   var PRESETS = [["https://openrouter.ai/api/v1", "OpenRouter", "One key, hundreds of models, many free", "Tek anahtar, yüzlerce model, birçoğu ücretsiz"], ["https://api.openai.com/v1", "OpenAI", "GPT models", "GPT modelleri"], ["https://generativelanguage.googleapis.com/v1beta/openai", "Google Gemini", "Gemini models", "Gemini modelleri"], ["https://api.groq.com/openai/v1", "Groq", "Very fast open models", "Çok hızlı açık modeller"], ["https://api.together.xyz/v1", "Together", "Open models", "Açık modeller"], ["http://localhost:11434/v1", "Ollama", "A model on your own computer", "Kendi bilgisayarınızdaki model"]];
@@ -1266,8 +1298,12 @@
     var p = S.pages.filter(function (x) { return x.name === "settings"; })[0]; if (!p) return;
     var st = S.state, L = st.llm, M = st.mail, Ph = st.phone, W = st.web;
     var body = clear(p.body);
+    var sq = h("input", { type: "search", placeholder: T("Search settings", "Ayarlarda ara"), value: S.setQ || "", "aria-label": T("Search settings", "Ayarlarda ara") });
+    sq.addEventListener("input", function () { S.setQ = sq.value; settingsFilter(p.body); });
+    body.appendChild(h("div", { class: "ssearch" }, h("label", { class: "search" }, icon("search", "xs"), sq)));
     var wrap = h("div", { style: "padding-bottom:20px" });
     body.appendChild(wrap);
+    if (!p.obs) { var obsT = 0; p.obs = new MutationObserver(function () { clearTimeout(obsT); obsT = setTimeout(function () { settingsEnhance(p.body); }, 30); }); p.obs.observe(p.body, { childList: true, subtree: true }); }
 
     wrap.appendChild(group(T("Status", "Durum"), [
       row({ icon: "cpu", label: T("Language model", "Dil modeli"), sub: L.ready ? L.model : T("Choose a service, key and model", "Hizmet, anahtar ve model seçin"), check: L.ready, onclick: function () { if (!L.ready) openSetup(); else pickModel("model"); } }),
@@ -1287,6 +1323,9 @@
       row({ icon: "cpu", label: T("Model", "Model"), value: L.model ? L.model.split("/").pop() : T("Choose", "Seç"), onclick: function () { pickModel("model"); } }),
       row({ icon: "zap", label: T("Fast model", "Hızlı model"), sub: T("For summaries; empty = the main model", "Özetler için; boş = ana model"), value: L.fastModel ? L.fastModel.split("/").pop() : "", onclick: function () { pickModel("fastModel", true); } }),
       row({ icon: "image", label: T("Vision model", "Görsel model"), sub: T("Pictures and scanned PDFs; empty = the main model", "Resimler ve taranmış PDF; boş = ana model"), value: L.visionModel ? L.visionModel.split("/").pop() : "", onclick: function () { pickModel("visionModel", true); } }),
+      row({ icon: "file-pen", label: T("Answer budget", "Cevap bütçesi"), sub: T("Most tokens the model may write in one reply (thinking included for reasoning models)", "Modelin bir cevapta yazabileceği en fazla token (düşünen modellerde düşünme dahil)"), wrap: true, value: L.maxOut ? (L.maxOut >= 1000 ? Math.round(L.maxOut / 1000) + "k" : String(L.maxOut)) : T("Automatic", "Otomatik"), onclick: function () {
+        optionsSheet(T("Answer budget (tokens)", "Cevap bütçesi (token)"), [["0", T("Automatic — the service decides", "Otomatik — hizmet belirler")], ["2000", "2k"], ["4000", "4k"], ["8000", "8k"], ["16000", "16k"], ["32000", "32k"], ["64000", "64k"]], String(L.maxOut || 0), function (v) { setCfg("maxOut", v); });
+      } }),
       row({ icon: "message-square", label: T("Show answers as they are written", "Cevapları yazılırken göster"), toggle: L.stream, onToggle: function (on) { setCfg("stream", on); } }),
       row({ icon: "check", label: T("Test the model", "Modeli dene"), onclick: function () { toast(T("Asking the model…", "Modele soruluyor…")); call("llm.test").then(function (r) { toast("✓ " + r); }).catch(function (e) { toast(e.message); }); } })
     ]));

@@ -49,6 +49,7 @@ object FollowUps {
     private val TR_RX = Regex("[çğışöüÇĞİŞÖÜ]|\\b(ve|bir|bu|ne|için|icin|nasıl|nasil|mi|mı|bana|benim|yap|lütfen|lutfen)\\b", RegexOption.IGNORE_CASE)
 
     private fun lang(c: Convo, userText: String): String {
+        when (Cfg.lang) { "tr" -> return "Turkish"; "en" -> return "English" }
         LearnHooks.langName?.let { f -> try { return f(c, userText) } catch (_: Throwable) {} }
         return when (Cfg.lang) {
             "tr" -> "Turkish"
@@ -70,30 +71,44 @@ object FollowUps {
         for (m in turn) { val tc = m.optJSONArray("tool_calls") ?: continue; for (k in 0 until tc.length()) tc.optJSONObject(k)?.optJSONObject("function")?.optString("name")?.let { if (it.isNotEmpty()) tools.add(it) } }
         val files = filesFrom(turn)
         val language = lang(c, userText)
+        Diag.i("followups", "language $language (setting ${Cfg.lang}, chat ${c.lang ?: "-"})")
         LearnEvents.emit("followups", JSONObject().put("convoId", c.id).put("state", "loading").put("text", labels().optString("loading")))
         var items: List<String> = emptyList()
         try {
-            val sys = "You suggest what the user will most likely ask next, right after the assistant's answer below. Give exactly 4 short follow-up requests, written as the user would type them to the assistant (imperative, at most 12 words, specific to this result — mention the actual file, topic or item), each something the assistant can do with its tools (files, web, code, mail, calendar, tasks). Make them different from each other: e.g. go deeper, fix/improve, export/share, a logical next step. Do not repeat what was already done. Write them in $language. Output only a JSON array of 4 strings."
-            val user = "User asked: ${clip(userText, 800)}\n\nTools used: ${tools.joinToString(", ").ifEmpty { "none" }}" +
-                (if (files.isNotEmpty()) "\nFiles written: ${files.take(8).joinToString(", ")}" else "") +
-                "\n\nAssistant's final answer:\n${clip(last.optString("content"), 2500)}" +
-                "\n\nWrite the 4 requests in $language only, whatever the language of the text above."
-            val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", sys)).put(JSONObject().put("role", "user").put("content", user))
-            val r = Llm.chat(msgs, null, Cfg.fastModel.ifEmpty { Cfg.model }, cancel = cancel, maxTokens = 1500, stream = false)
-            val t = r.content.ifEmpty { r.reasoning }.replace(Regex("```(?:json)?"), "")
-            var raw: List<String>? = null
-            Regex("\\[[\\s\\S]*\\]").find(t)?.let { m -> try { val a = JSONArray(m.value); raw = (0 until a.length()).map { a.opt(it)?.toString() ?: "" } } catch (_: Exception) {} }
-            if (raw == null) raw = t.split("\n").map { it.replace(Regex("^\\s*(?:[-*•]|\\d+[.)])\\s*"), "").replace(Regex("^[\"']|[\"'],?$"), "").trim() }.filter { it.length > 3 }
-            items = raw!!.map { it.trim() }.filter { it.isNotEmpty() && it.length <= 160 }.distinct().take(4)
-            // the fast model sometimes answers in English anyway: translate once into the wanted language
+            val tr = language == "Turkish"
+            val sys = if (tr) "Kullanıcının, asistanın aşağıdaki cevabından hemen sonra büyük olasılıkla ne isteyeceğini öner. Tam 4 kısa devam isteği yaz; kullanıcı asistana nasıl yazarsa öyle (emir kipi, en fazla 12 kelime, bu sonuca özgü — gerçek dosyayı, konuyu ya da öğeyi an), her biri asistanın araçlarıyla yapabileceği bir iş olsun (dosyalar, web, kod, posta, takvim, görevler). Birbirinden farklı olsunlar: örneğin daha derine in, düzelt/iyileştir, dışa aktar/paylaş, mantıklı bir sonraki adım. Yapılmış olanı tekrarlama. Hepsini Türkçe yaz. Yalnızca 4 metinlik bir JSON dizisi ver; başka hiçbir şey yazma."
+                else "You suggest what the user will most likely ask next, right after the assistant's answer below. Give exactly 4 short follow-up requests, written as the user would type them to the assistant (imperative, at most 12 words, specific to this result — mention the actual file, topic or item), each something the assistant can do with its tools (files, web, code, mail, calendar, tasks). Make them different from each other: e.g. go deeper, fix/improve, export/share, a logical next step. Do not repeat what was already done. Write them in $language. Output only a JSON array of 4 strings, nothing else."
+            val user = (if (tr) "Kullanıcının isteği: " else "User asked: ") + clip(userText, 800) +
+                (if (tr) "\n\nKullanılan araçlar: " else "\n\nTools used: ") + tools.joinToString(", ").ifEmpty { "-" } +
+                (if (files.isNotEmpty()) (if (tr) "\nYazılan dosyalar: " else "\nFiles written: ") + files.take(8).joinToString(", ") else "") +
+                (if (tr) "\n\nAsistanın son cevabı:\n" else "\n\nAssistant's final answer:\n") + clip(last.optString("content"), 2500) +
+                (if (tr) "\n\nŞimdi yalnızca JSON dizisini ver: [\"…\", \"…\", \"…\", \"…\"] — Türkçe." else "\n\nNow output only the JSON array: [\"…\", \"…\", \"…\", \"…\"] — in $language.")
             val wantCode = when (language) { "Turkish" -> "tr"; "English" -> "en"; else -> null }
-            val got = if (items.isNotEmpty()) Lang.detect(items.joinToString(". ")) else null
-            if (wantCode != null && got != null && got != wantCode) {
-                Diag.i("followups", "came in $got, translating to $language")
-                val tr = Llm.chat(JSONArray().put(JSONObject().put("role", "system").put("content", "Translate each string of the JSON array into $language. Keep the meaning, names and file names. Output only a JSON array of strings."))
-                    .put(JSONObject().put("role", "user").put("content", JSONArray(items).toString())), null, Cfg.fastModel.ifEmpty { Cfg.model }, cancel = cancel, maxTokens = 800, stream = false)
-                val tt = tr.content.ifEmpty { tr.reasoning }.replace(Regex("```(?:json)?"), "")
-                Regex("\\[[\\s\\S]*\\]").find(tt)?.let { m -> try { val a2 = JSONArray(m.value); val l = (0 until a2.length()).map { a2.optString(it).trim() }.filter { it.isNotEmpty() && it.length <= 160 }; if (l.size >= 2) items = l.take(4) } catch (_: Exception) {} }
+            // a list counts only when it parses as JSON, holds real requests and is in the wanted language
+            fun parse(t: String): List<String> {
+                val clean = t.replace(Regex("```(?:json)?"), "")
+                val m = Regex("\\[[\\s\\S]*\\]").find(clean) ?: return emptyList()
+                val a = try { JSONArray(m.value) } catch (_: Exception) { return emptyList() }
+                val junk = Regex("(?i)^(here (is|are)|işte|translation|çeviri|sure|tabii|json|output|sonuç)\\b|:$")
+                return (0 until a.length()).map { a.optString(it).trim().trim('"', '“', '”') }
+                    .filter { it.length in 4..160 && !junk.containsMatchIn(it) }.distinct().take(4)
+            }
+            fun ok(l: List<String>): Boolean {
+                if (l.size < 2) return false
+                if (wantCode == null) return true
+                val got = Lang.detect(l.joinToString(". ")) ?: return true
+                return got == wantCode
+            }
+            val models = listOf(Cfg.fastModel.ifEmpty { Cfg.model }, Cfg.model).distinct()
+            loop@ for ((n, model) in models.withIndex()) for (attempt in 0..1) {
+                cancel?.check()
+                val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", sys)).put(JSONObject().put("role", "user").put("content", user))
+                if (attempt == 1) msgs.put(JSONObject().put("role", "user").put("content", if (tr) "Önceki cevabın kullanılamadı. Yalnızca Türkçe 4 metinlik JSON dizisini yaz, açıklama ekleme." else "Your previous answer was unusable. Output only the JSON array of 4 strings in $language, no explanation."))
+                val r = Llm.chat(msgs, null, model, cancel = cancel, maxTokens = if (attempt == 0) 1500 else 4000, stream = false)
+                val l = parse(r.content)
+                Diag.i("followups", "model ${model.substringAfterLast('/')} try ${attempt + 1}: ${l.size} items" + if (l.isNotEmpty()) " (${Lang.detect(l.joinToString(". "))})" else " · raw: " + r.content.take(120).replace('\n', ' '))
+                if (ok(l)) { items = l; break@loop }
+                if (n == 0 && models.size > 1 && r.content.isBlank() && attempt == 1) break  // still empty (reasoning model): go to the main model
             }
         } catch (e: CancelledException) {
             items = emptyList()
