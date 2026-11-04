@@ -241,6 +241,34 @@ class OwaTransport(private val origin: String, private val user: String, private
      */
     @Volatile private var wrapFirst = false
 
+    /**
+     * Field names web mail refuses ("Invalid value 'Status' for enum PropertyUriEnum") are learned: the request is retried
+     * with the name the server knows (TaskStatus, ItemLastModifiedTime …) or, when none works, without that field.
+     * What works is kept for every later request, so each name is found once per server.
+     */
+    private object Aliases {
+        private val map: MutableMap<String, String> = try { val j = JSONObject(Prefs.get("owa.alias", "{}")); j.keys().asSequence().associateWith { j.getString(it) }.toMutableMap() } catch (e: Exception) { HashMap() }
+        @Synchronized fun get(n: String): String? = map[n]
+        @Synchronized fun set(n: String, v: String) { map[n] = v; Prefs.put("owa.alias", JSONObject(map as Map<*, *>).toString()) }
+        @Synchronized fun remove(n: String) { map.remove(n); Prefs.put("owa.alias", JSONObject(map as Map<*, *>).toString()) }
+        fun candidates(n: String) = listOf("Task$n", "Item$n", "Message$n", "Calendar$n", "Contact$n", "Folder$n", "")
+    }
+
+    /** Applies the learned names to every PropertyUri in the request; "" removes the field. */
+    private fun applyAliases(v: Any?): Any? {
+        when (v) {
+            is JSONObject -> {
+                if (v.optString("__type").startsWith("PropertyUri") && v.has("FieldURI")) Aliases.get(v.optString("FieldURI"))?.let { a -> if (a.isEmpty()) return null else v.put("FieldURI", a) }
+                for (k in v.keys().asSequence().toList()) { val r = applyAliases(v.get(k)); if (r == null) v.remove(k) else v.put(k, r) }
+                return v
+            }
+            is JSONArray -> {
+                val out = JSONArray(); for (i in 0 until v.length()) applyAliases(v.get(i))?.let { out.put(it) }; return out
+            }
+            else -> return v
+        }
+    }
+
     private fun send(root: Element, op: String, depth: Int, timeoutMs: Int, cancel: Cancel?, alt: Boolean = false): Document {
         val f = fix.getOrPut(op) { HashSet() }
         val wrap = wrapFirst != alt
@@ -267,6 +295,7 @@ class OwaTransport(private val origin: String, private val user: String, private
         if ("noSort" in f) body.remove("SortOrder")
         val dflt = OwaJson.defaults(op)
         if (dflt != null) for (k in dflt.keys()) if (!body.has(k) && ("noDefaults" !in f || k == "Paging")) body.put(k, dflt.get(k))
+        applyAliases(body)
         val reqBody = JSONObject().put("__type", "${op}Request:#Exchange")
         for (k in body.keys()) if (k != "__type") reqBody.put(k, body.get(k))
         val req = JSONObject()
@@ -342,6 +371,20 @@ class OwaTransport(private val origin: String, private val user: String, private
         else if (resp.code >= 400) OwaJson.errorText(json).ifEmpty { "HTTP ${resp.code}" } else ""
         if (bad.isNotEmpty()) {
             Diag.i("owa", "$op refused: ${bad.take(300)}")
+            // a field name this server does not know: try its other names, then leave it out — and remember what worked
+            Regex("Invalid value '([A-Za-z]+)' for enum '[\\w.]*PropertyUriEnum'").find(bad)?.groupValues?.get(1)?.let { badName ->
+                // the refused name may already be an alias we tried: find the original field it stands for
+                val base = Regex("^(Task|Item|Message|Calendar|Contact|Folder)(.+)$").find(badName)?.groupValues?.get(2)
+                val orig = if (base != null && Aliases.get(base) == badName) base else badName
+                val tried = Aliases.get(orig)
+                val cands = Aliases.candidates(orig)
+                val next = if (tried == null) cands.first() else cands.getOrNull(cands.indexOf(tried) + 1)
+                if (next != null && depth < 12) {
+                    Aliases.set(orig, next)
+                    Diag.i("owa", "web mail does not know the field '$badName' — trying ${if (next.isEmpty()) "without it" else "'$next'"}")
+                    return send(root, op, depth + 1, timeoutMs, cancel, alt)
+                }
+            }
             try { otherShape()?.let { return it } } catch (e: MailException) { Diag.i("owa", "$op other recipient shape: ${e.message}") }
             if (depth < 6 && !many) nextFix()?.let { return retryWith(it) }
             throw MailException("web mail: ${OwaJson.shortFault(bad)}")

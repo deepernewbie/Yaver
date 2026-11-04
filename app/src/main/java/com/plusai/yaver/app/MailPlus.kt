@@ -603,7 +603,8 @@ object MailPlus {
         fun step(name: String, fn: () -> String): Boolean {
             val r = JSONObject().put("name", name).put("ok", false).put("note", "")
             out.put(r); onStep?.invoke(out)
-            try { r.put("note", fn()); r.put("ok", true) } catch (e: CancelledException) { throw e } catch (e: Throwable) { r.put("note", e.message ?: e.toString()) }
+            try { r.put("note", fn()); r.put("ok", true) } catch (e: CancelledException) { throw e } catch (e: Throwable) { r.put("note", (e.message ?: e.toString()).removePrefix("SIGNIN:")) }
+            Diag.i("selftest", "${if (r.optBoolean("ok")) "OK " else "ERR"} $name — ${r.optString("note").take(200)}")
             onStep?.invoke(out)
             return r.optBoolean("ok")
         }
@@ -614,15 +615,49 @@ object MailPlus {
         step(if (tr) "Okunmamış filtresi" else "Unread filter") { "${Mail.use(cancel) { it.find("inbox", "", true, 5, 0, cancel) }.items.size}" }
         step(if (tr) "Sunucuda arama" else "Server search") { "${Mail.use(cancel) { it.find("inbox", first?.subject?.split(Regex("\\s+"))?.firstOrNull() ?: "a", false, 5, 0, cancel) }.items.size}" }
         first?.let { f -> step(if (tr) "Posta açma (gövde + ekler)" else "Open a mail (body + attachments)") { val m = Mail.use(cancel) { it.get(f.id, cancel) }; "${m.body.length} ${if (tr) "karakter" else "chars"}, ${m.files.size} ${if (tr) "ek" else "attachments"}" } }
+        first?.let { f -> step(if (tr) "Kimden / Kime / Cc" else "From / To / Cc") {
+            val m = Mail.use(cancel) { it.get(f.id, cancel) }
+            if (m.to.isEmpty() && m.cc.isEmpty()) throw IllegalStateException(if (tr) "alıcılar boş geldi" else "recipients came back empty")
+            "${m.h.from?.name ?: "?"} → ${m.to.take(3).joinToString(", ") { it.name.ifEmpty { it.email } }}${if (m.cc.isNotEmpty()) " · cc ${m.cc.size}" else ""}"
+        } }
+        step(if (tr) "Ek indirme" else "Download an attachment") {
+            val withAtt = Mail.use(cancel) { it.find("inbox", "", false, 30, 0, cancel) }.items.firstOrNull { it.attachments } ?: return@step if (tr) "son 30 postada ek yok" else "no attachment in the last 30 mails"
+            val m = Mail.use(cancel) { it.get(withAtt.id, cancel) }
+            val a = m.files.firstOrNull { !it.inline } ?: m.files.firstOrNull() ?: return@step if (tr) "ek listesi boş" else "attachment list empty"
+            val got = Mail.use(cancel) { it.attachment(a.id, cancel) }
+            if (got.bytes.isEmpty()) throw IllegalStateException(if (tr) "ek boş indi" else "attachment downloaded empty")
+            "${got.name} · ${Workspace.fmtBytes(got.bytes.size.toLong())}"
+        }
+        step(if (tr) "Gönderilmiş öğeler (alıcı)" else "Sent items (recipients)") {
+            val r = Mail.use(cancel) { it.find("sentitems", "", false, 3, 0, cancel) }
+            "${r.total} · " + (r.items.firstOrNull()?.let { h -> h.subject.take(40) } ?: "—")
+        }
+        step(if (tr) "Rehber (ad çözme)" else "Address book (names)") {
+            val me = Cfg.mailUser.substringAfter('\\').substringBefore('@').ifEmpty { first?.from?.email?.substringBefore('@') ?: "a" }
+            val q = first?.from?.name?.split(' ')?.firstOrNull()?.takeIf { it.length >= 2 } ?: me
+            val ppl = Mail.use(cancel) { it.resolve(q, 5, cancel) }
+            if (ppl.isEmpty()) return@step if (tr) "“$q” için kimse bulunamadı" else "nobody found for “$q”"
+            val codeLike = ppl.count { Regex("^[a-z]?\\d{4,}$", RegexOption.IGNORE_CASE).matches(it.name) }
+            if (codeLike == ppl.size) throw IllegalStateException((if (tr) "adlar hesap kodu olarak geldi: " else "names came back as account codes: ") + ppl.joinToString { it.name })
+            ppl.take(3).joinToString(", ") { it.name }
+        }
+        step(if (tr) "Kişi fotoğrafı" else "Directory photo") {
+            val e = first?.from?.email ?: return@step "—"
+            when (val d = MailPhotos.get(e)) { null -> throw IllegalStateException(if (tr) "sunucuya ulaşılamadı" else "server not reachable"); "" -> if (tr) "fotoğraf yok" else "no photo"; else -> "${d.length / 1365} KB" }
+        }
         step(if (tr) "Outlook görev klasörü (yaver)" else "Outlook task folder (yaver)") { if (OSync.folder(false) != null) (if (tr) "bulundu" else "found") else (if (tr) "henüz yok (yedek açılınca oluşturulur)" else "not there yet (created when backup is turned on)") }
         step(if (tr) "Outlook görevlerini okuma" else "Read Outlook tasks") {
             val fid = OSync.folder(false) ?: return@step if (tr) "klasör yok" else "no folder"
             val r = OSync.fetchRemote(fid)
-            "${r.tasks.size} ${if (tr) "görev" else "tasks"}, ${r.tasks.count { it.data != null }} ${if (tr) "tam veri" else "with full data"}${if (r.index != null) (if (tr) ", yedek dizini var" else ", backup index present") else ""}"
+            val ix = r.index?.data
+            if (r.index != null && ix == null) throw IllegalStateException(if (tr) "hafıza kaydı bulundu ama okunamadı" else "memory item found but unreadable")
+            "${r.tasks.size} ${if (tr) "görev" else "tasks"}, ${r.tasks.count { it.data != null }} ${if (tr) "tam veri" else "with full data"}" +
+                (if (ix != null) (if (tr) ", hafıza ${ix.optJSONObject("memory")?.optJSONArray("memory")?.length() ?: 0}+${ix.optJSONObject("memory")?.optJSONArray("user")?.length() ?: 0}, beceri ${ix.optJSONArray("skills")?.length() ?: 0}, ders ${ix.optJSONArray("lessons")?.length() ?: 0}, ${r.indexes.size} kayıt" else ", memory ${ix.optJSONObject("memory")?.optJSONArray("memory")?.length() ?: 0}+${ix.optJSONObject("memory")?.optJSONArray("user")?.length() ?: 0}, skills ${ix.optJSONArray("skills")?.length() ?: 0}, lessons ${ix.optJSONArray("lessons")?.length() ?: 0}, ${r.indexes.size} item(s)") else "")
         }
         step(if (tr) "Takvim (bugün)" else "Calendar (today)") {
             val s = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
-            "${Mail.use(cancel) { it.events(s, s + 86400000L, cancel) }.size}"
+            val evs = Mail.use(cancel) { it.events(s, s + 7 * 86400000L, cancel) }
+            "${evs.size} (7 ${if (tr) "gün" else "days"})" + (evs.firstOrNull { it.meeting }?.let { e -> " · ${e.subject.take(30)} · ${e.organizer?.name ?: "?"}${if (e.created.isNotEmpty()) " · " + (if (tr) "davet " else "invite ") + MailTools.fmt(Exchange.parseTime(e.created)) else ""}" } ?: "")
         }
         step(if (tr) "Taslak oluşturma" else "Create a draft") {
             draft = Mail.use(cancel) { it.compose("new", "", emptyList(), emptyList(), "yaver test " + SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()), "yaver connection test — safe to delete", false, cancel) }.ifEmpty { null }

@@ -597,6 +597,7 @@
   setInterval(waitTick, 1000);
 
   function onEvent(type, d) {
+    if (type === "mail.diag") { if (S.stDraw && !S.stDone) S.stDraw(d.rows); return; }
     d = d || {};
     if (type === "run") {
       var id = d.convoId;
@@ -1527,6 +1528,7 @@
       row({ icon: "bell", label: T("New mail notifications", "Yeni posta bildirimi"), sub: T("Checks every " + M.poll + " min — this also keeps the session open", "Her " + M.poll + " dakikada kontrol — bu oturumu da açık tutar"), toggle: M.notify, onToggle: function (on) { setCfg("mailNotify", on); } }),
       row({ icon: "clock", label: T("Check every", "Kontrol sıklığı"), value: M.poll + T(" min", " dk"), onclick: function () { optionsSheet(T("Check for new mail every", "Yeni postayı kontrol et"), [["1", "1"], ["3", "3"], ["5", "5"], ["10", "10"], ["15", "15"], ["30", "30"]].map(function (x) { return [x[0], x[1] + T(" minutes", " dakika")]; }), String(M.poll), function (v) { setCfg("mailPoll", v); }); } }),
       row({ icon: "server", label: T("EWS address", "EWS adresi"), sub: M.ews || T("Optional — only if IT gave you one", "İsteğe bağlı — BT verdiyse"), onclick: function () { editSheet({ title: T("EWS address", "EWS adresi"), value: M.ews, type: "url", placeholder: "https://mail.sirket.com.tr/EWS/Exchange.asmx", save: function (v) { setCfg("mailEws", v.trim()); } }); } }),
+      row({ icon: "circle-check", label: T("Test the mail connection", "Posta bağlantısını sına"), sub: T("Tries every mail feature yaver uses once and shows what works — share the result if something fails", "yaver'in kullandığı her posta özelliğini bir kez dener ve neyin çalıştığını gösterir — bir şey başarısızsa sonucu paylaşın"), wrap: true, onclick: mailSelfTest }),
       row({ icon: "log-in", label: M.connected ? T("Sign in again", "Yeniden oturum aç") : T("Sign in now", "Şimdi oturum aç"), sub: M.connected ? M.status : (M.error ? M.error.replace(/^SIGNIN:/, "") : ""), onclick: signInMail })
     ], T("Works with company sign-in pages and authenticators: you sign in on your mail server's own page, yaver fills in what it knows and keeps the session open.", "Kurumsal oturum açma sayfaları ve doğrulayıcılarla çalışır: posta sunucunuzun kendi sayfasında oturum açarsınız, yaver bildiklerini doldurur ve oturumu açık tutar."));
     mailGroup.id = "s-mail";
@@ -1571,6 +1573,26 @@
       save: function (v) { if (v.trim()) setCfg(key, v.trim()).then(function (st) { if (st) toast(T("Saved", "Kaydedildi")); }); },
       extra: has ? [[T("Remove", "Kaldır"), "", function () { setCfg(key, ""); }]] : [] });
   }
+  /* the mail self-test: every step live, then copy/share */
+  function mailSelfTest() {
+    var list = h("div", { class: "stest" }, h("div", { class: "status" }, h("div", { class: "spin" }), T("Starting…", "Başlıyor…")));
+    function draw(rows) {
+      clear(list);
+      (rows || []).forEach(function (r, i) {
+        var last = i === rows.length - 1 && !S.stDone;
+        list.appendChild(h("div", { class: "strow " + (r.ok ? "ok" : (last && !r.note ? "run" : "bad")) },
+          last && !r.note && !r.ok ? h("div", { class: "spin" }) : icon(r.ok ? "circle-check" : "circle-x", "s"),
+          h("div", null, h("b", null, r.name), r.note ? h("small", null, r.note) : null)));
+      });
+    }
+    S.stDone = false; S.stDraw = draw;
+    var text = "";
+    var sh = sheet({ title: T("Mail connection test", "Posta bağlantı testi"), text: T("This takes about half a minute. A test draft is created and deleted again.", "Yaklaşık yarım dakika sürer. Bir deneme taslağı oluşturulup yeniden silinir."), body: list,
+      actions: [[T("Copy result", "Sonucu kopyala"), "", function () { if (text) { call("copy", { text: text }); toast(T("Copied", "Kopyalandı")); } return false; }], [T("Share log", "Günlüğü paylaş"), "p", function () { shareLog(); }]] });
+    call("mailx.diag").then(function (r) { S.stDone = true; text = r.text || ""; draw(r.rows); var bad = (r.rows || []).filter(function (x) { return !x.ok; }).length; toast(bad ? T(bad + " step(s) failed", bad + " adım başarısız") : T("All steps work", "Tüm adımlar çalışıyor")); })
+      .catch(function (e) { S.stDone = true; clear(list).appendChild(h("div", { class: "err" }, icon("triangle-alert", "s"), h("div", null, String(e.message || e).replace(/^SIGNIN:/, "")))); });
+  }
+
   function diagSheet() {
     var box = h("div", { class: "res", style: "display:block;white-space:pre-wrap;font-size:11.5px;line-height:1.45;max-height:52vh;overflow:auto" }, T("Loading…", "Yükleniyor…"));
     sheet({ title: T("Diagnostic log", "Tanılama günlüğü"), text: T("Share it to show what happened. Passwords, codes and keys are never written to it.", "Ne olduğunu göstermek için paylaşın. Şifreler, kodlar ve anahtarlar asla yazılmaz."), body: box,
