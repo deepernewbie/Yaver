@@ -362,7 +362,7 @@ object MemoryX {
         }
         if (notes.isNotEmpty()) {
             changed()
-            try { onNote?.invoke("🧠 Memory: " + notes.joinToString(" · ") + ". Restore anything from the Memory tab → Trash.") } catch (_: Throwable) {}
+            try { onNote?.invoke("🧠 " + Y.t("Memory: ", "Hafıza: ") + notes.joinToString(" · ") + Y.t(". Restore anything from the Memory tab → Trash.", ". Her şeyi Hafıza sekmesi → Çöp kutusu'ndan geri yükleyebilirsiniz.")) } catch (_: Throwable) {}
         }
     }
 

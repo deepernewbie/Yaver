@@ -132,7 +132,7 @@ object Subagents {
             val ch = reg[Children.slugId(a.str("name"), "worker")] ?: reg[a.str("name")]
                 ?: throw IllegalArgumentException("no subagent named ${a.str("name")}. Running: ${Children.list(pid).joinToString(", ") { it.name }.ifEmpty { "none" }}")
             when (a.str("action")) {
-                "stop" -> { ch.cancel?.cancel(); "Stopping ${ch.name}." }
+                "stop" -> { ch.cancel?.cancel(); Y.t("Stopping ${ch.name}.", "${ch.name} durduruluyor.") }
                 "delete" -> { Children.delete(pid, ch); "Deleted ${ch.name}." }
                 else -> {
                     if (a.str("message").isEmpty()) throw IllegalArgumentException("message is required")
@@ -225,7 +225,7 @@ object Children {
     /** /subagents [stop <name|all>] — returns the note to show. */
     fun command(pid: String, rest: String): String {
         val st = Regex("^stop\\s+(\\S+)$").find(rest.trim())
-        if (st != null) { for (ch in list(pid)) if (st.groupValues[1] == "all" || ch.name == st.groupValues[1]) ch.cancel?.cancel(); return "Stopping " + st.groupValues[1] }
-        return "🤖 " + list(pid).joinToString(" · ") { "${it.name}: ${it.status}" }.ifEmpty { "No background subagents." }
+        if (st != null) { for (ch in list(pid)) if (st.groupValues[1] == "all" || ch.name == st.groupValues[1]) ch.cancel?.cancel(); return Y.t("Stopping ", "Durduruluyor: ") + st.groupValues[1] }
+        return "🤖 " + list(pid).joinToString(" · ") { "${it.name}: ${it.status}" }.ifEmpty { Y.t("No background subagents.", "Arka planda alt ajan yok.") }
     }
 }

@@ -86,7 +86,7 @@ object Prompt {
 
     /** The Android counterpart of ENV_GUIDANCE (the original describes a browser tab, VFS and Pyodide). */
     fun envGuidance(): String = """# Runtime environment
-You run as a native Android app (plusAI.yaver) on the user's phone (${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, time zone ${TimeZone.getDefault().id}), set as the phone's assistant. There is no terminal or shell.
+You run as a native Android app (plusAI.yaver) on the user's phone (${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}, time zone ${TimeZone.getDefault().id}), set as the phone's assistant. There is no real operating-system shell: the terminal tool is a virtual shell over the workspace (run `help` in it for its commands).
 - Files: yaver's workspace on the phone. Attachments the user sends are in uploads/, mail attachments in mail/, code output in outputs/. list_files, read_file, write_file and delete_file use workspace paths. Uploaded PDF, Word (.docx), Excel (.xlsx/.csv), PowerPoint (.pptx), OpenDocument and HTML files: read them with read_document (ocr=true for scanned PDFs). look_at_image looks at a picture with the vision model. export_file saves a copy to the phone's Download/yaver folder or opens the share sheet.
 - Code: run_code runs Python (real CPython via Pyodide; numpy, pandas, matplotlib, scipy… load automatically, the first use downloads Python once) or JavaScript in an invisible engine on the phone. Workspace files listed in files are available by name in the current folder; files the code writes are saved to outputs/ and matplotlib figures are saved as PNG. Print what you need to see. No subprocess, threads or sockets: fetch web data with the web tools first and pass it as files. Prefer Python for data analysis, Excel/CSV work, statistics and charts. Pictures you made are shown to the user with ![](path).
 - Internet: web_search, then read the best pages with read_page (numbered links: link=<number> follows one; long pages come in parts) and cite them as markdown links. http_request calls APIs. For anything current (news, prices, people in roles, schedules, opening hours) search instead of guessing.
@@ -149,16 +149,17 @@ You run as a native Android app (plusAI.yaver) on the user's phone (${Build.MANU
 
     /**
      * sysFor: the system prompt as sent with each request — current standing rules first (they may have been
-     * added after the conversation started), the frozen base (its stale harness section removed), the summary of
-     * compacted turns (Android addition), and the live harness digest of this conversation.
+     * added after the conversation started), the frozen base (its stale harness section removed) and the live
+     * harness digest of this conversation. The summary of compacted turns is NOT here: Compactor.head sends it as
+     * a framed message in front of the kept turns (having it in both places doubled its tokens and, without the
+     * "earlier turns only" framing, made the model treat an old task as the current one).
      */
     fun forRequest(c: Convo, background: Boolean = c.background): String {
         val r = Rules.block()
         var b = base(c, background)
         val live = safe { PromptHooks.harnessDigest(c.id, false) }
         b = HARNESS_SECTION.replace(b, "").trim()
-        val sum = if (c.summary.isNotBlank()) "## Summary of the earlier part of this conversation\n" + c.summary.trim() else ""
-        return listOf(r, b, sum, live).filter { it.isNotEmpty() }.joinToString("\n\n")
+        return listOf(r, b, live).filter { it.isNotEmpty() }.joinToString("\n\n")
     }
 
     /**

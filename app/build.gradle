@@ -11,8 +11,8 @@ android {
         applicationId "com.plusai.yaver"
         minSdk 26
         targetSdk 34
-        versionCode 28         // raise this on every release
-        versionName "3.5"
+        versionCode 29         // raise this on every release
+        versionName "3.6"
     }
 
     signingConfigs {

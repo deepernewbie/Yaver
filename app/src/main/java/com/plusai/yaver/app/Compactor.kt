@@ -178,9 +178,24 @@ object Compactor {
         return out
     }
 
+    /**
+     * max_tokens for the next request: [want] (0 = the service default) limited to what still fits in the model's window
+     * next to the prompt. Without this, a raised answer budget (augment mode) plus a long prompt is rejected as "too long",
+     * which then looks like a context overflow and compacts the conversation for nothing.
+     */
+    fun fitOutput(c: Convo, tools: JSONArray?, model: String?, want: Int): Int {
+        if (want <= 0) return want
+        val w = window(model); if (w <= 0) return want
+        val room = w - tokens(c, tools, model) - 256
+        return maxOf(1024, minOf(want, room))
+    }
+
     /** Learn from what the server reports. Call right after Llm.chat, BEFORE the reply is added to c.messages. */
     fun calibrate(c: Convo, tools: JSONArray?, model: String?, promptTokens: Int) {
         if (promptTokens < 500) return
+        // pictures cost prompt tokens that the character count does not see: such a request would teach a far too small
+        // chars-per-token value and make every later estimate (and compaction) fire too early
+        if (Cfg.sendImages) for (i in anchorEnd(c) until c.messages.length()) { val im = c.messages.optJSONObject(i)?.optJSONArray("images"); if (im != null && im.length() > 0) return }
         val ch = chars(c, tools).toDouble() / promptTokens
         if (!(ch > 1 && ch < 8)) return
         val m = map("ctx.cpt"); val key = model(model); val old = m.optDouble(key, 0.0)
@@ -325,8 +340,7 @@ Rules: merge, don't append blindly; drop what is obsolete or finished and no lon
             val msgs = JSONArray()
                 .put(JSONObject().put("role", "system").put("content", SUMMARY_SYS + (if (focus.isNotBlank()) "\nThe user asked to especially keep: $focus" else "")))
                 .put(JSONObject().put("role", "user").put("content", "CURRENT SUMMARY:\n${sum.ifEmpty { "(empty)" }}\n\nNEXT PART${if (chunks.size > 1) " (${i + 1}/${chunks.size})" else ""}:\n$ch"))
-            val r = Llm.chat(msgs, null, Cfg.fastModel.ifEmpty { Cfg.model }, cancel = cancel, maxTokens = 2200, stream = false)
-            val t = r.content.trim()
+            val t = Llm.text(msgs, Cfg.fastModel.ifEmpty { Cfg.model }, cancel, 2200, true, "compaction summary").trim()
             if (t.length < 40) throw IllegalStateException("the summary came back empty")
             sum = t
         }
@@ -458,11 +472,11 @@ Rules: merge, don't append blindly; drop what is obsolete or finished and no lon
                 if (!isSub) note(Y.t("🗜 Sending ${callTools.length()} of ${tools.length()} tool definitions so the request fits the model's window.",
                     "🗜 İstek modelin penceresine sığsın diye ${tools.length()} araç tanımından ${callTools.length()} tanesi gönderiliyor."))
             }
-            try { ask(callTools) } catch (e2: CancelledException) { throw e2 } catch (e2: Throwable) {
+            try { Llm.onRetry.get()?.invoke(); ask(callTools) } catch (e2: CancelledException) { throw e2 } catch (e2: Throwable) {
                 if (!isOverflow(e2)) throw e2
                 callTools = filter(slimTools(c, tools), LAST_RESORT_TOOLS)
                 compact(c, callTools, model, cancel, isSub, note, progress, reason = "still too long after the first retry", force = true, aggressive = true, userText = st.userText)
-                try { ask(callTools) } catch (e3: CancelledException) { throw e3 } catch (e3: Throwable) {
+                try { Llm.onRetry.get()?.invoke(); ask(callTools) } catch (e3: CancelledException) { throw e3 } catch (e3: Throwable) {
                     if (isOverflow(e3)) throw LlmException("The model's context window${if (win > 0) " (${fmt(win)} tokens)" else ""} is too small even after compaction. Choose a model with a larger window, or lower \"Turns kept word for word\" in Settings. (${clip(msgOf(e3), 200)})")
                     throw e3
                 }

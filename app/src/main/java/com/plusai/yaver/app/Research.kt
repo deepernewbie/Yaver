@@ -69,7 +69,7 @@ object Research {
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val lang = langName(query)
         val inLang = if (lang != null && lang != "English") " Write it in $lang." else ""
-        say("Planning · breadth $breadth · depth $depth")
+        say(Y.t("Planning · breadth $breadth · depth $depth", "Planlama · genişlik $breadth · derinlik $depth"))
         val plan = json(
             "You are the lead of a research project. Today is $today. Reply with JSON only: {\"brief\": \"a precise research brief: the question, scope, and what a complete answer must cover\", \"queries\": [\"search query\", ...]}. Each query explores a different angle and is specific enough for a web search engine." +
                 if (lang != null && lang != "English") " Write the brief in $lang; queries may be in $lang or English, whichever finds better sources." else "",
@@ -87,16 +87,16 @@ object Research {
                 val key = q.lowercase().trim()
                 val fresh = synchronized(lock) { seen.add(key) }
                 if (fresh && !cancel.cancelled) {
-                    say("Search: $q")
-                    val hits = try { Web.search(q, 6, cancel).second } catch (e: CancelledException) { throw e } catch (e: Throwable) { say("  search failed: ${e.message}"); null }
+                    say(Y.t("Search: $q", "Arama: $q"))
+                    val hits = try { Web.search(q, 6, cancel).second } catch (e: CancelledException) { throw e } catch (e: Throwable) { say(Y.t("  search failed: ", "  arama başarısız: ") + e.message); null }
                     if (hits != null) {
                         val pages = ArrayList<Page>()
                         for (hit in hits.filter { h -> synchronized(lock) { !sources.containsKey(h.url) } }.take(3)) {
                             cancel.check()
                             try {
                                 val rt = Web.read(hit.url, cancel)
-                                if (rt.text.length > 200) { val t = rt.title.ifBlank { hit.title }; pages.add(Page(hit.url, t, clip(rt.text, 5000))); say("  read: ${t.take(80)}") }
-                            } catch (e: CancelledException) { throw e } catch (e: Throwable) { say("  skipped ${hit.url} (${(e.message ?: "").take(60)})") }
+                                if (rt.text.length > 200) { val t = rt.title.ifBlank { hit.title }; pages.add(Page(hit.url, t, clip(rt.text, 5000))); say(Y.t("  read: ", "  okundu: ") + t.take(80)) }
+                            } catch (e: CancelledException) { throw e } catch (e: Throwable) { say(Y.t("  skipped ", "  atlandı ") + "${hit.url} (${(e.message ?: "").take(60)})") }
                         }
                         if (pages.isEmpty()) pages.addAll(hits.take(5).map { Page(it.url, it.title, it.snippet) })
                         val numbered = synchronized(lock) {
@@ -116,7 +116,7 @@ object Research {
                             got.add(Learning(t, (0 until sa.length()).mapNotNull { sa.opt(it)?.toString()?.toDoubleOrNull()?.toInt() }.filter { it > 0 }))
                         }
                         val total = synchronized(lock) { learnings.addAll(got); followups.addAll(strings(ex.optJSONArray("followups"))); learnings.size }
-                        say("  +${got.size} learnings (total $total)")
+                        say(Y.t("  +${got.size} learnings (total $total)", "  +${got.size} bulgu (toplam $total)"))
                     }
                 }
             } }, 2, cancel)
@@ -138,18 +138,22 @@ object Research {
                 stop = d.opt("done") == true
                 chosen = strings(d.optJSONArray("queries")).ifEmpty { cands }.take(keep)
             }
-            if (stop) { say("Enough material, stopping early"); break }
+            if (stop) { say(Y.t("Enough material, stopping early", "Yeterli malzeme var, erken bitiriliyor")); break }
             queries = chosen ?: cands.take(keep)
-            say("Going deeper (level ${level + 2}) with ${queries.size} direction${if (queries.size > 1) "s" else ""}")
+            say(Y.t("Going deeper (level ${level + 2}) with ${queries.size} direction${if (queries.size > 1) "s" else ""}", "Derine iniliyor (seviye ${level + 2}, ${queries.size} yön)"))
         }
         if (learnings.isEmpty()) return "Deep research found no usable sources for \"$query\". Web search may be blocked or rate-limited right now; try again later, or set up SearXNG, Brave or Tavily search in Settings."
-        say("Writing the report from ${learnings.size} learnings and ${sources.size} sources")
+        say(Y.t("Writing the report from ${learnings.size} learnings and ${sources.size} sources", "Rapor yazılıyor: ${learnings.size} bulgu, ${sources.size} kaynak"))
         val srcList = sources.entries.joinToString("\n") { (u, s) -> "[${s.n}] ${s.title} — $u" }
         val msgs = JSONArray()
             .put(JSONObject().put("role", "system").put("content", "Write a thorough, well-structured markdown research report that answers the brief. Today is $today. Start with a short summary, then sections with headings. Cite sources inline as [n] with the numbers given; never invent sources or facts. Note disagreements between sources and open questions. End with a \"## Sources\" section listing the cited sources exactly as given.$inLang"))
             .put(JSONObject().put("role", "user").put("content", "Brief: $brief\n\nLearnings:\n${learnings.joinToString("\n") { l -> "- ${l.text} ${l.src.joinToString("") { "[$it]" }}" }}\n\nSources:\n$srcList"))
-        val rep = Llm.chat(msgs, null, Cfg.model, cancel = cancel, stream = false)
-        val content = rep.content.ifEmpty { rep.reasoning }
+        // visible text only: a reasoning model's hidden reasoning is not the report
+        val content = Llm.text(msgs, Cfg.model, cancel, 12000, false, "research report").ifBlank {
+            Diag.i("research", "the report came back empty — saving the learnings as the report")
+            "# ${brief.lines().first().take(120)}\n\n" + Y.t("_The model returned no report text; these are the findings collected._", "_Model rapor metni döndürmedi; toplanan bulgular aşağıda._") + "\n\n" +
+                learnings.joinToString("\n") { l -> "- ${l.text} ${l.src.joinToString("") { "[$it]" }}" } + "\n\n## Sources\n" + srcList
+        }
         val f = Workspace.resolve(saveTo.ifBlank { "research/${slugify(query)}.md" })
         f.parentFile?.mkdirs()
         f.writeText(content)
@@ -179,7 +183,9 @@ object SideQuestion {
 
     /** Last [n] messages in API form, with tool rows kept only next to their calls (fixAlternation). */
     fun recent(c: Convo, n: Int): JSONArray {
-        val rows = (maxOf(0, c.messages.length() - n) until c.messages.length()).map { c.messages.getJSONObject(it) }.filter { !it.optBoolean("local") }
+        // nothing before summaryUpTo: /clear hid it from yaver, compaction folded it into the summary
+        val from = maxOf(c.summaryUpTo.coerceIn(0, c.messages.length()), c.messages.length() - n)
+        val rows = (from until c.messages.length()).map { c.messages.getJSONObject(it) }.filter { !it.optBoolean("local") }
         val results = rows.filter { it.optString("role") == "tool" }.map { it.optString("tool_call_id") }.toSet()
         val out = JSONArray()
         val open = HashSet<String>()
@@ -204,6 +210,8 @@ object SideQuestion {
         val hist = recent(c, 30)
         while (hist.length() > 0 && hist.getJSONObject(hist.length() - 1).optString("role") == "user") hist.remove(hist.length() - 1)
         val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", system(c)))
+        val head = try { Compactor.head(c) } catch (_: Throwable) { JSONArray() }
+        for (i in 0 until head.length()) msgs.put(JSONObject().put("role", head.getJSONObject(i).optString("role")).put("content", head.getJSONObject(i).optString("content")))
         for (i in 0 until hist.length()) msgs.put(hist.get(i))
         val ln = langNote(c, question)
         msgs.put(JSONObject().put("role", "user").put("content", "<side_question>\n$INSTRUCTION\n\n$question\n</side_question>" + if (ln.isNotBlank()) "\n\n$ln" else ""))

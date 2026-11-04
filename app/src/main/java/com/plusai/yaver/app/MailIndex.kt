@@ -82,9 +82,12 @@ internal object MxText {
     fun arrayIn(t: String): JSONArray? { val a = t.indexOf('['); val b = t.lastIndexOf(']'); return if (a >= 0 && b > a) try { JSONArray(t.substring(a, b + 1)) } catch (e: Exception) { null } else null }
 
     // ---- small EWS DOM helpers (Exchange's own are private) ----
-    fun box(el: Element?): MailBox? { val mb = Xml.kids(el, "Mailbox").firstOrNull() ?: return null; return MailBox(Xml.txt(mb, "Name"), Xml.txt(mb, "EmailAddress")) }
-    fun boxes(el: Element?, name: String): List<MailBox> = Xml.kids(el, name).firstOrNull()?.let { c -> Xml.kids(c, "Mailbox").map { MailBox(Xml.txt(it, "Name"), Xml.txt(it, "EmailAddress")) } } ?: emptyList()
-    fun itemId(el: Element?): Pair<String, String>? { val i = Xml.kids(el, "ItemId").firstOrNull() ?: return null; return i.getAttribute("Id") to i.getAttribute("ChangeKey") }
+    fun box(el: Element?): MailBox? = Exchange.box(el)
+    fun boxes(el: Element?, name: String): List<MailBox> = Exchange.boxes(el, name)
+    fun itemId(el: Element?): Pair<String, String>? {
+        val i = el?.let { e -> Xml.children(e).firstOrNull { it.localName == "ItemId" } } ?: Xml.kids(el, "ItemId").firstOrNull() ?: return null
+        return i.getAttribute("Id") to i.getAttribute("ChangeKey")
+    }
     fun boxJson(b: MailBox?): Any = b?.let { JSONObject().put("name", it.name).put("email", it.email) } ?: JSONObject.NULL
     fun boxFrom(o: JSONObject?): MailBox? = o?.let { MailBox(it.optString("name"), it.optString("email")) }
 }
@@ -134,6 +137,8 @@ object MailIndex {
     private var items: LinkedHashMap<String, MailEntry>? = null
     @Volatile var synced: Long = 0; private set
     private var host = ""
+    /** Index written before recipients were read correctly over Outlook web (v1): entries without To/Cc are read again. */
+    @Volatile private var refill = false
     @Volatile var busy = false; private set
     @Volatile var progress = ""; private set
     @Volatile var lastErr: String? = null; private set
@@ -151,6 +156,7 @@ object MailIndex {
                 val o = j.optJSONObject("items") ?: JSONObject()
                 for (k in o.keys()) o.optJSONObject(k)?.let { m[k] = MailEntry.from(it) }
                 synced = j.optLong("synced"); host = j.optString("host")
+                refill = j.optInt("v", 1) < 2 && m.values.any { it.to.isEmpty() && it.cc.isEmpty() }
             }
         } catch (e: Exception) { Diag.e("mailindex", "load", e) }
         items = m
@@ -163,7 +169,7 @@ object MailIndex {
             for ((k, v) in load()) o.put(k, v.toJson())
             file.parentFile?.mkdirs()
             val tmp = File(file.parentFile, file.name + ".tmp")
-            tmp.writeText(JSONObject().put("v", 1).put("items", o).put("synced", synced).put("host", host).toString())
+            tmp.writeText(JSONObject().put("v", if (refill) 1 else 2).put("items", o).put("synced", synced).put("host", host).toString())
             tmp.renameTo(file)
         } catch (e: Exception) { lastErr = "could not save the mail index: " + e.message }
     }
@@ -173,6 +179,13 @@ object MailIndex {
 
     /** People seen in recent mail (senders and recipients) whose name or address starts with the query words; most frequent first. */
     fun people(q: String, limit: Int = 8): List<MailBox> {
+        // a whole address: that person, with the best name seen for them
+        if (Regex("^[^\\s@<>]+@[^\\s@<>]+$").matches(q.trim())) {
+            val e = q.trim()
+            val seen = all().flatMap { listOfNotNull(it.fr) + it.to + it.cc }.filter { it.email.equals(e, true) }
+            val best = seen.firstOrNull { it.name.isNotBlank() && !it.name.equals(it.email, true) && !Regex("^[a-z]{0,2}\\d{4,}$", RegexOption.IGNORE_CASE).matches(it.name) } ?: seen.firstOrNull()
+            return listOfNotNull(best)
+        }
         val words = MxText.fold(q).split(Regex("[\\s,;]+")).filter { it.isNotEmpty() }
         if (words.isEmpty()) return emptyList()
         val count = HashMap<String, Int>(); val best = HashMap<String, MailBox>()
@@ -188,6 +201,9 @@ object MailIndex {
             words.all { w -> hay.any { it.startsWith(w) } }
         }.sortedByDescending { count[it.email.lowercase()] ?: 0 }.take(limit)
     }
+    /** The real name seen for this address in recent mail (not an account id), or null. */
+    fun nameOf(email: String): String? = people(email, 1).firstOrNull()?.name?.takeIf { it.isNotBlank() && !it.equals(email, true) && !Regex("^[a-z]{0,2}\\d{4,}$", RegexOption.IGNORE_CASE).matches(it) }
+
     fun max(): Int = maxOf(200, MailPlusCfg.indexMax)
     private fun all(): List<MailEntry> = synchronized(lock) { load().values.toList() }
 
@@ -197,37 +213,64 @@ object MailIndex {
     /** GetItem for many ids at once; one by one if a batch fails (e.g. an item was deleted). */
     private fun fetchMany(ids: List<String>, cancel: Cancel?): List<MailEntry> {
         fun one(list: List<String>): List<MailEntry> {
-            val props = listOf("item:Subject", "message:From", "message:ToRecipients", "message:CcRecipients", "item:DateTimeReceived", "item:DateTimeSent", "item:HasAttachments", "item:Attachments", "message:IsRead", "item:Body")
+            val props = listOf("item:Subject", "message:From", "message:ToRecipients", "message:CcRecipients", "item:DateTimeReceived", "item:DateTimeSent", "item:HasAttachments", "item:Attachments", "message:IsRead", "item:Body", "item:DisplayTo", "item:DisplayCc")
             val doc = Mail.use(cancel) { ex -> ex.t.call("<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:BodyType>Text</t:BodyType><t:AdditionalProperties>${props.joinToString("") { "<t:FieldURI FieldURI=\"$it\"/>" }}</t:AdditionalProperties></m:ItemShape><m:ItemIds>${list.joinToString("") { "<t:ItemId Id=\"${Xml.esc(it)}\"/>" }}</m:ItemIds></m:GetItem>", 120000, cancel) }
             val out = ArrayList<MailEntry>()
             for (box in Xml.kids(doc, "Items")) for (it in Xml.children(box)) {
                 val id = MxText.itemId(it)?.first ?: continue
                 if (id.isEmpty()) continue
-                val body = Xml.txt(it, "Body").replace(Regex("\\s+"), " ").trim()
-                val atts = (Xml.kids(it, "FileAttachment") + Xml.kids(it, "ItemAttachment")).filter { a -> Xml.txt(a, "IsInline") != "true" }.map { a -> Xml.txt(a, "Name") }.filter { n -> n.isNotEmpty() }
-                out.add(MailEntry(id, Xml.txt(it, "Subject").ifEmpty { "(no subject)" }, MxText.box(Xml.kids(it, "From").firstOrNull()), MxText.boxes(it, "ToRecipients"), MxText.boxes(it, "CcRecipients"),
-                    Xml.txt(it, "DateTimeReceived").ifEmpty { Xml.txt(it, "DateTimeSent") }, atts, Xml.txt(it, "IsRead") != "false", body.take(1500), ""))
+                val own = { n: String -> Exchange.own(it, n) }
+                val body = own("Body").replace(Regex("\\s+"), " ").trim()
+                val atts = (Xml.kids(it, "FileAttachment") + Xml.kids(it, "ItemAttachment")).filter { a -> Exchange.own(a, "IsInline") != "true" }.map { a -> Exchange.own(a, "Name") }.filter { n -> n.isNotEmpty() }
+                val from = MxText.box(Xml.children(it).firstOrNull { e -> e.localName == "From" }) ?: MxText.box(Xml.kids(it, "From").firstOrNull())
+                out.add(MailEntry(id, own("Subject").ifEmpty { "(no subject)" }, from,
+                    MxText.boxes(it, "ToRecipients").ifEmpty { Exchange.names(own("DisplayTo")) }, MxText.boxes(it, "CcRecipients").ifEmpty { Exchange.names(own("DisplayCc")) },
+                    own("DateTimeReceived").ifEmpty { own("DateTimeSent") }, atts, own("IsRead") != "false", body.take(1500), ""))
             }
             return out
         }
-        return try { one(ids) } catch (e: CancelledException) { throw e } catch (e: Exception) {
-            val res = ArrayList<MailEntry>()
-            for (id in ids) { cancel?.check(); try { res.addAll(one(listOf(id))) } catch (e2: CancelledException) { throw e2 } catch (_: Exception) {} }
-            res
+        // a failing batch is split in halves, so one broken item costs a few requests instead of one per item;
+        // an item that fails alone is skipped for a day (it would otherwise be fetched again on every mail check)
+        fun go(list: List<String>): List<MailEntry> = try { one(list) } catch (e: CancelledException) { throw e } catch (e: AuthException) { throw e } catch (e: Exception) {
+            if (list.size == 1) {
+                Diag.i("mailindex", "item skipped: ${e.message?.take(120)}")
+                synchronized(lock) { bad[list[0]] = System.currentTimeMillis() }
+                emptyList()
+            } else { cancel?.check(); go(list.subList(0, list.size / 2)) + go(list.subList(list.size / 2, list.size)) }
         }
+        return go(ids)
     }
+
+    /** Items the server could not return (id → when), not asked for again for a day. */
+    private val bad = HashMap<String, Long>()
+    private fun isBad(id: String) = synchronized(lock) { bad[id]?.let { System.currentTimeMillis() - it < 86400000L } == true }
+    /** When Sent Items / Archive were last paged: they change rarely, so every 15 minutes is enough. */
+    private val folderSynced = HashMap<String, Long>()
 
     private fun originNow(): String = Mail.owaOrigin ?: Cfg.mailEws
 
     /** Reads new mail of the three folders into the index (full=true rebuilds). Runs on the calling thread. */
-    fun sync(full: Boolean = false, cancel: Cancel? = null) {
+    /**
+     * [inboxHint]: the inbox page the caller just read (MailPlus.refresh): when it holds nothing new, the inbox is
+     * not listed again — a quiet background check then costs no extra request.
+     */
+    fun sync(full: Boolean = false, cancel: Cancel? = null, inboxHint: List<MailHeader>? = null) {
         synchronized(lock) { if (busy) return; busy = true }
         lastErr = null
         try {
             val d = load()
+            val again = refill && !full
             val o = originNow()
             synchronized(lock) { if (host.isNotEmpty() && host != o) d.clear(); host = o; if (full) d.clear() }
             for (f in FOLDERS) {
+                if (!full && !again) {
+                    if (f == "inbox" && inboxHint != null && inboxHint.isNotEmpty()) {
+                        val allKnown = synchronized(lock) { inboxHint.all { h -> d[h.id]?.also { it.r = h.read; it.f = f } != null || isBad(h.id) } }
+                        if (allKnown) continue
+                    }
+                    if (f != "inbox" && System.currentTimeMillis() - (folderSynced[f] ?: 0L) < 15 * 60000L) continue
+                }
+                folderSynced[f] = System.currentTimeMillis()
                 var offset = 0
                 val fresh = ArrayList<String>()
                 var stop = false
@@ -238,8 +281,12 @@ object MailIndex {
                     val r = try { Mail.use(cancel) { it.find(f, "", false, 100, offset, cancel) } } catch (e: CancelledException) { throw e } catch (e: Exception) { if (f == "archive") break; throw e }
                     if (r.items.isEmpty()) break
                     synchronized(lock) {
-                        for (m in r.items) { val known = d[m.id]; if (known != null) { known.r = m.read; known.f = f; if (!full && offset > 0) stop = true } else fresh.add(m.id) }
-                        if (!full && r.items.all { d.containsKey(it.id) }) stop = true
+                        for (m in r.items) {
+                            val known = d[m.id]
+                            if (known != null && again && known.to.isEmpty() && known.cc.isEmpty()) { fresh.add(m.id); continue }
+                            if (known != null) { known.r = m.read; known.f = f; if (!full && !again) stop = true } else if (!isBad(m.id)) fresh.add(m.id)
+                        }
+                        if (!full && !again && r.items.all { d.containsKey(it.id) || isBad(it.id) }) stop = true
                     }
                     offset += r.items.size
                     if (offset >= r.total) break
@@ -257,10 +304,11 @@ object MailIndex {
             synchronized(lock) {
                 val keep = max() * FOLDERS.size
                 if (d.size > keep) {
-                    val sorted = d.values.sortedByDescending { it.d }.take(keep)
+                    val sorted = d.values.sortedByDescending { Exchange.parseTime(it.d) }.take(keep)
                     d.clear(); for (x in sorted) d[x.id] = x
                 }
                 synced = System.currentTimeMillis()
+                refill = false
             }
             save()
         } catch (e: CancelledException) {
@@ -322,7 +370,7 @@ object MailIndex {
     /** Prefix BM25 with subject ×3, sender ×2, attachment names ×2, recipients, body; slight boost for recent mail. */
     fun rank(query: String, list: List<MailEntry>): List<Pair<MailEntry, Double>> {
         val q = MxText.tok(query).distinct().filter { it.length >= 2 }
-        if (q.isEmpty()) return list.sortedByDescending { it.d }.map { it to 0.0 }
+        if (q.isEmpty()) return list.sortedByDescending { Exchange.parseTime(it.d) }.map { it to 0.0 }
         val docs = list.map { x ->
             val st = MxText.tok(x.s)
             val toks = ArrayList<String>()
@@ -384,7 +432,7 @@ object MailIndex {
         if (short.isEmpty()) short = rank("", filter(f)).take(40)
         if (short.size <= 3) return SmartResult(short.map { it.first }, "filters + keywords", f)
         try {
-            val list = short.mapIndexed { i, (x, _) -> "#$i ${x.d.take(10)} | from ${MxText.who(x.fr)} | to ${x.to.map { it.name.ifEmpty { it.email } }.take(3).joinToString(", ")} | ${x.s}${if (x.a.isNotEmpty()) " | attachments: " + x.a.joinToString(", ") else ""} | ${x.b.take(220)}" }.joinToString("\n")
+            val list = short.mapIndexed { i, (x, _) -> "#$i ${Exchange.parseTime(x.d).let { ms -> if (ms > 0) SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(ms)) else x.d.take(10) }} | from ${MxText.who(x.fr)} | to ${x.to.map { it.name.ifEmpty { it.email } }.take(3).joinToString(", ")} | ${x.s}${if (x.a.isNotEmpty()) " | attachments: " + x.a.joinToString(", ") else ""} | ${x.b.take(220)}" }.joinToString("\n")
             val r = Llm.ask("You pick the e-mails that best match a request. Output only JSON {\"ids\": [numbers of the matching e-mails, best first]}. Include only real matches (max $limit).", "Request: $question\n\nE-mails:\n$list", cancel, 300, true)
             val ids = MxText.jsonIn(r)?.optJSONArray("ids")
             if (ids != null && ids.length() > 0) {

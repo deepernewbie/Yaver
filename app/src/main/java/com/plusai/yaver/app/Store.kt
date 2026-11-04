@@ -44,7 +44,40 @@ object Convos {
     private val dir: File get() = File(Y.app.filesDir, "convos").apply { mkdirs() }
     private val lock = Any()
 
-    fun save(c: Convo, touch: Boolean = true) = synchronized(lock) {
+    /**
+     * Conversations with a running turn: the agent's own instance. Other code (the screen's 👍/👎, rename…) loads a
+     * separate copy from disk; saving that copy would overwrite the turn's newer messages, and the turn's next save
+     * would then drop the copy's change. Such saves are merged into the live instance instead (see [save]).
+     */
+    private val live = java.util.concurrent.ConcurrentHashMap<String, Convo>()
+    private val MARKS = listOf("fb", "fbNote", "fbTold", "judged")
+
+    fun begin(c: Convo) { live[c.id] = c }
+    fun end(c: Convo) { live.remove(c.id, c) }
+
+    /** Copies what a stale copy may have changed (title, per-message feedback marks) into the live instance. */
+    fun mergeInto(dst: Convo, src: Convo) {
+        if (src.title != dst.title) dst.title = src.title
+        val n = minOf(src.messages.length(), dst.messages.length())
+        for (i in 0 until n) {
+            val a = src.messages.optJSONObject(i) ?: continue; val b = dst.messages.optJSONObject(i) ?: continue
+            if (a.optLong("ts", -1) != b.optLong("ts", -1) || a.optString("role") != b.optString("role")) continue
+            for (k in MARKS) { if (a.has(k)) { if (a.opt(k) != b.opt(k)) b.put(k, a.opt(k)) } else if (b.has(k)) b.remove(k) }
+        }
+    }
+
+    fun save(c: Convo, touch: Boolean = true): Unit = synchronized(lock) {
+        val l = live[c.id]
+        if (l != null && l !== c) {
+            mergeInto(l, c)
+            // the live instance is written by its own turn; writing it here could race with the worker adding messages
+            try { write(l, touch) } catch (e: java.util.ConcurrentModificationException) { /* the turn saves it at its next step */ }
+            return
+        }
+        write(c, touch)
+    }
+
+    private fun write(c: Convo, touch: Boolean) {
         if (touch) c.updated = System.currentTimeMillis()
         val f = File(dir, c.id + ".json")
         val tmp = File(dir, c.id + ".tmp")

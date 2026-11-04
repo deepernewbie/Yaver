@@ -42,18 +42,22 @@ object MailPhotos {
             val hdr = mapOf("X-OWA-CANARY" to canary, "X-Requested-With" to "XMLHttpRequest")
             if (mode.startsWith("web:")) {
                 val r = WebOwa.send(origin, url, hdr, null, 15000, null, binary = true)
-                if (r.redirected || r.code == 0) return null
+                // signed out or a server hiccup: unknown now (not "no photo", which is remembered for a week)
+                if (r.redirected || r.code <= 0 || r.code == 401 || r.code == 440 || r.code >= 500) return null
                 val ct = r.text.substringBefore('\n'); val b64 = r.text.substringAfter('\n', "")
                 return if (r.code == 200 && ct.startsWith("image/") && b64.isNotEmpty()) android.util.Base64.decode(b64, android.util.Base64.DEFAULT) else ByteArray(0)
             }
             val r = Http.request(url, headers = hdr + ("User-Agent" to Mail.ua), follow = false, timeoutMs = 15000)
-            return if (r.code == 200 && r.contentType.startsWith("image/")) r.body else if (r.code in 300..399 || r.code == 401 || r.code == 440) null else ByteArray(0)
+            return if (r.code == 200 && r.contentType.startsWith("image/")) r.body else if (r.code in 300..399 || r.code == 401 || r.code == 440 || r.code >= 500) null else ByteArray(0)
         }
         // EWS
         return try {
             val doc = Mail.use { it.t.call("<m:GetUserPhoto><m:Email>${Xml.esc(email)}</m:Email><m:SizeRequested>HR96x96</m:SizeRequested></m:GetUserPhoto>", 15000) }
             val b64 = Xml.kids(doc, "PictureData").firstOrNull()?.textContent?.replace(Regex("\\s+"), "") ?: ""
             if (b64.isEmpty()) ByteArray(0) else android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
-        } catch (e: MailException) { ByteArray(0) }
+        } catch (e: MailException) {
+            // only a real "no photo / unknown person" answer is remembered; a connection problem is not
+            if (Regex("NotFound|NoPhoto|ErrorInvalidRequest|ErrorInvalidServerVersion|ErrorInvalidOperation|not found|ErrorMailRecipientNotFound|ErrorInvalidSmtpAddress", RegexOption.IGNORE_CASE).containsMatchIn(e.code + " " + e.message)) ByteArray(0) else null
+        }
     }
 }

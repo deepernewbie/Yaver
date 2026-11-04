@@ -211,7 +211,7 @@ object Planning {
             g.put("round", g.optInt("round") + 1)
             out = continuation(g)
         }
-        if (limit > 0) note(c.id, "⏹ Goal paused: round limit reached. Use /goal resume to continue.")
+        if (limit > 0) note(c.id, Y.t("⏹ Goal paused: round limit reached. Use /goal resume to continue.", "⏹ Hedef duraklatıldı: tur sınırına ulaşıldı. Sürdürmek için /goal resume yazın."))
         if (out != null || limit > 0) changed(c.id)
         return out
     }
@@ -368,18 +368,18 @@ object Planning {
                 for (g in gl) { cancel.check(); val (pass, out) = runGate(g, cancel); if (!pass) { failed = Pair(g, out); break } }
                 a.put("lastGate", JSONObject().put("pass", failed == null).put("stamp", stamp).put("cmd", failed?.first ?: JSONObject.NULL).put("out", failed?.second?.let { clip(it, 3000) } ?: JSONObject.NULL))
                 ConvoState.edit(c.id) { it.put("autonomous", a) }
-                if (failed == null) { autoStop(c, "gates passed", "✅ Autonomous run finished: all quality gates passed (${gl.joinToString(", ") { "`$it`" }})."); return null }
+                if (failed == null) { autoStop(c, "gates passed", Y.t("✅ Autonomous run finished: all quality gates passed", "✅ Otonom çalışma bitti: tüm kalite kapıları geçti") + " (${gl.joinToString(", ") { "`$it`" }})."); return null }
             }
             u.put("gateRetries", u.optInt("gateRetries") + 1)
             ConvoState.edit(c.id) { it.put("autonomous", a) }
             if (u.optInt("gateRetries") > retries) {
-                autoStop(c, "gate retries exhausted", "⛔ Autonomous run stopped: the gate `${a.optJSONObject("lastGate")?.optString("cmd")}` still fails after ${a.opt("gateRetries")} retries. This does not mean the task succeeded.")
+                autoStop(c, "gate retries exhausted", Y.t("⛔ Autonomous run stopped: the gate `${a.optJSONObject("lastGate")?.optString("cmd")}` still fails after ${a.opt("gateRetries")} retries. This does not mean the task succeeded.", "⛔ Otonom çalışma durdu: `${a.optJSONObject("lastGate")?.optString("cmd")}` kapısı ${a.opt("gateRetries")} denemeden sonra hâlâ geçmiyor. Bu, işin başarıldığı anlamına gelmez."))
                 return null
             }
         }
         val why = limitReason(c, a)
         if (why != null) {
-            autoStop(c, why, "⏹ Autonomous run stopped at the $why. Reaching a limit does not mean the task succeeded${if (gl.isNotEmpty()) "" else " (no quality gates were set)"}.")
+            autoStop(c, why, Y.t("⏹ Autonomous run stopped at the $why. Reaching a limit does not mean the task succeeded${if (gl.isNotEmpty()) "" else " (no quality gates were set)"}.", "⏹ Otonom çalışma sınırda durdu ($why). Sınıra ulaşmak işin başarıldığı anlamına gelmez${if (gl.isNotEmpty()) "" else " (kalite kapısı tanımlanmamıştı)"}."))
             return null
         }
         u.put("continuations", u.optInt("continuations") + 1)
@@ -409,7 +409,7 @@ object Planning {
             val a = ConvoState.get(c.id).optJSONObject("autonomous")
             val used = a?.optJSONObject("used")?.optInt("continuations") ?: 0
             val max = lim(a?.optJSONObject("limits")?.opt("maxContinuations"))
-            return Round(t, "Autonomous continuation $used/${if (max.isInfinite()) "∞" else max.toLong().toString()}", "auto")
+            return Round(t, Y.t("Autonomous continuation", "Otonom devam") + " $used/${if (max.isInfinite()) "∞" else max.toLong().toString()}", "auto")
         }
         return null
     }
@@ -431,32 +431,32 @@ object Planning {
         val cmd = m.groupValues[1]; val rest = m.groupValues[2].trim()
         when (cmd) {
             "plan" -> {
-                if (Regex("^off$", RegexOption.IGNORE_CASE).matches(rest)) { setPlanMode(c.id, false); return Cmd(note = "Plan mode off") }
+                if (Regex("^off$", RegexOption.IGNORE_CASE).matches(rest)) { setPlanMode(c.id, false); return Cmd(note = Y.t("Plan mode off", "Plan modu kapalı")) }
                 setPlanMode(c.id, true)
-                return Cmd(note = "Plan mode on: yaver will plan and ask before executing", send = rest.ifEmpty { null })
+                return Cmd(note = Y.t("Plan mode on: yaver will plan and ask before executing", "Plan modu açık: yaver önce plan yapıp uygulamadan önce soracak"), send = rest.ifEmpty { null })
             }
             "goal" -> {
                 if (rest.isEmpty() || rest == "status") return Cmd(note = describe(goal(c.id)))
                 if (rest in setOf("pause", "resume", "clear")) {
-                    if (goal(c.id) == null) return Cmd(note = "No goal is set")
+                    if (goal(c.id) == null) return Cmd(note = Y.t("No goal is set", "Hedef ayarlı değil"))
                     when (rest) { "clear" -> clearGoal(c.id); "pause" -> pauseGoal(c.id); else -> ConvoState.edit(c.id) { s -> s.optJSONObject("goal")?.put("status", "active") }.also { changed(c.id) } }
                     if (rest == "resume" && !busy) goalContinuation(c)?.let { return Cmd(send = it, label = goalLabel(c), internal = true) }
                     return Cmd()
                 }
                 setGoal(c.id, rest)
-                if (busy) return Cmd(note = "Goal set; it starts when the current task finishes")
+                if (busy) return Cmd(note = Y.t("Goal set; it starts when the current task finishes", "Hedef ayarlandı; mevcut iş bitince başlayacak"))
                 return goalContinuation(c)?.let { Cmd(send = it, label = goalLabel(c), internal = true) } ?: Cmd()
             }
             "autonomous" -> {
                 if (rest.isEmpty() || rest == "status") return Cmd(note = "🤖 " + autoStatus(c.id, c))
-                if (rest == "off") { if (ConvoState.get(c.id).has("autonomous")) disableAutonomous(c.id); return Cmd(note = "Autonomous mode off") }
-                val on = Regex("^on\\b([\\s\\S]*)$").find(rest) ?: return Cmd(note = "Use /autonomous on [flags] | off | status")
+                if (rest == "off") { if (ConvoState.get(c.id).has("autonomous")) disableAutonomous(c.id); return Cmd(note = Y.t("Autonomous mode off", "Otonom mod kapalı")) }
+                val on = Regex("^on\\b([\\s\\S]*)$").find(rest) ?: return Cmd(note = Y.t("Use /autonomous on [flags] | off | status", "Kullanım: /autonomous on [seçenekler] | off | status"))
                 val flags = on.groupValues[1].trim()
                 val task = flags.replace(AUTO_FLAG, " ").replace(Regex("\\s+"), " ").trim()
                 enableAutonomous(c, flags)
                 val st = "🤖 " + autoStatus(c.id, c)
                 if (task.isNotEmpty()) return Cmd(note = st, send = task)
-                if (!busy && c.messages.length() > 0) autonomousNext(c, Cancel())?.let { return Cmd(note = st, send = it, label = "Autonomous continuation", internal = true) }
+                if (!busy && c.messages.length() > 0) autonomousNext(c, Cancel())?.let { return Cmd(note = st, send = it, label = Y.t("Autonomous continuation", "Otonom devam"), internal = true) }
                 return Cmd(note = st)
             }
         }
@@ -529,7 +529,7 @@ object Planning {
                     "resume" -> g.put("status", "active")
                 }
             }
-            completed?.let { note(id, "✅ Goal complete: $it") }
+            completed?.let { note(id, Y.t("✅ Goal complete: $it", "✅ Hedef tamamlandı: $it")) }
             changed(id)
             describe(s.optJSONObject("goal"))
         })

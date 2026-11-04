@@ -60,10 +60,8 @@ object MailTools {
             "people", "Look up colleagues in the company address book (name or e-mail beginning). Returns names, e-mails, titles, departments.",
             P.props("query" to P.s("Name or e-mail")), listOf("query")
         ) { a, ctx ->
-            val r = Mail.use(ctx.cancel) { it.resolve(a.str("query"), 10, ctx.cancel) }.map { p ->
-                // an account-like name (a00058): use the name seen in recent mail instead
-                if (Regex("^[a-z]?\\d{4,}$", RegexOption.IGNORE_CASE).matches(p.name)) { val n = try { MailIndex.people(p.email, 1).firstOrNull()?.name } catch (_: Throwable) { null }; if (!n.isNullOrBlank() && !n.equals(p.email, true)) Exchange.Person(n, p.email, p.title, p.dept) else p } else p
-            }
+            // resolve already replaces account-like names (t18503) with the name seen in mail or taken from the address
+            val r = Mail.use(ctx.cancel) { it.resolve(a.str("query"), 10, ctx.cancel) }
             if (r.isEmpty()) "No one found." else r.joinToString("\n") { "- ${it.name} <${it.email}>${if (it.title.isNotEmpty()) " · " + it.title else ""}${if (it.dept.isNotEmpty()) " · " + it.dept else ""}" }
         })
     }

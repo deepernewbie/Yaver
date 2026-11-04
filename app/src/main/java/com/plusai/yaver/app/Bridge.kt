@@ -39,7 +39,28 @@ object Bridge {
 
     fun js(code: String) = Y.ui { host?.web?.evaluateJavascript(code, null) }
 
-    fun emit(type: String, data: JSONObject) = js("window.YV&&YV.on(${JSONObject.quote(type)},$data)")
+    /**
+     * Events sent while no screen is listening (app closed, or the page still loading) wait here, in order, and are
+     * replayed when the page says "ready" — so "yaver learned something", memory chips, follow-ups, notes and tasks
+     * changes that happen in the background are not lost. Streaming text is transient and dropped (the chat reloads).
+     */
+    private val missed = ArrayDeque<Pair<String, String>>()
+    private const val MISSED_MAX = 100
+    private val TRANSIENT = setOf("delta", "think", "progress", "tool", "toolEnd", "step")
+
+    fun emit(type: String, data: JSONObject) {
+        val payload = data.toString()
+        synchronized(pendingLaunches) {
+            if (!uiReady || host == null) {
+                if (type == "run" && data.optString("phase") in TRANSIENT) return
+                if (type == "resume" || type == "s1") return  // a fresh page reads the state itself
+                missed.addLast(type to payload)
+                while (missed.size > MISSED_MAX) missed.removeFirst()
+                return
+            }
+        }
+        js("window.YV&&YV.on(${JSONObject.quote(type)},$payload)")
+    }
 
     fun ret(id: Int, ok: Boolean, value: Any?) {
         val v = when (value) {
@@ -54,12 +75,18 @@ object Bridge {
 
     fun launch(o: JSONObject) {
         synchronized(pendingLaunches) {
-            if (uiReady && host != null) emit("launch", o) else pendingLaunches.add(o)
+            if (!(uiReady && host != null)) { pendingLaunches.add(o); return }
         }
+        emit("launch", o)
     }
 
+    /** The page answered "ready" (after its reply is on its way): replay what it missed, then the pending launches. */
     fun onUiReady() {
-        val l = synchronized(pendingLaunches) { uiReady = true; ArrayList(pendingLaunches).also { pendingLaunches.clear() } }
+        val (ev, l) = synchronized(pendingLaunches) {
+            uiReady = true
+            Pair(ArrayList(missed).also { missed.clear() }, ArrayList(pendingLaunches).also { pendingLaunches.clear() })
+        }
+        for ((t, d) in ev) js("window.YV&&YV.on(${JSONObject.quote(t)},$d)")
         for (o in l) emit("launch", o)
     }
 
@@ -200,7 +227,7 @@ object Bridge {
         "llm.test" -> Llm.ask("Answer in at most six words.", "Say hello and name yourself.", fast = false, maxTokens = 60).trim()
         "convos.list" -> JSONArray(Convos.list())
         "convos.load" -> {
-            val c = Convos.load(a.str("id")) ?: throw IllegalArgumentException("not found")
+            val c = Convos.load(a.str("id")) ?: throw IllegalArgumentException(Y.t("Conversation not found", "Sohbet bulunamadı"))
             val r = runs[c.id]
             c.toJson().apply { remove("system") }.put("running", r != null).put("live", r?.text?.toString() ?: "").put("status", r?.status ?: "")
                 .put("followups", JSONObject().put("items", JSONArray(FollowUps.get(c.id))).put("labels", FollowUps.labels()))
@@ -221,7 +248,7 @@ object Bridge {
         "schedule.cancel" -> { Schedule.remove(a.optInt("id")); true }
         "workspace.list" -> Workspace.list(Workspace.root).ifEmpty { "" }
         "convo.export" -> {
-            val c = Convos.load(a.str("id")) ?: throw IllegalArgumentException("not found")
+            val c = Convos.load(a.str("id")) ?: throw IllegalArgumentException(Y.t("Conversation not found", "Sohbet bulunamadı"))
             val md = StringBuilder("# ${c.title}\n\n")
             for (i in 0 until c.messages.length()) {
                 val m = c.messages.optJSONObject(i) ?: continue
@@ -262,7 +289,7 @@ object Bridge {
             if (!msg.h.read) try { Mail.use { it.markRead(msg.h.id, true) } } catch (_: Throwable) {}
             headerJson(msg.h).put("kind", msg.kind).put("to", JSONArray(msg.to.map { boxJson(it) })).put("cc", JSONArray(msg.cc.map { boxJson(it) }))
                 .put("body", msg.body).put("invite", msg.invite ?: JSONObject.NULL)
-                .put("files", JSONArray(msg.files.filter { !(it.inline && it.type.startsWith("image/")) }.map { JSONObject().put("id", it.id).put("name", it.name).put("type", it.type).put("size", it.size) }))
+                .put("files", JSONArray(msg.files.filter { !(it.inline && it.type.startsWith("image/")) }.map { JSONObject().put("id", it.id).put("name", it.name).put("type", it.type).put("size", it.size).put("item", it.item) }))
         }
         "mail.markRead" -> { Mail.use { it.markRead(a.str("id"), a.optBoolean("read", true)) }; try { MailIndex.markRead(a.str("id"), a.optBoolean("read", true)) } catch (_: Throwable) {}; true }
         "mail.remove" -> { Mail.use { it.remove(a.str("id"), false) }; try { MailIndex.forget(a.str("id")) } catch (_: Throwable) {}; true }
@@ -270,8 +297,10 @@ object Bridge {
         "mail.compose" -> Mail.use { it.compose(a.str("kind").ifEmpty { "new" }, a.str("ref"), a.list("to"), a.list("cc"), a.str("subject"), a.optString("body"), a.optBoolean("send")) }
         "mail.attachment" -> {
             val att = Mail.use { it.attachment(a.str("attId")) }
-            val path = Workspace.write("mail", att.name.ifEmpty { a.str("name") }, att.bytes)
-            Y.ui { try { Workspace.open(host ?: Y.app, Workspace.resolve(path)) } catch (e: Throwable) { U.toast(Y.app, "Saved: $path") } }
+            // the server's name can hold path or reserved characters (attached e-mails: "RE: a/b?"): never a path
+            val safe = att.name.ifEmpty { a.str("name") }.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]+"), "_").trim().trim('.').take(150).ifEmpty { "attachment" }
+            val path = Workspace.write("mail", safe, att.bytes)
+            Y.ui { try { Workspace.open(host ?: Y.app, Workspace.resolve(path)) } catch (e: Throwable) { U.toast(Y.app, Y.t("Saved: ", "Kaydedildi: ") + path) } }
             path
         }
         "mail.events" -> {
@@ -297,7 +326,9 @@ object Bridge {
         }
         "plan.approve" -> {
             val id = a.str("convoId")
-            val go = Planning.approvePlan(id)
+            // the plan card's "Edit" sends the edited plan: the model follows that version
+            val edited = a.str("plan")
+            val go = Planning.approvePlan(id).let { if (edited.isNotEmpty()) "$it\nThe user edited the plan before approving it; follow this version:\n$edited" else it }
             val ok = Turns.start(id, go, Y.t("Plan approved", "Plan onaylandı"), "plan")
             Diag.i("planning", "plan approved for $id (started=$ok)")
             JSONObject().put("started", ok)
@@ -419,10 +450,19 @@ object Bridge {
     }
 
     /** Slash commands typed in the composer. Returns {note?, send?, started?}: [send] is sent by the UI as the user's message. */
-    private fun command(convoId: String, text: String): JSONObject {
+    private fun command(convoId0: String, text: String): JSONObject {
         val out = JSONObject()
         val m = Regex("^/(\\w+)\\s*([\\s\\S]*)$").find(text) ?: return out.put("send", text)
         val cmd = m.groupValues[1]; val rest = m.groupValues[2].trim()
+        var convoId = convoId0
+        // a command typed in a new chat (/plan, /goal, /autonomous, /heartbeat, /btw): make the chat now so the
+        // setting has somewhere to live; the UI takes the id from "convoId"
+        if (convoId.isEmpty() && cmd in setOf("plan", "goal", "autonomous", "heartbeat", "btw")) {
+            val c = Convo.create(); Convos.save(c); Prefs.put("currentConvo", c.id); convoId = c.id
+        }
+        if (convoId.isNotEmpty()) out.put("convoId", convoId)
+        if (convoId.isEmpty() && cmd in setOf("compact", "clear", "refine", "subagents", "heartbeats"))
+            return out.put("note", if (cmd == "compact" || cmd == "clear") Y.t("The context is already empty", "Bağlam zaten boş") else Y.t("Start a conversation first", "Önce bir sohbet başlatın"))
         val busy = runs.containsKey(convoId)
         Diag.i("command", "/$cmd ${clip(rest, 80)}")
         when (cmd) {
@@ -442,7 +482,8 @@ object Bridge {
                 else { val notes = ArrayList<String>(); Compactor.compactNow(c, rest, null) { notes.add(it) }; out.put("note", notes.joinToString("\n").ifEmpty { Y.t("🗜 Nothing to compact yet — the conversation is short.", "🗜 Henüz sıkıştırılacak bir şey yok — konuşma kısa.") }) }
             }
             "refine", "harness" -> {
-                val c = convo(JSONObject().put("convoId", convoId))
+                // /harness only lists what was learned: a new (unsaved) chat is enough when none is open
+                val c = Convos.load(convoId) ?: if (cmd == "harness") Convo.create() else convo(JSONObject().put("convoId", convoId))
                 Harness.command(c, text, busy)?.let { out.put("note", it) }
             }
             "heartbeat" -> out.put("note", Heartbeats.command(convoId, rest))
@@ -453,22 +494,24 @@ object Bridge {
             "clear" -> out.put("note", clearContext(convoId))
             else -> out.put("send", text)
         }
+        if (cmd in setOf("plan", "goal", "autonomous") && convoId.isNotEmpty()) try { out.put("planning", Planning.state(convoId)) } catch (_: Throwable) {}
         return out
     }
 
     private fun boxJson(b: MailBox) = JSONObject().put("name", b.name).put("email", b.email)
     private fun headerJson(h: MailHeader) = JSONObject().put("id", h.id).put("subject", h.subject).put("from", h.from?.let { boxJson(it) } ?: JSONObject.NULL)
-        .put("received", Exchange.parseTime(h.received)).put("read", h.read).put("attachments", h.attachments).put("importance", h.importance).put("preview", h.preview)
+        .put("received", Exchange.parseTime(h.received)).put("read", h.read).put("attachments", h.attachments).put("importance", h.importance).put("preview", h.preview).put("displayTo", h.displayTo)
 
     /** Methods that need the screen (pickers, voice, system pages) — run on the main thread by the host. */
-    val UI_METHODS = setOf("folder.connect", "files.pick", "voice.listen", "mail.login", "import.zip", "open.link", "open.file", "share.text", "share.file", "system.open", "settings.native")
+    val UI_METHODS = setOf("folder.connect", "files.pick", "voice.listen", "mail.login", "import.zip", "open.link", "open.file", "share.text", "share.file", "system.open")
 
     class Api {
         @JavascriptInterface fun call(id: Int, method: String?, args: String?) {
             val m = method ?: ""
             val a = try { JSONObject(if (args.isNullOrEmpty()) "{}" else args) } catch (e: Exception) { JSONObject() }
-            if (m == "ready") { onUiReady(); ret(id, true, state()); return }
-            if (m in UI_METHODS) { Y.ui { val h = host; if (h == null) ret(id, false, "no screen") else h.uiCall(id, m, a) }; return }
+            // answer first: the page builds its screen from this reply, then the replayed events and launches arrive
+            if (m == "ready") { ret(id, true, state()); onUiReady(); return }
+            if (m in UI_METHODS) { Y.ui { val h = host; if (h == null) ret(id, false, Y.t("yaver is not on screen", "yaver ekranda değil")) else h.uiCall(id, m, a) }; return }
             Y.bg {
                 try { ret(id, true, dispatch(m, a)) }
                 catch (e: Throwable) { ret(id, false, (e.message ?: e.toString()).let { msg -> if (e is LoginRequired) "SIGNIN:$msg" else msg }) }

@@ -57,7 +57,8 @@ object Refs {
     fun short(text: String): String {
         if (text.length < 34 || !ID_RX.containsMatchIn(text)) return text
         val out = ID_RX.replace(text) { ref(it.value) }
-        synchronized(lock) { save(true) }
+        // the map can hold tens of thousands of ids: write it only when this text added new ones
+        synchronized(lock) { if (dirty > 0) save(true) }
         return out
     }
 

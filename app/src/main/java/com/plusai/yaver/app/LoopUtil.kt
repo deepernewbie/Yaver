@@ -55,25 +55,81 @@ object LoopUtil {
         return out
     }
 
-    /** Drops orphaned tool rows and strips UI-only fields (ts, display, images, ok, local rows…). */
+    /** Result sent for a tool call whose result row is missing (the app was killed mid-tool, a row was lost…). */
+    const val MISSING_RESULT = "(no result: the call was interrupted before it finished)"
+
+    /**
+     * Makes the history valid for strict OpenAI-compatible servers and strips UI-only fields (ts, display, images, ok,
+     * local rows…):
+     * - every tool row must directly follow the assistant message that made its call — orphaned or out-of-place tool
+     *   rows are dropped, duplicates too;
+     * - every call of an assistant message gets a result before the next non-tool message (a placeholder when missing),
+     *   otherwise the server rejects the whole request with a 400;
+     * - an assistant message with neither text nor calls is dropped (several providers reject empty assistant content).
+     */
     fun fixAlternation(msgs: JSONArray): JSONArray {
-        val ids = HashSet<String>()
         val out = JSONArray()
+        var open = LinkedHashSet<String>()      // calls of the latest assistant message still waiting for their result
+        val answered = HashSet<String>()
+        fun closeOpen() {
+            for (id in open) out.put(JSONObject().put("role", "tool").put("tool_call_id", id).put("content", MISSING_RESULT))
+            open = LinkedHashSet()
+        }
         for (i in 0 until msgs.length()) {
             val m = msgs.optJSONObject(i) ?: continue
             if (m.optBoolean("local")) continue
             val role = m.optString("role")
-            val calls = m.optJSONArray("tool_calls")
-            if (role == "assistant" && calls != null) for (k in 0 until calls.length()) calls.optJSONObject(k)?.optString("id")?.let { ids.add(it) }
-            if (role == "tool" && !ids.contains(m.optString("tool_call_id"))) continue
+            if (role == "tool") {
+                val id = m.optString("tool_call_id")
+                if (id !in open) continue
+                open.remove(id); answered.add(id)
+            } else closeOpen()
+            val calls = m.optJSONArray("tool_calls")?.takeIf { role == "assistant" && it.length() > 0 }
             val content = m.opt("content")
+            if (role == "assistant" && calls == null && (content == null || content == JSONObject.NULL || (content is String && content.isBlank()))) continue
             val o = JSONObject().put("role", role).put("content", if (content == null || content == JSONObject.NULL) "" else content)
-            if (calls != null) { val a = JSONArray(); for (k in 0 until calls.length()) calls.optJSONObject(k)?.let { a.put(safeToolCall(it)) }; o.put("tool_calls", a) }
-            if (m.has("tool_call_id")) o.put("tool_call_id", m.optString("tool_call_id"))
+            if (calls != null) {
+                val a = JSONArray()
+                for (k in 0 until calls.length()) {
+                    val c = calls.optJSONObject(k) ?: continue
+                    val id = c.optString("id")
+                    if (id.isEmpty() || id in answered || id in open) continue   // a reused id would make the history ambiguous
+                    a.put(safeToolCall(c)); open.add(id)
+                }
+                if (a.length() > 0) o.put("tool_calls", a)
+                else if (o.optString("content").isBlank()) continue
+            }
+            if (role == "tool") o.put("tool_call_id", m.optString("tool_call_id"))
             if (m.has("name") && m.optString("name").isNotEmpty()) o.put("name", m.optString("name"))
             out.put(o)
         }
+        closeOpen()
         return out
+    }
+
+    /**
+     * True while [msgs] ends with exactly [the cut-off answer at contFrom, its "continue" harness request] — the only
+     * shape in which the next reply may be joined to that answer (an empty-reply nudge may have been appended to the request).
+     */
+    fun isContinuationTail(msgs: JSONArray, contFrom: Int, continueMsg: String): Boolean {
+        if (contFrom < 0 || contFrom + 2 != msgs.length()) return false
+        val a = msgs.optJSONObject(contFrom) ?: return false
+        val h = msgs.optJSONObject(contFrom + 1) ?: return false
+        return a.optString("role") == "assistant" && a.optJSONArray("tool_calls") == null &&
+            h.optString("role") == "user" && h.optBoolean("harness") && h.optString("content").startsWith(continueMsg)
+    }
+
+    /**
+     * Joins a continuation to the cut-off text. Models often repeat the last words before going on: an overlap of at
+     * least 12 characters between the end of [prev] and the start of [next] is written once.
+     */
+    fun joinContinuation(prev: String, next: String): String {
+        if (prev.isEmpty()) return next
+        val n = next.trimStart('\n')
+        val max = minOf(400, prev.length, n.length)
+        for (k in max downTo 12) if (prev.regionMatches(prev.length - k, n, 0, k)) return prev + n.substring(k)
+        // the cut fell inside a word or line: keep the continuation exactly as written
+        return prev + next
     }
 
     private fun typeOf(v: Any?): String = when (v) {
@@ -159,6 +215,10 @@ object LoopUtil {
             "write_file" -> {
                 val path = partialString(raw, "path")?.takeIf { it.second }?.first?.trim()
                 val part = partialString(raw, "content")?.first
+                if (!path.isNullOrEmpty() && part.isNullOrEmpty())
+                    return "Error: your write_file call for \"$path\" was cut off by the output limit before ANY of the content arrived — nothing was written. " +
+                        "The file is too large for one call. Do not send the whole file again: call write_file with path=\"$path\" and only the FIRST part of the content (at most about 4000 characters), " +
+                        "then call write_file again with append=true for each next part of at most about 4000 characters, until the file is complete."
                 if (path.isNullOrEmpty() || part.isNullOrEmpty()) null else {
                     val append = Regex("\"append\"\\s*:\\s*true").containsMatchIn(raw)
                     val vp = VPath.normTool(path); val f = VPath.file(vp)
@@ -169,7 +229,7 @@ object LoopUtil {
                     Diag.i("augment", "write_file cut off: saved ${part.length} chars to $vp (append=$append)")
                     "[augment] Your write_file call was cut off by the output limit, so yaver ${if (append) "appended" else "saved"} the part that arrived (${part.length} characters) to $vp — nothing is lost. " +
                         "Continue the SAME file now: call write_file with path=\"$vp\", append=true and the rest of the content, starting exactly after these last characters (do not repeat them):\n«${part.takeLast(240)}»\n" +
-                        "Keep each part under about 6000 characters and keep appending until the file is complete; then check the end of the file with read_file."
+                        "Keep each part under about 4000 characters and keep appending until the file is complete; then check the end of the file with read_file."
                 }
             }
             "execute_code", "run_code" -> {
@@ -182,7 +242,7 @@ object LoopUtil {
                     Diag.i("augment", "$name cut off: saved ${code.length} chars of code to $vp")
                     "[augment] Your $name call was cut off by the output limit before the code was complete, so it was NOT run. yaver saved the ${code.length} characters that arrived to $vp. " +
                         "Finish it: call write_file with path=\"$vp\", append=true and the rest of the code, starting exactly after these last characters (do not repeat them):\n«${code.takeLast(240)}»\n" +
-                        "Add parts of under about 6000 characters until the code is complete, then run the file with the terminal tool: `${if (py) "python" else "node"} $vp`."
+                        "Add parts of under about 4000 characters until the code is complete, then run the file with the terminal tool: `${if (py) "python" else "node"} $vp`."
                 }
             }
             else -> null
@@ -190,18 +250,25 @@ object LoopUtil {
     }
 
     fun cutOffError(name: String) =
-        "Error: your $name call was cut off before its arguments were complete (the reply hit the output limit). Nothing was done. Split the work into smaller calls: for a large file, call write_file with the first part, then call it again with append=true for each following part (keep each part under about 6000 characters)."
+        "Error: your $name call was cut off before its arguments were complete (the reply hit the output limit). Nothing was done. Do not resend the same large call: split it. For a large file, call write_file with only the first part (at most about 4000 characters), then call it again with append=true for each following part of at most about 4000 characters."
 
     /**
      * Parses and checks one tool call's raw arguments like the original runTools did.
      * Returns (args, null) when the call may run, or (null, "Error: …" text to use as the tool result).
      * [params] = the tool's schema parameters (see [paramsOf]).
      */
+    /** Arguments that start a JSON object but do not parse (unclosed): the reply was cut while writing them. */
+    fun isCutArgs(raw: String?): Boolean {
+        val t = (raw ?: "").trim()
+        if (t.isEmpty() || jsonTry(t) != null) return false
+        return t.startsWith("{")
+    }
+
     fun checkCall(name: String, rawArgs: String?, params: JSONObject?, state: LoopState?): Pair<JSONObject?, String?> {
         val raw = rawArgs ?: ""
         val parsed = jsonTry(raw.ifEmpty { "{}" })
         if (parsed == null) {
-            val cut = state?.lastFinish == "length" || Regex("^\\s*\\{[\\s\\S]*[^}\\s]\\s*$").matches(raw)
+            val cut = state?.lastFinish == "length" || isCutArgs(raw)
             val err = if (cut) (salvage(name, raw) ?: cutOffError(name))
             else "Error: arguments were not valid JSON: ${clip(raw, 300)}. Send the call again with valid JSON arguments."
             return Pair(null, err)

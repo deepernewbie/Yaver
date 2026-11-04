@@ -205,7 +205,8 @@ object MailPlus {
     fun onMailCheck(c: Context) {
         if (!Cfg.mailConfigured) return
         try { refresh() } catch (e: Throwable) { Diag.i("mailx", "refresh: ${e.message}"); return }
-        if (!MailIndex.busy && System.currentTimeMillis() - MailIndex.synced > 60000) try { MailIndex.sync() } catch (_: Throwable) {}
+        // incremental: only new mail is read; the inbox page refresh() just read is reused
+        if (!MailIndex.busy && System.currentTimeMillis() - MailIndex.synced > 60000) try { MailIndex.sync(inboxHint = inbox) } catch (_: Throwable) {}
         if (dailyPlanDue()) {
             val label = Y.t("Daily plan (scheduled)", "Günlük plan (zamanlanmış)")
             try { (onDailyPlan ?: { ctx, p, l -> AgentService.runBackground(ctx, p, l) }).invoke(c, dailyPlanPrompt(), label) } catch (e: Throwable) { Diag.e("mailx", "daily plan", e) }
@@ -263,11 +264,13 @@ object MailPlus {
         }
     }
 
-    private fun whoMail(b: MailBox?) = MxText.who(b) + (b?.email?.takeIf { it.isNotEmpty() }?.let { " <$it>" } ?: "")
+    private fun whoMail(b: MailBox?) = MxText.who(b) + (b?.email?.takeIf { it.isNotEmpty() && b.name.isNotEmpty() && !b.name.equals(it, true) }?.let { " <$it>" } ?: "")
 
-    private fun line(m: MailHeader): String {
+    /** sent=true (Sent Items, Drafts): show who it went to instead of the sender (the user). */
+    private fun line(m: MailHeader, sent: Boolean = false): String {
         val t = triage(m.id)
-        return "- id=${m.id}\n  ${MxText.fmtWhen(m.received)} · ${whoMail(m.from)}${if (!m.read) " · UNREAD" else ""}${if (m.attachments) " · attachments" else ""}${if (m.importance != "Normal") " · " + m.importance else ""}\n  Subject: ${m.subject}\n  " +
+        val who = if (sent) "to " + m.displayTo.ifEmpty { "?" } else whoMail(m.from)
+        return "- id=${m.id}\n  ${MxText.fmtWhen(m.received)} · $who${if (!m.read) " · UNREAD" else ""}${if (m.attachments) " · attachments" else ""}${if (m.importance != "Normal") " · " + m.importance else ""}\n  Subject: ${m.subject}\n  " +
             if (t != null) "Summary: ${t.s}${if (t.r) " (needs reply)" else ""}" else "Preview: ${m.preview.replace(Regex("\\s+"), " ").take(220)}"
     }
 
@@ -298,13 +301,15 @@ object MailPlus {
             "list" -> {
                 ctx.progress(Y.t("Reading mail…", "Postalar okunuyor…"))
                 val r = Mail.use(c) { it.find(a.str("folder").ifEmpty { "inbox" }, "", a.optBoolean("unread_only"), a.int("limit", 20).coerceIn(1, 100), a.int("offset", 0), c) }
-                return "${r.items.size} of ${r.total} in ${Exchange.folder(a.str("folder"))}${if (a.optBoolean("unread_only")) " (unread)" else ""}:\n" + r.items.joinToString("\n") { line(it) }
+                val sent = Exchange.folder(a.str("folder")) in setOf("sentitems", "drafts", "outbox")
+                return "${r.items.size} of ${r.total} in ${Exchange.folder(a.str("folder"))}${if (a.optBoolean("unread_only")) " (unread)" else ""}:\n" + r.items.joinToString("\n") { line(it, sent) }
             }
             "search" -> {
                 val q = a.str("query").ifEmpty { throw IllegalArgumentException("query is required") }
                 ctx.progress(Y.t("Searching mail: ", "Postalarda aranıyor: ") + q)
                 val r = Mail.use(c) { it.find(a.str("folder").ifEmpty { "inbox" }, q, false, a.int("limit", 20).coerceIn(1, 100), 0, c) }
-                return if (r.items.isNotEmpty()) "${r.items.size} result(s) for \"$q\":\n" + r.items.joinToString("\n") { line(it) }
+                val sent = Exchange.folder(a.str("folder")) in setOf("sentitems", "drafts", "outbox")
+                return if (r.items.isNotEmpty()) "${r.items.size} result(s) for \"$q\":\n" + r.items.joinToString("\n") { line(it, sent) }
                 else "No mail matches \"$q\" in ${Exchange.folder(a.str("folder"))}. Try fewer or different words, or another folder."
             }
             "find" -> {
@@ -354,7 +359,7 @@ object MailPlus {
                     picText = "\n\nPictures (described by the vision model):\n" + out.joinToString("\n")
                 }
                 val sb = StringBuilder()
-                sb.append("Subject: ${m.h.subject}\nFrom: ${whoMail(m.h.from)}\nTo: ${m.to.joinToString(", ") { whoMail(it) }}")
+                sb.append("Subject: ${m.h.subject}\nFrom: ${whoMail(m.h.from)}\nTo: ${m.to.joinToString(", ") { whoMail(it) }.ifEmpty { "—" }}")
                 if (m.cc.isNotEmpty()) sb.append("\nCc: ${m.cc.joinToString(", ") { whoMail(it) }}")
                 sb.append("\nDate: ${MailTools.fmt(Exchange.parseTime(m.h.received))}")
                 m.invite?.let { inv ->
@@ -420,7 +425,9 @@ object MailPlus {
                     "replyall" -> (listOfNotNull(orig?.h?.from) + (orig?.to ?: emptyList()) + (orig?.cc ?: emptyList())).joinToString(", ") { MxText.who(it) }
                     else -> to.joinToString(", ")
                 }
-                val subj = when (kind) { "reply", "replyall" -> if (orig != null) "RE: " + orig.h.subject else ""; "forward" -> if (orig != null) "FW: " + orig.h.subject else ""; else -> a.str("subject") }
+                // the server writes the real subject; this is what the approval card shows (no "RE: RE: …")
+                fun pre(p: String, s: String) = if (Regex("^(re|fw|fwd|ynt|ilt|ilet|yanıt)\\s*:", RegexOption.IGNORE_CASE).containsMatchIn(s)) s else "$p: $s"
+                val subj = when (kind) { "reply", "replyall" -> if (orig != null) pre("RE", orig.h.subject) else ""; "forward" -> if (orig != null) pre("FW", orig.h.subject) else ""; else -> a.str("subject") }
                 val title = if (send) Y.t("Send e-mail", "E-posta gönder") + ": $subj"
                     else if (kind == "new") Y.t("E-mail draft", "Mail taslağı") + ": $subj" else Y.t("Reply draft", "Yanıt taslağı") + ": ${orig?.h?.subject ?: ""}"
                 val fields = listOf(Triple(Y.t("To", "Kime"), toShow, null), Triple("Cc", cc.joinToString(", "), null), Triple(Y.t("Subject", "Konu"), subj, null), Triple(Y.t("Body", "Metin"), a.optString("body").take(1500), null))
@@ -436,11 +443,11 @@ object MailPlus {
                 val id = a.str("id").ifEmpty { throw IllegalArgumentException("id of the draft is required (create it with action draft first)") }
                 val d = Mail.use(c) { it.get(id, c) }
                 val title = Y.t("Send e-mail", "Mail gönder") + ": ${d.h.subject}"
-                val ok = ctx.approve(title, listOf(Y.t("To", "Kime") to d.to.joinToString(", "), "Cc" to d.cc.joinToString(", ") { it.email }, Y.t("Subject", "Konu") to d.h.subject, Y.t("Body", "Metin") to d.body.take(1500)), always = true, danger = true)
+                val ok = ctx.approve(title, listOf(Y.t("To", "Kime") to d.to.joinToString(", ") { whoMail(it) }.ifEmpty { "—" }, "Cc" to d.cc.joinToString(", ") { whoMail(it) }, Y.t("Subject", "Konu") to d.h.subject, Y.t("Body", "Metin") to d.body.take(1500)), always = true, danger = true)
                 if (!ok) return ctx.denied(title) + " The draft stays in Drafts."
                 Mail.use(c) { it.sendDraft(id, c) }
                 event("mail.changed")
-                return "Sent \"${d.h.subject}\" to ${d.to.joinToString(", ") { it.email }}."
+                return "Sent \"${d.h.subject}\" to ${d.to.joinToString(", ") { MxText.who(it) }}."
             }
             "empty_folder" -> {
                 val f = Exchange.folder(a.str("folder"))
@@ -1323,7 +1330,7 @@ object OSync {
         paused = false; memPaused = false; hideCard()
         remote.index?.let { st().put("idxId", it.itemId) }
         saveBoard()
-        toast("Restored from Outlook: " + msg.joinToString(" and ").ifEmpty { "nothing to restore" })
+        toast(Y.t("Restored from Outlook: ", "Outlook'tan geri yüklendi: ") + msg.joinToString(", ").ifEmpty { Y.t("nothing to restore", "geri yüklenecek bir şey yok") })
         note("♻️ Restored from the Outlook backup: " + msg.joinToString(" and ").ifEmpty { "nothing" })
         if (mode() != "on") MailPlusCfg.outlookSync = "on"
         schedule(4000)
@@ -1333,10 +1340,10 @@ object OSync {
     private fun offerEnable(existing: Boolean) {
         if (card != null || mode() != "ask") return
         if (System.currentTimeMillis() < MailPlusCfg.osyncAskAfter) return
-        prompt("enable", "", if (existing) "A yaver backup exists in your Outlook Tasks" else "Back up tasks and memory to Outlook?",
-            if (existing) "Keep it up to date from this phone? yaver keeps working as now and also saves every change to the “yaver” folder in Outlook Tasks."
-            else "yaver keeps working as now and also saves a copy to a “yaver” folder in your Outlook Tasks — tasks with owner, due date, status and notes, plus your memory. If the app data is ever cleared, yaver restores everything from there.",
-            listOf(Triple("on", "Turn on (recommended)", "primary"), Triple("later", "Not now", ""), Triple("never", "Never", "")), null)
+        prompt("enable", "", if (existing) Y.t("yaver data is already in your Outlook Tasks", "yaver verileri Outlook Görevler'de zaten var") else Y.t("Share tasks and memory through Outlook?", "Görevler ve hafıza Outlook üzerinden paylaşılsın mı?"),
+            if (existing) Y.t("Keep this phone in sync with it? Memory, lessons, skills and tasks then stay the same on every phone that has this turned on.", "Bu telefon onunla eşitlensin mi? Hafıza, dersler, beceriler ve görevler, bunu açan her telefonda aynı kalır.")
+            else Y.t("yaver keeps its tasks, memory, lessons and skills in a “yaver” folder in your Outlook Tasks, so every phone where you turn this on shares them — and nothing is lost if the app data is cleared.", "yaver görevlerini, hafızasını, derslerini ve becerilerini Outlook Görevler'deki “yaver” klasöründe tutar; bunu açtığınız her telefon bunları paylaşır ve uygulama verileri silinse de hiçbir şey kaybolmaz."),
+            listOf(Triple("on", Y.t("Turn on (recommended)", "Aç (önerilen)"), "primary"), Triple("later", Y.t("Not now", "Şimdi değil"), ""), Triple("never", Y.t("Never", "Hiçbir zaman"), "")), null)
     }
 
     // ---- UI: a card that stays until answered, and a status chip in Tasks ----
@@ -1361,7 +1368,7 @@ object OSync {
             }
             "import" -> if (action == "import") { val l = cardUnknown; importTasks(l) } else hideCard()
             "enable" -> when (action) {
-                "on" -> { MailPlusCfg.outlookSync = "on"; hideCard(); Y.bg { push() }; toast("Outlook backup is on") }
+                "on" -> { MailPlusCfg.outlookSync = "on"; hideCard(); Y.bg { push() }; toast(Y.t("Outlook sync is on", "Outlook eşitlemesi açık")) }
                 "later" -> { MailPlusCfg.osyncAskAfter = System.currentTimeMillis() + 3 * 86400000L; hideCard() }
                 "never" -> { MailPlusCfg.outlookSync = "off"; hideCard() }
             }

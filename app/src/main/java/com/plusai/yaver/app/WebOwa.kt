@@ -20,8 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger
 object WebOwa {
     class Resp(val code: Int, val redirected: Boolean, val url: String, val text: String)
 
-    private var view: WebView? = null
-    private var viewOrigin = ""
+    @Volatile private var view: WebView? = null
+    @Volatile private var viewOrigin = ""
     @Volatile private var ready: CountDownLatch? = null
     private val waits = ConcurrentHashMap<Int, Pair<CountDownLatch, Array<Resp?>>>()
     private val seq = AtomicInteger()
@@ -34,8 +34,9 @@ object WebOwa {
         }
     }
 
+    /** Synchronized: two mail requests starting together must not each build (and destroy) the web view. */
     @SuppressLint("SetJavaScriptEnabled")
-    private fun ensure(origin: String) {
+    @Synchronized private fun ensure(origin: String) {
         if (Looper.myLooper() == Looper.getMainLooper()) throw MailException("WebOwa on main thread")
         if (view != null && viewOrigin == origin && ready?.count == 0L) return
         val latch = CountDownLatch(1)

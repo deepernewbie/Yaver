@@ -39,7 +39,8 @@ class ToolCtx(val convo: Convo, val cancel: Cancel, val background: Boolean, val
         if (!always && !Cfg.askRisky) {
             val tool = Agent.currentTool.get() ?: "action"
             val args = Agent.currentArgs.get() ?: JSONObject()
-            val g = try { Gates.approval(tool, args, title, userText, cancel) } catch (e: CancelledException) { throw e } catch (e: Throwable) { ApprovalOutcome("approve") }
+            // a failing safety check must not wave the action through: the user decides
+            val g = try { Gates.approval(tool, args, title, userText, cancel) } catch (e: CancelledException) { throw e } catch (e: Throwable) { Diag.e("gates", "approval check failed", e); ApprovalOutcome("ask") }
             g.note?.let { note(it); Diag.i("gates", it) }
             if (g.chips.isNotEmpty()) note(g.chips.joinToString(" · ") { it.second })
             if (g.ok) return true
@@ -272,11 +273,14 @@ object Agent {
         if (!isInternal && c.messages.length() <= 2 && (c.title == Y.t("New chat", "Yeni sohbet") || c.title.isBlank())) {
             c.title = (label ?: text).replace(Regex("\\s+"), " ").trim().take(60).ifEmpty { c.title }
         }
+        // this instance is the conversation while the turn runs: saves of other copies (👍/👎, rename) are merged into it
         Convos.save(c)
+        Convos.begin(c)
 
         val ctx = ToolCtx(c, cancel, background, listener, depth).also { it.userText = userText }
         val turn = GateTurn(userText, Lang.name(Lang.fixed() ?: c.lang))
         var final = ""
+        val prevInfo = Llm.info.get()
         try {
             final = loop(c, ctx, st, turn, turnStart, isSub, noTools, model, toolsets, allowedTools, if (maxSteps > 0) maxSteps else Cfg.maxSteps, systemExtra, note, progress)
         } catch (e: CancelledException) {
@@ -284,6 +288,7 @@ object Agent {
             c.messages.put(JSONObject().put("role", "assistant").put("content", Y.t("⏹ Stopped.", "⏹ Durduruldu.")).put("local", true))
             Convos.save(c)
             if (!isSub) try { Planning.onStopped(c) } catch (_: Throwable) {}
+            Convos.end(c)
             throw e
         } catch (e: Throwable) {
             Diag.e("agent", "run failed", e)
@@ -292,10 +297,15 @@ object Agent {
             c.messages.put(JSONObject().put("role", "assistant").put("content", msg).put("local", true).put("error", true))
             Convos.save(c)
             if (!isSub && !isInternal && !background) try { Harness.checkpoint(c) } catch (_: Throwable) {}
+            Convos.end(c)
             throw e
+        } finally {
+            Llm.info.set(prevInfo); Llm.onRetry.set(null)   // pooled worker threads must not keep this turn's listener
         }
-        Convos.save(c)
-        if (!isSub) afterTurn(c, turnStart, text, userText, isInternal, internal, background, cancel, learnSnap)
+        try {
+            Convos.save(c)
+            if (!isSub) afterTurn(c, turnStart, text, userText, isInternal, internal, background, cancel, learnSnap)
+        } finally { Convos.end(c) }
         return final
     }
 
@@ -310,7 +320,9 @@ object Agent {
         }
         if (learnSnap != null) try {
             val now = snapAll()
-            MemoryX.delta(learnSnap, now)?.let { d ->
+            val dd = MemoryX.delta(learnSnap, now)
+            if (dd == null) Diag.i("memory", "turn ${c.id}: memory and lessons unchanged")
+            dd?.let { d ->
                 Diag.i("memory", d.optString("label"))
                 Bridge.emit("memory", JSONObject(d.toString()).put("convoId", c.id))
             }
@@ -370,13 +382,19 @@ object Agent {
             val tools = toolsNow()
             Compactor.auto(c, tools, model, cancel, isSub, { t -> note(t); Diag.i("ctx", t) }, progress, st.userText)
             Llm.info.set(if (listener == null) null else { a, b, cc, d -> listener.onThinkInfo(a, b, cc, d) })
+            Llm.onRetry.set(if (listener == null) null else { { listener.onStep() } })
             val (r, sent) = Compactor.chatWithRetry(c, tools, model, cancel, isSub, st, { t -> note(t); Diag.i("ctx", t) }, progress) { tl ->
                 Llm.chat(requestMessages(c, systemExtra, isSub), if (empty >= 3 || tl.length() == 0) null else tl, model,
-                    onDelta = { listener?.onDelta(it) }, onThink = { listener?.onThinking(it) }, cancel = cancel, maxTokens = outBudget, stream = if (empty >= 2) false else Cfg.stream)
+                    onDelta = { listener?.onDelta(it) }, onThink = { listener?.onThinking(it) }, cancel = cancel, maxTokens = Compactor.fitOutput(c, tl, model, outBudget), stream = if (empty >= 2) false else Cfg.stream)
             }
-            if (r.finish == "length") {
+            // a tool call whose arguments are unclosed JSON was cut off, whatever finish_reason the provider reported
+            // (some report "stop"/"tool_calls" after a long hidden reasoning ate max_tokens)
+            val cutCall = r.toolCalls.any { LoopUtil.isCutArgs(it.args) }
+            if (cutCall && r.finish != "length") { Diag.i("augment", "tool call arguments cut off although finish_reason is ${r.finish} (${r.reasoning.length} reasoning chars) — treated as an output-limit cut"); st.lastFinish = "length" }
+            if (r.finish == "length" || cutCall) {
                 val nb = if (outBudget <= 0) 16000 else minOf(64000, outBudget * 2)
                 if (nb > outBudget) { Diag.i("augment", "reply hit the output limit (${if (outBudget > 0) outBudget else "service default"}) — next call gets $nb"); if (!isSub) note(Y.t("output limit reached — the answer budget is raised to ${nb / 1000}k for this task", "cevap sınırına takıldı — bu iş için cevap bütçesi ${nb / 1000}k'ya çıkarıldı")); outBudget = nb }
+                else Diag.i("augment", "reply cut off again at the largest answer budget ($outBudget)")
             }
             if (sent !== tools) restrict = names(sent).toSet()
             Planning.countTokens(r.tokensIn + r.tokensOut); Autonomous.addTokens(r.tokensIn, r.tokensOut)
@@ -401,12 +419,19 @@ object Agent {
                 continue
             }
             var fin = r.content
-            if (r.toolCalls.isEmpty() && contFrom >= 0 && fin.isBlank()) { contFrom = -1 }
             if (fin.isBlank()) {
-                // empty reply: deliver waiting messages first; else retry (2nd time without streaming, 3rd without tools), then stop
+                // empty reply: deliver waiting messages first; else retry (2nd time without streaming, 3rd without tools), then stop.
+                // A pending continuation (contFrom) is kept: the nudge goes onto its "continue" request and the next reply still joins it.
                 if (!isSub && Turns.hasPending(c.id)) { empty = 0; continue }
                 empty++
-                if (empty > 3 || iter >= maxIter - 1) throw LlmException("The model returned an empty reply $empty times in a row (model ${model ?: Cfg.model}${if (!r.finish.isNullOrEmpty()) ", finish_reason ${r.finish}" else ""}${if (r.reasoning.isNotEmpty()) ", it produced ${r.reasoning.length} characters of hidden reasoning but no answer" else ""}). Try again, or choose another model in Settings.")
+                if (empty > 3 || iter >= maxIter - 1) {
+                    val m = model ?: Cfg.model
+                    val fr = if (!r.finish.isNullOrEmpty()) ", finish_reason ${r.finish}" else ""
+                    val rs = r.reasoning.length
+                    throw LlmException(Y.t(
+                        "The model returned an empty reply $empty times in a row (model $m$fr${if (rs > 0) ", it produced $rs characters of hidden reasoning but no answer" else ""}). Try again, or choose another model in Settings.",
+                        "Model art arda $empty kez boş cevap verdi (model $m$fr${if (rs > 0) ", $rs karakterlik gizli akıl yürütme üretti ama cevap yazmadı" else ""}). Yeniden deneyin ya da Ayarlar'dan başka bir model seçin."))
+                }
                 val nudge = (if (empty >= 3) "[harness] Your last replies were empty. Answer the user now in plain text with what you already know; tools are switched off for this reply." else "[harness] Your last reply was empty. Continue the task: call the next tool you need, or answer the user.") + (if (!turn.lang.isNullOrEmpty()) " Reply in ${turn.lang}." else "")
                 val last = c.messages.optJSONObject(c.messages.length() - 1)
                 val rx = Regex("\\[harness\\] Your last repl(y was|ies were) empty[\\s\\S]*$")
@@ -417,10 +442,13 @@ object Agent {
                 continue
             }
             empty = 0
-            if (contFrom >= 0 && contFrom + 1 < c.messages.length()) {
+            // a continuation joins the answer it continues only while the history is exactly [answer, "continue" request]
+            // (a message steered in meanwhile, or anything else, means this reply stands on its own)
+            if (contFrom >= 0 && !LoopUtil.isContinuationTail(c.messages, contFrom, CONTINUE_MSG)) contFrom = -1
+            if (contFrom >= 0) {
                 // continuation of a cut-off answer: join it to the answer it continues and drop the "continue" request
                 val prev = c.messages.getJSONObject(contFrom)
-                val joined = prev.optString("content") + fin
+                val joined = LoopUtil.joinContinuation(prev.optString("content"), fin)
                 prev.put("content", joined)
                 c.messages.remove(contFrom + 1)
                 fin = joined
@@ -437,8 +465,8 @@ object Agent {
                 Diag.i("augment", "final answer cut off (${fin.length} chars) — continuing")
                 continue
             } else {
-            c.messages.put(am); Convos.save(c)
-            listener?.onStep()
+                c.messages.put(am); Convos.save(c)
+                listener?.onStep()
             }
             if (!isSub && Turns.hasPending(c.id)) { noTools = false; continue }
             if (!isSub) {
@@ -488,11 +516,14 @@ object Agent {
         // budget exhausted: one final call without tools to wrap up
         c.messages.put(harnessMsg("[harness] Iteration budget exhausted. Summarize what you did, what is verified, and what is left. No more tool calls." + (if (!turn.lang.isNullOrEmpty()) " Reply in ${turn.lang}." else "")))
         Diag.i("agent", "iteration budget ($maxIter) exhausted")
-        val r = Llm.chat(requestMessages(c, systemExtra, isSub), null, model, onDelta = { listener?.onDelta(it) }, cancel = cancel, maxTokens = Cfg.maxOut)
-        c.messages.put(JSONObject().put("role", "assistant").put("content", r.content).put("ts", System.currentTimeMillis()))
+        Compactor.auto(c, null, model, cancel, isSub, { t -> note(t); Diag.i("ctx", t) }, progress, st.userText)
+        val r = Llm.chat(requestMessages(c, systemExtra, isSub), null, model, onDelta = { listener?.onDelta(it) }, cancel = cancel, maxTokens = Compactor.fitOutput(c, null, model, Cfg.maxOut))
+        // an empty wrap-up must not leave an empty assistant row (and a blank answer) behind
+        val text = r.content.ifBlank { Y.t("I reached the step limit for this task before finishing. Ask me to continue if you want me to go on.", "Bu iş için adım sınırına ulaştım ve bitiremedim. Devam etmemi isterseniz söyleyin.") }
+        c.messages.put(JSONObject().put("role", "assistant").put("content", text).put("ts", System.currentTimeMillis()))
         Convos.save(c)
         listener?.onStep()
-        return r.content
+        return text
     }
 
     /** Messages the user (or a heartbeat) sent while the turn runs join here (assistant → tool → user is valid). */
@@ -526,7 +557,7 @@ object Agent {
                     err != null -> err
                     noTools || (allowed != null && t.name !in allowed) || (isSub && !tool.subagentOk) -> "Error: tool ${t.name} is not enabled for this turn."
                     else -> {
-                        if (t.name !in sentNames) members.entries.firstOrNull { t.name in it.value }?.key?.let { ts -> enableToolset(ts); note("+tools: $ts · enabled on demand") }
+                        if (t.name !in sentNames) members.entries.firstOrNull { t.name in it.value }?.key?.let { ts -> enableToolset(ts); note(Y.t("+tools: $ts · enabled on demand", "+araçlar: $ts · ihtiyaç olunca açıldı")) }
                         val gate = Planning.gate(c, t.name, args!!)
                         if (gate != null) gate else try {
                             currentTool.set(t.name); currentArgs.set(args)
@@ -575,10 +606,11 @@ object Agent {
         val d = Gates.review(c, turnStart) ?: run {
             var n = 0
             ConvoState.edit(c.id) { s -> n = s.optInt("reviewCounter", 0) + 1; s.put("reviewCounter", n) }
-            if (n % 10 != 0) return
+            if (n % 10 != 0) { Diag.i("review", "background review: turn $n — runs every 10th turn (System-1 off)"); return }
             ReviewDecision(true, true)
         }
-        if (!d.memory && !d.skill) return
+        if (!d.memory && !d.skill) { Diag.i("review", "background review: System-1 says nothing to save"); return }
+        val before = try { snapAll() } catch (_: Throwable) { null }
         Diag.i("review", "background review (memory=${d.memory}, skill=${d.skill})")
         val allowed = (if (d.memory) listOf("memory") else emptyList()) + (if (d.skill) listOf("skill_manage", "skills_list", "skill_view") else emptyList())
         val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", Prompt.forRequest(c)))
@@ -589,7 +621,7 @@ object Agent {
         val ctx = ToolCtx(c, Cancel(), true, null, 0)
         try {
             for (round in 0 until 4) {
-                val r = Llm.chat(LoopUtil.fixAlternation(msgs), tools, Cfg.fastModel.ifEmpty { Cfg.model }, stream = false)
+                val r = Llm.chat(LoopUtil.fixAlternation(msgs), tools, Cfg.fastModel.ifEmpty { Cfg.model }, stream = false, effort = "low")
                 val am = JSONObject().put("role", "assistant").put("content", r.content)
                 if (r.toolCalls.isNotEmpty()) am.put("tool_calls", JSONArray(r.toolCalls.map { JSONObject().put("id", it.id).put("type", "function").put("function", JSONObject().put("name", it.name).put("arguments", it.args)) }))
                 msgs.put(am)
@@ -603,8 +635,14 @@ object Agent {
                     Bridge.emit("note", JSONObject().put("convoId", c.id).put("text", n))
                 }
             }
+            // what the review saved shows as the same "Memory: +1 learned" chip as changes made during the turn
+            if (before != null) MemoryX.delta(before, snapAll())?.let { dd ->
+                Diag.i("review", "background review: " + dd.optString("label"))
+                Bridge.emit("memory", JSONObject(dd.toString()).put("convoId", c.id))
+            }
         } catch (e: Throwable) {
-            Bridge.emit("note", JSONObject().put("convoId", c.id).put("text", "background review failed: " + (e.message ?: e.toString())))
+            Diag.e("review", "background review", e)
+            Bridge.emit("note", JSONObject().put("convoId", c.id).put("text", "🧠 " + Y.t("Background review failed: ", "Arka plan incelemesi başarısız: ") + (e.message ?: e.toString())))
         }
     }
 

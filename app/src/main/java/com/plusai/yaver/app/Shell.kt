@@ -1204,7 +1204,12 @@ object CodeEngine {
             listOf("code")
         ) { a, ctx ->
             val code = a.optString("code", "")
-            val py = a.str("language") == "python"
+            // no language given but the code is clearly Python (import pandas, def …:, print(…) without semicolons): run it as Python
+            val lang = a.str("language").lowercase()
+            val code0 = a.optString("code")
+            val looksPy = Regex("(?m)^\\s*(import \\w|from \\w[\\w.]* import |def \\w+\\(.*\\):|class \\w+.*:\\s*$|for \\w+ in .+:\\s*$|if .+:\\s*$|print\\()").containsMatchIn(code0) &&
+                !Regex("(?m)(^\\s*(const|let|var|function)\\s|=>|;\\s*$|await import\\(|console\\.log)").containsMatchIn(code0)
+            val py = lang == "python" || lang == "py" || (lang.isEmpty() && looksPy)
             val risky = if (py) (if (Regex("\\b(os\\.(remove|unlink|rmdir|removedirs)|shutil\\.(rmtree|move)|Path\\([^)]*\\)\\.unlink|\\.unlink\\(|pyfetch)").containsMatchIn(code)) "deletes files or makes network requests" else null)
                 else if (Regex("fs\\.writeFile|fetch\\(").containsMatchIn(code)) "writes files or makes network requests" else null
             if (risky != null && !ctx.approve(Y.t("Run code", "Kod çalıştır") + ": " + risky, listOf(Y.t("Code", "Kod") to clip(code, 600)))) return@Tool ctx.denied("execute_code ($risky)")

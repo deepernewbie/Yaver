@@ -388,11 +388,16 @@ Return JSON only:
             "Return only JSON edits. If no useful edit is justified, return an empty edits array with a rationale."
         ).filter { it.isNotEmpty() }.joinToString("\n\n")
         val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", REFINEMENT_SYSTEM_PROMPT)).put(JSONObject().put("role", "user").put("content", user))
-        val r = Llm.chat(msgs, null, Cfg.model, cancel = cancel, stream = false)
-        val proposal = firstJson(r.content.ifEmpty { r.reasoning })
-        if (proposal == null || proposal.optJSONArray("edits") == null)
-            throw IllegalStateException(if (r.finish == "length") "the model stopped before completing its JSON (output limit); try again with narrower instructions" else "the model did not return the JSON edit format")
-        return apply(proposal, scope, sid, trigger)
+        // visible content only (a reasoning model's hidden reasoning is not the proposal); room for reasoning before the JSON
+        val out = Llm.text(msgs, Cfg.model, cancel, 6000, false, "refine")
+        val proposal = firstJson(out)
+        if (proposal == null || proposal.optJSONArray("edits") == null) {
+            Diag.i("learn", "refine ($trigger): no JSON edit format in the reply (${out.length} chars): ${clip(out.replace(Regex("\\s+"), " "), 200)}")
+            throw IllegalStateException(if (out.isBlank()) Y.t("the model returned no proposal", "model bir öneri döndürmedi") else Y.t("the model did not return the JSON edit format", "model JSON düzenleme biçiminde cevap vermedi"))
+        }
+        val rec = apply(proposal, scope, sid, trigger)
+        Diag.i("learn", "refine ($trigger, $scope): ${proposal.optJSONArray("edits")?.length() ?: 0} edits proposed → " + arr(rec.optJSONArray("applied")).joinToString(", ") { appliedLine(it) + (if (it.optBoolean("ok")) "" else " (${s(it, "error")})") }.ifEmpty { "none" })
+        return rec
     }
 
     // ---------------- automatic checkpoints ----------------
@@ -430,47 +435,59 @@ Return JSON only:
      * Emits a "refine" event when something was learned. Returns the record or null.
      */
     fun autoCheck(c: Convo, reason: String = "", cancel: Cancel? = null): JSONObject? {
-        if (!LearnSettings.learn) return null
+        val tag = "auto-refine ${c.id}"
+        if (!LearnSettings.learn) { Diag.i("learn", "$tag: skipped — learning is off"); return null }
         val st = load(); val every = st.getJSONObject("auto").optInt("every", 0)
-        if ((every == 0 && reason.isEmpty()) || Cfg.model.isEmpty()) return null
+        if (Cfg.model.isEmpty()) { Diag.i("learn", "$tag: skipped — no model"); return null }
+        if (every == 0 && reason.isEmpty()) { Diag.i("learn", "$tag: skipped — periodic review off and no trigger"); return null }
         if (reason.isEmpty()) {
             val k = "learn.rc." + c.id; val n = Prefs.int(k, 0) + 1; Prefs.put(k, n.toString())
-            if (n % every != 0) return null
+            if (n % every != 0) { Diag.i("learn", "$tag: turn $n — next periodic review at turn ${(n / every + 1) * every}"); return null }
         }
         // inference-volume guard: periodic reviews at most every 10 minutes across all conversations; signal-driven ones at most every 45 s
         run {
             val last = Prefs.get("learn.lastReview", "0").toLongOrNull() ?: 0L
             val gap = if (reason.isNotEmpty()) 45_000L else 10 * 60_000L
-            if (System.currentTimeMillis() - last < gap) return null
+            val ago = System.currentTimeMillis() - last
+            if (ago in 0 until gap) { Diag.i("learn", "$tag: skipped — last review ${ago / 1000} s ago (min ${gap / 1000} s)${if (reason.isNotEmpty()) "; trigger: ${clip(reason, 80)}" else ""}"); return null }
             Prefs.put("learn.lastReview", System.currentTimeMillis().toString())
         }
+        Diag.i("learn", "$tag: review — ${if (reason.isNotEmpty()) "trigger ${clip(reason, 120)}" else "periodic (every $every turns)"}")
         var go = false; var global = false; var instructions = ""
         val gate = LearnHooks.refineGate
         val questions = JSONObject()
             .put("useful", JSONObject().put("type", "noul").put("instructions", "Does this trajectory contain a lesson worth keeping for later turns (a repeated failure and its fix, a reusable procedure, a user correction, a durable preference)?"))
             .put("global", JSONObject().put("type", "noul").put("instructions", "Is that lesson a durable cross-session one (user preference, reusable procedure) rather than current-task progress?"))
-        val g = if (gate != null) try { gate(clip(transcript(c.messages, 24), 3500), questions) } catch (e: Throwable) { null } else null
+        val g = if (gate != null) try { gate(clip(transcript(c.messages, 24), 3500), questions) } catch (e: Throwable) { Diag.e("learn", "$tag: System-1 gate failed", e); null } else null
         if (g != null) {
             val pu = g.optDouble("useful", 0.0); val pg = g.optDouble("global", 0.0)
             go = pu >= 0.6; global = pg >= 0.7
             val confident = if (g.has("confident")) g.optBoolean("confident") else maxOf(pu, 1 - pu) >= 0.7
             try { LearnHooks.gateMark?.invoke("refine", confident, if (go) "refine(${if (global) "global" else "local"})" else "skip") } catch (_: Throwable) {}
+            Diag.i("learn", "$tag: System-1 gate → ${if (go) "refine" else "skip"} (useful $pu, global $pg)")
             if (!go) return null
         } else {
             val user = "<trigger>\n${reason.ifEmpty { "turn_interval; $every turns since last auto-refine review" }}\n</trigger>\n\n<current_harness_state>\n${digest(c.id).ifEmpty { "(empty)" }}\n</current_harness_state>\n\n<conversation>\n${clip(transcript(c.messages, 30), 30000)}\n</conversation>"
             val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", AUTO_REFINE_REVIEW_SYSTEM_PROMPT)).put(JSONObject().put("role", "user").put("content", user))
-            val r = Llm.chat(msgs, null, Cfg.fastModel.ifEmpty { Cfg.model }, cancel = cancel, maxTokens = 1200, stream = false)
-            val j = firstJson(r.content.ifEmpty { r.reasoning }) ?: JSONObject()
-            go = j.opt("shouldRefine") == true; global = j.opt("global") == true; instructions = s(j, "instructions")
+            // a failed review must not cost a forced lesson (standing instruction / correction): it only means "no opinion"
+            val out = try { Llm.text(msgs, Cfg.fastModel.ifEmpty { Cfg.model }, cancel, 1200, true, "refine review") } catch (e: CancelledException) { throw e } catch (e: Throwable) {
+                if (reason.isEmpty()) throw e
+                Diag.e("learn", "$tag: review call failed", e); ""
+            }
+            val j = firstJson(out) ?: JSONObject()
+            go = j.opt("shouldRefine") == true || j.optString("shouldRefine") == "true"; global = j.opt("global") == true || j.optString("global") == "true"; instructions = s(j, "instructions")
+            Diag.i("learn", "$tag: LLM review → shouldRefine=$go global=$global${if (s(j, "rationale").isNotEmpty()) " — " + clip(s(j, "rationale"), 160) else if (out.isBlank()) " (empty reply)" else ""}")
         }
         if (reason.startsWith("standing_instruction") || reason.startsWith("harness_intervention")) global = true
         if (!go && (reason.startsWith("standing_instruction") || reason.startsWith("user_correction"))) {
             go = true
             if (instructions.isEmpty()) instructions = "The user corrected yaver or gave a standing instruction. Capture the lesson as a short, concrete prompt note (what to do differently next time), global if it applies to future conversations."
+            Diag.i("learn", "$tag: refining anyway — ${reason.substringBefore(':')}")
         }
         if (!go) return null
         val rec = refine(c.messages, c.id, instructions, global, if (reason.isNotEmpty()) "learn" else "auto", cancel)
-        if (arr(rec.optJSONArray("applied")).any { it.optBoolean("ok") }) LearnEvents.emit("refine", refineCard(rec, c.id))
+        if (arr(rec.optJSONArray("applied")).any { it.optBoolean("ok") }) { LearnEvents.emit("refine", refineCard(rec, c.id)); Diag.i("learn", "$tag: refine card emitted (${s(rec, "id")})") }
+        else Diag.i("learn", "$tag: nothing applied — no card")
         return rec
     }
 
@@ -481,6 +498,7 @@ Return JSON only:
     fun checkpoint(c: Convo, reason: String? = null) {
         val copy = snapshot(c)
         val why = reason ?: signal(copy)
+        Diag.i("learn", "checkpoint ${c.id}: ${if (why.isEmpty()) "no immediate trigger" else clip(why, 140)}")
         Y.bg {
             try { autoCheck(copy, why, null) } catch (e: CancelledException) {
             } catch (e: Throwable) {
@@ -527,8 +545,8 @@ Return JSON only:
             .put("scope", s(rec, "scope")).put("scopeLabel", if (s(rec, "scope") == "global") Y.t("all conversations", "tüm konuşmalarda") else Y.t("this conversation", "bu konuşmada"))
             .put("summary", s(rec, "summary")).put("items", items)
             .put("empty", if (ok.isEmpty()) Y.t("No lasting lesson in this conversation.", "Bu konuşmadan kalıcı bir ders çıkmadı.") + (if (s(rec, "rationale").isNotEmpty()) " " + s(rec, "rationale") else "") else "")
-            .put("rejected", if (bad.isNotEmpty()) "Rejected: " + bad.joinToString("; ") { "${s(it, "action")} ${s(it, "kind")}:${s(it, "id")} (${s(it, "error")})" } else "")
-            .put("expected", if (s(rec, "expectedOutcome").isNotEmpty() && ok.isNotEmpty()) "Expected: " + s(rec, "expectedOutcome") else "")
+            .put("rejected", if (bad.isNotEmpty()) Y.t("Rejected: ", "Reddedildi: ") + bad.joinToString("; ") { "${s(it, "action")} ${s(it, "kind")}:${s(it, "id")} (${s(it, "error")})" } else "")
+            .put("expected", if (s(rec, "expectedOutcome").isNotEmpty() && ok.isNotEmpty()) Y.t("Expected: ", "Beklenen: ") + s(rec, "expectedOutcome") else "")
             .put("canUndo", ok.isNotEmpty() && !rb).put("undoLabel", Y.t("Undo", "Geri al"))
     }
 

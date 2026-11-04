@@ -184,7 +184,7 @@ class MainActivity : Activity() {
                     if (!ok && what == "battery") try { startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (_: Throwable) {}
                     Bridge.ret(id, true, true)
                 }
-                else -> Bridge.ret(id, false, "unknown")
+                else -> Bridge.ret(id, false, "unknown method $m")
             }
         } catch (e: Throwable) {
             Bridge.ret(id, false, e.message ?: e.toString())

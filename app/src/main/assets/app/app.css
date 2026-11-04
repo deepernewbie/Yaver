@@ -184,7 +184,7 @@ svg.i.xs { width: 15px; height: 15px; stroke-width: 2; }
 .crow .ib { width: 42px; height: 42px; color: var(--muted); }
 .send { width: 42px; height: 42px; border-radius: 21px; display: grid; place-items: center; background: var(--brand); color: #fff; flex: none; box-shadow: 0 4px 14px rgba(91, 79, 224, .35); transition: transform .12s; }
 .send:active { transform: scale(.94); }
-.send.stop { background: var(--ink); box-shadow: none; }
+.send.stop { background: var(--ink); color: var(--bg); box-shadow: none; }
 .send.stop .i { fill: currentColor; }
 .send[disabled] { opacity: .35; box-shadow: none; }
 
@@ -251,6 +251,9 @@ svg.i.xs { width: 15px; height: 15px; stroke-width: 2; }
 .sender .sn span { display: block; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rcpt { margin-top: 10px; font-size: 13px; color: var(--muted); line-height: 1.5; }
 .rcpt b { color: var(--ink-2); font-weight: 600; }
+.rcpt .rl { overflow-wrap: anywhere; }
+.rcpt .rl + .rl { margin-top: 2px; }
+.rcpt .more { color: var(--violet-ink); font-weight: 600; font-size: 13px; padding: 0 2px; }
 .invite { margin: 14px 16px 0; padding: 14px; border-radius: var(--r-m); background: var(--violet-soft); border: 1px solid var(--violet-line); }
 .invite .when { display: flex; gap: 10px; align-items: center; font-weight: 700; font-size: 15px; }
 .invite .where { color: var(--ink-2); font-size: 13.5px; margin: 4px 0 12px 32px; }
@@ -343,6 +346,11 @@ svg.i.xs { width: 15px; height: 15px; stroke-width: 2; }
 .field textarea { min-height: 140px; resize: vertical; line-height: 1.45; }
 .field input:focus, .field textarea:focus { border-color: var(--violet); box-shadow: 0 0 0 3px var(--violet-soft); }
 .field small { display: block; margin: 6px 2px 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.field .rto { padding: 10px 14px; border-radius: 12px; background: var(--sunken); font-size: 14.5px; color: var(--ink-2); line-height: 1.45; overflow-wrap: anywhere; max-height: 5.2em; overflow-y: auto; }
+.sheet.busy .sf .btn { opacity: .55; pointer-events: none; }
+.invite .where + .where { margin-top: -8px; }
+.invite .where .i { vertical-align: -2px; color: var(--ok); }
+.invite.cancelled { background: var(--bad-soft); border-color: transparent; }
 .dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; font-size: 14.5px; }
 .dl dt { color: var(--muted); font-weight: 600; }
 .dl dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

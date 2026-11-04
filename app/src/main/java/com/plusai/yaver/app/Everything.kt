@@ -31,7 +31,7 @@ object Everything {
         val s = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
         val start = (s.clone() as Calendar).apply { add(Calendar.DAY_OF_MONTH, -60) }.timeInMillis
         val end = (s.clone() as Calendar).apply { add(Calendar.DAY_OF_MONTH, 90) }.timeInMillis
-        return try { Mail.use(cancel) { it.events(start, end, cancel) }.also { evCache = System.currentTimeMillis() to it } } catch (e: CancelledException) { throw e } catch (e: Exception) { emptyList() }
+        return try { Mail.use(cancel) { it.events(start, end, cancel, 1000) }.also { evCache = System.currentTimeMillis() to it } } catch (e: CancelledException) { throw e } catch (e: Exception) { emptyList() }
     }
 
     class Result {

@@ -104,7 +104,7 @@ object FollowUps {
                 cancel?.check()
                 val msgs = JSONArray().put(JSONObject().put("role", "system").put("content", sys)).put(JSONObject().put("role", "user").put("content", user))
                 if (attempt == 1) msgs.put(JSONObject().put("role", "user").put("content", if (tr) "Önceki cevabın kullanılamadı. Yalnızca Türkçe 4 metinlik JSON dizisini yaz, açıklama ekleme." else "Your previous answer was unusable. Output only the JSON array of 4 strings in $language, no explanation."))
-                val r = Llm.chat(msgs, null, model, cancel = cancel, maxTokens = if (attempt == 0) 1500 else 4000, stream = false)
+                val r = Llm.chat(msgs, null, model, cancel = cancel, maxTokens = if (attempt == 0) 1500 else 4000, stream = false, effort = "low")
                 val l = parse(r.content)
                 Diag.i("followups", "model ${model.substringAfterLast('/')} try ${attempt + 1}: ${l.size} items" + if (l.isNotEmpty()) " (${Lang.detect(l.joinToString(". "))})" else " · raw: " + r.content.take(120).replace('\n', ' '))
                 if (ok(l)) { items = l; break@loop }

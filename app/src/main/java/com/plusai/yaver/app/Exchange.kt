@@ -199,15 +199,53 @@ class OwaTransport(private val origin: String, private val user: String, private
         else -> "UTC"
     }
 
+    /**
+     * An attachment through Outlook web's own download address (what the browser uses for "Download").
+     * Null when this server does not offer it; the type comes from the answer, the name from the caller.
+     */
+    fun download(attId: String, cancel: Cancel?): Exchange.Attachment? {
+        if (!web && !loggedIn()) login(cancel)
+        val canary = Http.cookie("$origin/owa/", "X-OWA-CANARY") ?: ""
+        val enc = { s: String -> java.net.URLEncoder.encode(s, "UTF-8") }
+        val url = "$origin/owa/service.svc/s/GetFileAttachment?id=${enc(attId)}&X-OWA-CANARY=${enc(canary)}"
+        val ct: String
+        val bytes: ByteArray
+        if (web) {
+            val r = WebOwa.send(origin, url, mapOf("X-OWA-CANARY" to canary, "X-Requested-With" to "XMLHttpRequest"), null, 120000, cancel, binary = true)
+            if (r.redirected || r.code == 0 || r.code == 440) throw signInNeeded(host)
+            if (r.code != 200) { Diag.i("owa", "GetFileAttachment → ${r.code}"); return null }
+            ct = r.text.substringBefore('\n')
+            bytes = android.util.Base64.decode(r.text.substringAfter('\n', ""), android.util.Base64.DEFAULT)
+        } else {
+            val r = Http.request(url, headers = ua() + ("X-OWA-CANARY" to canary), follow = false, timeoutMs = 120000, cancel = cancel)
+            if (r.code == 440 || r.code == 401) throw AuthException(Y.t("The Outlook web session ended.", "Outlook web oturumu kapandı."))
+            if (r.code != 200) { Diag.i("owa", "GetFileAttachment → ${r.code}"); return null }
+            ct = r.contentType
+            bytes = r.body
+        }
+        // a sign-in or error page instead of the file
+        if (ct.startsWith("text/html", true) && Regex("<form|logon|my\\.policy|error", RegexOption.IGNORE_CASE).containsMatchIn(String(bytes.take(4000).toByteArray()))) return null
+        return Exchange.Attachment("", ct.substringBefore(';').trim().ifEmpty { "application/octet-stream" }, bytes)
+    }
+
     override fun call(inner: String, timeoutMs: Int, cancel: Cancel?): Document {
         val x = Xml.parse("<r xmlns:m=\"urn:m\" xmlns:t=\"urn:t\">$inner</r>")
         val root = Xml.children(x.documentElement).firstOrNull() ?: throw MailException("bad request")
         return send(root, root.localName, 0, timeoutMs, cancel)
     }
 
-    private fun send(root: Element, op: String, depth: Int, timeoutMs: Int, cancel: Cancel?): Document {
+    /**
+     * Recipients go to OWA in its own JSON shape: flat {"__type":"EmailAddress:#Exchange", Name, EmailAddress, RoutingType}
+     * (that is also how OWA answers). The older adapter wrapped each one as EmailAddressWrapper{Mailbox:{…}}; if a server
+     * refuses the flat shape the other one is tried once and, when it works, used first from then on.
+     */
+    @Volatile private var wrapFirst = false
+
+    private fun send(root: Element, op: String, depth: Int, timeoutMs: Int, cancel: Cancel?, alt: Boolean = false): Document {
         val f = fix.getOrPut(op) { HashSet() }
-        val body = OwaJson.toJson(root, null) as JSONObject
+        val wrap = wrapFirst != alt
+        val body = OwaJson.toJson(root, null, wrap) as JSONObject
+        val hasRcpt = OwaJson.hasRecipients(body)
         var post: Pair<String, String>? = null
         if ("noRestr" in f && body.has("Restriction")) {
             val it = body.optJSONObject("Restriction")?.optJSONObject("Item")
@@ -277,19 +315,45 @@ class OwaTransport(private val origin: String, private val user: String, private
             if (dflt != null && "noDefaults" !in f) return "noDefaults"
             return null
         }
+        // A simplification step is kept only when the request then works: one broken item (HTTP 500 for it alone)
+        // must not switch every later request of this kind to a heavier shape.
+        fun retryWith(fx: String): Document {
+            f.add(fx)
+            try { return send(root, op, depth + 1, timeoutMs, cancel, alt) } catch (e: MailException) { f.remove(fx); throw e }
+        }
+        // several items in one request: a failure is usually one bad item, which the caller narrows down
+        val many = (body.optJSONArray("ItemIds")?.length() ?: 0) > 1
+        // the request was refused: with recipients in it, first try the other recipient shape (nothing was sent)
+        fun otherShape(): Document? {
+            if (!hasRcpt || alt || depth >= 6) return null
+            val d = send(root, op, depth + 1, timeoutMs, cancel, alt = true)
+            wrapFirst = !wrapFirst
+            Diag.i("owa", "$op: recipients accepted in the ${if (wrapFirst) "wrapped" else "flat"} shape")
+            return d
+        }
         if (json == null) {
             if (Regex("my\\.policy|/vdesk/|logon\\.aspx|<form[^>]+password", RegexOption.IGNORE_CASE).containsMatchIn(text)) throw signInNeeded(host)
-            if (resp.code >= 500 && depth < 6) { nextFix()?.let { f.add(it); return send(root, op, depth + 1, timeoutMs, cancel) } }
-            throw MailException("web mail HTTP ${resp.code}: " + Html.toText(text).take(160).ifEmpty { "empty answer" })
+            if (resp.code >= 500) try { otherShape()?.let { return it } } catch (e: MailException) { Diag.i("owa", "$op other recipient shape: ${e.message}") }
+            if (resp.code >= 500 && depth < 6 && !many) { nextFix()?.let { return retryWith(it) } }
+            throw MailException("web mail HTTP ${resp.code}: " + Html.toText(text).take(160).ifEmpty { Y.t("empty answer", "boş yanıt") })
         }
         val b = json.optJSONObject("Body")
         val bad = if (b != null && (b.has("ExceptionName") || b.has("FaultMessage"))) "${b.optString("ExceptionName")} ${b.optString("FaultMessage", b.optString("Message"))}".trim()
-        else if (resp.code >= 400) json.toString().take(200) else ""
+        else if (resp.code >= 400) OwaJson.errorText(json).ifEmpty { "HTTP ${resp.code}" } else ""
         if (bad.isNotEmpty()) {
-            if (depth < 6) nextFix()?.let { f.add(it); return send(root, op, depth + 1, timeoutMs, cancel) }
-            throw MailException("web mail: $bad")
+            Diag.i("owa", "$op refused: ${bad.take(300)}")
+            try { otherShape()?.let { return it } } catch (e: MailException) { Diag.i("owa", "$op other recipient shape: ${e.message}") }
+            if (depth < 6 && !many) nextFix()?.let { return retryWith(it) }
+            throw MailException("web mail: ${OwaJson.shortFault(bad)}")
         }
         val doc = OwaJson.toXml(op, json)
+        if (hasRcpt && !alt) {
+            // a recipient the server could not read in this shape comes back as an error message, not a fault
+            val rcptErr = Xml.kids(doc, "ResponseMessages").flatMap { Xml.children(it) }.any { m ->
+                m.getAttribute("ResponseClass") == "Error" && Regex("Recipient|EmailAddress|Mailbox", RegexOption.IGNORE_CASE).containsMatchIn(m.getAttribute("ResponseCode") + " " + m.getAttribute("MessageText"))
+            }
+            if (rcptErr) try { otherShape()?.let { return it } } catch (e: MailException) { Diag.i("owa", "$op other recipient shape: ${e.message}") }
+        }
         if (post != null) {
             val norm = { s: String -> s.trim().lowercase() }
             for (box in Xml.kids(doc, "Items") + Xml.kids(doc, "Folders")) for (c in Xml.children(box)) {
@@ -322,7 +386,39 @@ object OwaJson {
         else -> v
     }
 
-    fun toJson(el: Element, parent: String?): Any? {
+    private val RCPT = setOf("ToRecipients", "CcRecipients", "BccRecipients", "ReplyTo")
+    private val ATTENDEES = setOf("RequiredAttendees", "OptionalAttendees", "Resources")
+    /** Single-recipient fields (EWS SingleRecipientType: a Mailbox inside). */
+    private val SINGLE = setOf("From", "Sender", "Organizer", "ReceivedBy", "ReceivedRepresenting")
+
+    /** True when a converted request carries recipients somewhere (CreateItem, UpdateItem…). */
+    fun hasRecipients(o: Any?): Boolean = when (o) {
+        is JSONObject -> o.keys().asSequence().any { k -> (k in RCPT && o.opt(k) is JSONArray) || hasRecipients(o.opt(k)) }
+        is JSONArray -> (0 until o.length()).any { hasRecipients(o.opt(it)) }
+        else -> false
+    }
+
+    /** A readable reason from an OWA error answer (never the raw JSON). */
+    fun errorText(json: JSONObject): String {
+        val b = json.optJSONObject("Body") ?: json
+        val direct = listOf("FaultMessage", "Message", "ExceptionName").map { b.optString(it) }.firstOrNull { it.isNotBlank() && it != "null" }
+        if (direct != null) return direct
+        val items = b.optJSONObject("ResponseMessages")?.optJSONArray("Items")
+        if (items != null) for (i in 0 until items.length()) {
+            val m = items.optJSONObject(i) ?: continue
+            val t = m.optString("MessageText").ifEmpty { m.optString("ResponseCode") }
+            if (t.isNotEmpty() && t != "NoError") return t
+        }
+        return ""
+    }
+
+    /** Server faults can carry a .NET stack trace or a whole serialized request: keep the first sentence-ish part. */
+    fun shortFault(s: String): String = s.replace(Regex("\\s+"), " ").trim().let { t ->
+        val cut = Regex("\\s+at [A-Z][\\w.`<>]+\\(|\\{\"__type").find(t)?.range?.first ?: t.length
+        t.substring(0, cut).trim().take(300)
+    }
+
+    fun toJson(el: Element, parent: String?, wrapRecipients: Boolean = false): Any? {
         val name = el.localName
         val type = (TYPES[name] ?: name) + ":#Exchange"
         val kids = Xml.children(el)
@@ -335,8 +431,8 @@ object OwaJson {
             val v: Any = if (name == "FieldURI" && an == "FieldURI") field(a.nodeValue) else if (name == "Constant") a.nodeValue else scalar(an, a.nodeValue)
             o.put(an, v)
         }
-        if (name == "SavedItemFolderId" || name == "ParentFolderId" || name == "ToFolderId") return JSONObject().put("__type", type).put("BaseFolderId", kids.firstOrNull()?.let { toJson(it, name) } ?: JSONObject.NULL)
-        if (name == "Restriction") return JSONObject().put("__type", type).put("Item", kids.firstOrNull()?.let { toJson(it, name) } ?: JSONObject.NULL)
+        if (name == "SavedItemFolderId" || name == "ParentFolderId" || name == "ToFolderId") return JSONObject().put("__type", type).put("BaseFolderId", kids.firstOrNull()?.let { toJson(it, name, wrapRecipients) } ?: JSONObject.NULL)
+        if (name == "Restriction") return JSONObject().put("__type", type).put("Item", kids.firstOrNull()?.let { toJson(it, name, wrapRecipients) } ?: JSONObject.NULL)
         if (kids.isEmpty()) {
             val t = el.textContent ?: ""
             if (attrs.length == 0 || name in TEXTY) {
@@ -349,21 +445,21 @@ object OwaJson {
             val kn = k.localName
             if (kn == "ExtendedProperty" && name != "SetItemField") {
                 val arr = o.optJSONArray("ExtendedProperty") ?: JSONArray().also { o.put("ExtendedProperty", it) }
-                arr.put(toJson(k, name)); continue
+                arr.put(toJson(k, name, wrapRecipients)); continue
             }
-            if (kn == "ToRecipients" || kn == "CcRecipients" || kn == "BccRecipients" || kn == "ReplyTo") {
+            if (kn in RCPT) {
                 val arr = JSONArray()
                 for (c in Xml.children(k)) {
-                    val mb = (toJson(c, kn) as? JSONObject) ?: JSONObject()
+                    val mb = (toJson(c, kn, wrapRecipients) as? JSONObject) ?: JSONObject().put("__type", "EmailAddress:#Exchange")
                     mb.put("RoutingType", "SMTP")
-                    arr.put(JSONObject().put("__type", "EmailAddressWrapper:#Exchange").put("Mailbox", mb))
+                    arr.put(if (wrapRecipients) JSONObject().put("__type", "EmailAddressWrapper:#Exchange").put("Mailbox", mb) else mb)
                 }
                 o.put(kn, arr); continue
             }
             if (kn in ARRAYS) {
                 val arr = JSONArray()
                 for (c in Xml.children(k)) {
-                    if (Xml.children(c).isNotEmpty() || c.attributes.length > 0 || c.localName == "Body" || c.localName == "Mailbox") arr.put(toJson(c, kn) ?: JSONObject.NULL)
+                    if (Xml.children(c).isNotEmpty() || c.attributes.length > 0 || c.localName == "Body" || c.localName == "Mailbox") arr.put(toJson(c, kn, wrapRecipients) ?: JSONObject.NULL)
                     else arr.put(c.textContent)
                 }
                 o.put(kn, arr); continue
@@ -376,7 +472,7 @@ object OwaJson {
             else if (kn == "FieldURI" || kn == "ExtendedFieldURI" || kn == "IndexedFieldURI") key = if (name in setOf("SetItemField", "AppendToItemField", "DeleteItemField", "FieldOrder")) "Path" else if (name == "ExtendedProperty") "ExtendedFieldURI" else "Item"
             else if (name == "SetItemField" || name == "AppendToItemField") key = "Item"
             else if (name == "FieldURIOrConstant") key = "Item"
-            o.put(key, toJson(k, name) ?: JSONObject.NULL)
+            o.put(key, toJson(k, name, wrapRecipients) ?: JSONObject.NULL)
         }
         return o
     }
@@ -408,14 +504,18 @@ object OwaJson {
                 val box = mk(key); parent.appendChild(box)
                 for (i in 0 until v0.length()) {
                     var x: Any? = v0.opt(i)
-                    if (x is JSONObject && x.optString("__type").startsWith("EmailAddressWrapper") && x.optJSONObject("Mailbox") != null) {
-                        val mb = x.getJSONObject("Mailbox")
-                        val copy = JSONObject(mb.toString()); copy.put("__type", "EmailAddress:#Exchange"); x = copy
+                    // recipients: OWA sends them flat ({Name, EmailAddress, RoutingType, MailboxType}, usually without
+                    // "__type"); a Mailbox wrapper is unwrapped. Either way each one becomes <Mailbox>, as in EWS.
+                    if (x is JSONObject && (key in RCPT || x.optString("__type").startsWith("EmailAddressWrapper")) && x.optJSONObject("Mailbox") != null) {
+                        val copy = JSONObject(x.getJSONObject("Mailbox").toString()); copy.put("__type", "EmailAddress:#Exchange"); x = copy
                     }
                     if (key == "Categories" && x !is JSONObject) { val e = mk("String"); e.textContent = x.toString(); box.appendChild(e); continue }
                     if (x is JSONObject) {
-                        var n = x.optString("__type").substringBefore(":").ifEmpty { key.removeSuffix("s") }
-                        if (n == "EmailAddress") n = "Mailbox"
+                        var n = x.optString("__type").substringBefore(":")
+                        if (key in RCPT && (n.isEmpty() || n.startsWith("EmailAddress") || x.has("EmailAddress"))) n = "Mailbox"
+                        else if (key in ATTENDEES && (n.isEmpty() || n.startsWith("Attendee"))) n = "Attendee"
+                        if (n.isEmpty()) n = if (key.endsWith("ies")) key.dropLast(3) + "y" else key.removeSuffix("s")
+                        if (n == "EmailAddress" || n == "EmailAddressWrapper") n = "Mailbox"
                         if (n.endsWith("Type") && n != "MeetingRequestType") n = n.removeSuffix("Type")
                         val e = mk(n); box.appendChild(e); fill(e, x)
                     } else if (x != null && x != JSONObject.NULL) {
@@ -424,7 +524,13 @@ object OwaJson {
                 }
                 return
             }
-            if (v0 is JSONObject) { val e = mk(key); parent.appendChild(e); fill(e, v0); return }
+            if (v0 is JSONObject) {
+                val e = mk(key); parent.appendChild(e)
+                // From / Sender / Organizer: {Mailbox:{…}} in EWS; a flat {Name, EmailAddress} gets the Mailbox level added
+                if (key in SINGLE && !v0.has("Mailbox") && (v0.has("EmailAddress") || v0.has("Name"))) { val mb = mk("Mailbox"); e.appendChild(mb); fill(mb, v0) }
+                else fill(e, v0)
+                return
+            }
             val s = v0.toString()
             try { parent.setAttribute(key, s) } catch (_: Exception) {}
             val e = mk(key); e.textContent = s; parent.appendChild(e)
@@ -454,18 +560,22 @@ object OwaJson {
 }
 
 class MailBox(val name: String, val email: String) {
-    override fun toString() = if (name.isNotEmpty() && name != email) "$name <$email>" else email
+    override fun toString() = if (email.isEmpty()) name else if (name.isNotEmpty() && !name.equals(email, true)) "$name <$email>" else email
     val short: String get() = name.ifEmpty { email }
 }
 
-class MailHeader(val id: String, val ck: String, val subject: String, val from: MailBox?, val received: String, val read: Boolean, val attachments: Boolean, val importance: String, val preview: String)
-class MailFile(val id: String, val name: String, val type: String, val size: Long, val inline: Boolean)
+/** displayTo: the recipients' names as the server lists them ("Ayşe Yılmaz; Mehmet Kaya"), for Sent Items and Drafts. */
+class MailHeader(val id: String, val ck: String, val subject: String, val from: MailBox?, val received: String, val read: Boolean, val attachments: Boolean, val importance: String, val preview: String, val displayTo: String = "")
+/** item=true: an attached e-mail / meeting (ItemAttachment); downloading it gives its text. */
+class MailFile(val id: String, val name: String, val type: String, val size: Long, val inline: Boolean, val item: Boolean = false)
 class MailMessage(val h: MailHeader, val kind: String, val to: List<MailBox>, val cc: List<MailBox>, val body: String, val files: List<MailFile>, val invite: JSONObject?)
 class CalEvent(val id: String, val subject: String, val start: String, val end: String, val location: String, val organizer: MailBox?, val allDay: Boolean, val response: String, val cancelled: Boolean, val meeting: Boolean, val created: String = "")
 
 /** Mailbox operations (ported from yaver's EWS object). Works the same over EWS or Outlook web. */
 class Exchange(val t: MailTransport) {
     var noPreview = false
+    /** The server refused item:DisplayTo in a list (old servers): lists without it. */
+    var noDisplayTo = false
 
     companion object {
         fun checkErrors(doc: Document) {
@@ -483,32 +593,64 @@ class Exchange(val t: MailTransport) {
             "deleted" to "deleteditems", "deleteditems" to "deleteditems", "junk" to "junkemail", "junkemail" to "junkemail", "archive" to "archive", "outbox" to "outbox"
         )[(f ?: "inbox").lowercase().trim()] ?: "inbox"
 
-        fun parseTime(s: String): Long {
+        /**
+         * Server times → epoch ms. EWS sends UTC ("…Z"), OWA the request's time zone ("…+03:00"); both are exact.
+         * A time without zone is read as local time; "/Date(ms)/" (old OWA JSON) and plain dates are accepted too.
+         */
+        fun parseTime(s0: String): Long {
+            val s = s0.trim()
             if (s.isEmpty()) return 0
+            Regex("^/Date\\((-?\\d+)([+-]\\d{4})?\\)/$").find(s)?.let { return it.groupValues[1].toLong() }
             return try { OffsetDateTime.parse(s).toInstant().toEpochMilli() } catch (e: Exception) {
                 try { Instant.parse(s).toEpochMilli() } catch (e2: Exception) {
-                    try { LocalDateTime.parse(s.take(19)).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli() } catch (e3: Exception) { 0 }
+                    try { LocalDateTime.parse(s.take(19)).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli() } catch (e3: Exception) {
+                        try { java.time.LocalDate.parse(s.take(10)).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() } catch (e4: Exception) { 0 }
+                    }
                 }
             }
         }
+
+        /** A <Mailbox> (or any element with Name / EmailAddress children) → MailBox. X.500 addresses (/o=…) are not e-mail addresses. */
+        fun mailbox(mb: Element): MailBox {
+            val name = own(mb, "Name").trim()
+            var email = own(mb, "EmailAddress").trim()
+            if (email.startsWith("/o=", true) || email.startsWith("/cn=", true)) email = ""
+            return MailBox(name, email)
+        }
+
+        /** The person in a From / Sender / Organizer / Attendee / Resolution element. */
+        fun box(el: Element?): MailBox? {
+            if (el == null) return null
+            val mb = Xml.kids(el, "Mailbox").firstOrNull() ?: el.takeIf { e -> Xml.children(e).any { it.localName == "EmailAddress" } } ?: return null
+            return mailbox(mb).takeIf { it.name.isNotEmpty() || it.email.isNotEmpty() }
+        }
+
+        /** The people in ToRecipients / CcRecipients / … of an item. Tolerates recipients that are not wrapped in <Mailbox>. */
+        fun boxes(el: Element?, name: String): List<MailBox> {
+            val c = (el?.let { e -> Xml.children(e).firstOrNull { it.localName == name } } ?: Xml.kids(el, name).firstOrNull()) ?: return emptyList()
+            val mbs = Xml.kids(c, "Mailbox").ifEmpty { Xml.children(c).filter { x -> Xml.children(x).any { it.localName == "EmailAddress" || it.localName == "Name" } } }
+            return mbs.map { mailbox(it) }.filter { it.name.isNotEmpty() || it.email.isNotEmpty() }
+        }
+
+        /** Names from DisplayTo / DisplayCc ("A; B"), for when the server did not send the recipient list. */
+        fun names(display: String): List<MailBox> = display.split(';').map { it.trim() }.filter { it.isNotEmpty() }.map { MailBox(it, "") }
+
+        /** Text of [el]'s own child [name] (not a nested item's), else the first such element anywhere below it. */
+        fun own(el: Element?, name: String): String {
+            if (el == null) return ""
+            return Xml.children(el).firstOrNull { it.localName == name }?.textContent ?: Xml.txt(el, name)
+        }
+
+        /** EWS element name for an item; OWA calls meeting messages "MeetingRequestMessage" etc. */
+        fun kindOf(el: Element): String = el.localName.let { if (it.startsWith("Meeting") && it.endsWith("Message")) it.removeSuffix("Message") else it }
 
         fun iso(ms: Long): String = Instant.ofEpochMilli(ms).toString()
     }
 
     private fun call(inner: String, timeout: Int = 60000, cancel: Cancel? = null) = t.call(inner, timeout, cancel)
 
-    private fun box(el: Element?): MailBox? {
-        val mb = Xml.kids(el, "Mailbox").firstOrNull() ?: return null
-        return MailBox(Xml.txt(mb, "Name"), Xml.txt(mb, "EmailAddress"))
-    }
-
-    private fun boxes(el: Element?, name: String): List<MailBox> {
-        val c = Xml.kids(el, name).firstOrNull() ?: return emptyList()
-        return Xml.kids(c, "Mailbox").map { MailBox(Xml.txt(it, "Name"), Xml.txt(it, "EmailAddress")) }
-    }
-
     private fun idOf(el: Element?): Pair<String, String>? {
-        val i = Xml.kids(el, "ItemId").firstOrNull() ?: return null
+        val i = el?.let { e -> Xml.children(e).firstOrNull { it.localName == "ItemId" } } ?: Xml.kids(el, "ItemId").firstOrNull() ?: return null
         return Pair(i.getAttribute("Id"), i.getAttribute("ChangeKey"))
     }
 
@@ -516,10 +658,11 @@ class Exchange(val t: MailTransport) {
 
     private fun header(m: Element): MailHeader {
         val id = idOf(m)
+        val from = box(Xml.children(m).firstOrNull { it.localName == "From" }) ?: box(Xml.children(m).firstOrNull { it.localName == "Sender" })
         return MailHeader(
-            id?.first ?: "", id?.second ?: "", Xml.txt(m, "Subject").ifEmpty { "(no subject)" }, box(Xml.kids(m, "From").firstOrNull()),
-            Xml.txt(m, "DateTimeReceived").ifEmpty { Xml.txt(m, "DateTimeSent") }, Xml.txt(m, "IsRead") != "false", Xml.txt(m, "HasAttachments") == "true",
-            Xml.txt(m, "Importance").ifEmpty { "Normal" }, Xml.txt(m, "Preview").take(400)
+            id?.first ?: "", id?.second ?: "", own(m, "Subject").ifEmpty { "(no subject)" }, from,
+            own(m, "DateTimeReceived").ifEmpty { own(m, "DateTimeSent") }, own(m, "IsRead") != "false", own(m, "HasAttachments") == "true",
+            own(m, "Importance").ifEmpty { "Normal" }, own(m, "Preview").take(400), own(m, "DisplayTo").trim()
         )
     }
 
@@ -542,6 +685,7 @@ class Exchange(val t: MailTransport) {
     fun find(folder: String = "inbox", query: String = "", unread: Boolean = false, limit: Int = 25, offset: Int = 0, cancel: Cancel? = null): FindResult {
         val props = mutableListOf("item:Subject", "message:From", "item:DateTimeReceived", "item:DateTimeSent", "message:IsRead", "item:HasAttachments", "item:Importance")
         if (!noPreview) props.add("item:Preview")
+        if (!noDisplayTo) props.add("item:DisplayTo")
         val restr = if (unread && query.isEmpty()) "<m:Restriction><t:IsEqualTo><t:FieldURI FieldURI=\"message:IsRead\"/><t:FieldURIOrConstant><t:Constant Value=\"false\"/></t:FieldURIOrConstant></t:IsEqualTo></m:Restriction>" else ""
         val body = "<m:FindItem Traversal=\"Shallow\"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>${props.joinToString("") { "<t:FieldURI FieldURI=\"$it\"/>" }}</t:AdditionalProperties></m:ItemShape>" +
             "<m:IndexedPageItemView MaxEntriesReturned=\"${limit.coerceIn(1, 100)}\" Offset=\"${maxOf(0, offset)}\" BasePoint=\"Beginning\"/>$restr" +
@@ -549,6 +693,7 @@ class Exchange(val t: MailTransport) {
             "<m:ParentFolderIds><t:DistinguishedFolderId Id=\"${folder(folder)}\"/></m:ParentFolderIds>" +
             (if (query.isNotEmpty()) "<m:QueryString>${Xml.esc(query)}</m:QueryString>" else "") + "</m:FindItem>"
         val doc = try { call(body, cancel = cancel) } catch (e: MailException) {
+            if (!noDisplayTo && Regex("DisplayTo", RegexOption.IGNORE_CASE).containsMatchIn(e.message ?: "")) { noDisplayTo = true; return find(folder, query, unread, limit, offset, cancel) }
             if (!noPreview && Regex("Preview|property|schema", RegexOption.IGNORE_CASE).containsMatchIn(e.message ?: "")) { noPreview = true; return find(folder, query, unread, limit, offset, cancel) }
             throw e
         }
@@ -562,17 +707,30 @@ class Exchange(val t: MailTransport) {
         val doc = call("<m:GetItem><m:ItemShape><t:BaseShape>Default</t:BaseShape><t:BodyType>Text</t:BodyType><t:AdditionalProperties><t:FieldURI FieldURI=\"message:ToRecipients\"/><t:FieldURI FieldURI=\"message:CcRecipients\"/><t:FieldURI FieldURI=\"item:Attachments\"/><t:FieldURI FieldURI=\"item:DateTimeReceived\"/><t:FieldURI FieldURI=\"message:IsRead\"/></t:AdditionalProperties></m:ItemShape><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:GetItem>", cancel = cancel)
         val it = Xml.kids(doc, "Items").firstOrNull()?.let { Xml.children(it).firstOrNull() } ?: throw MailException("message not found")
         val h = header(it)
-        val kind = it.localName
+        val kind = kindOf(it)
         var invite: JSONObject? = null
         if (kind.contains("MeetingRequest") || kind.contains("MeetingCancellation")) {
             invite = inviteOf(it)
             if (invite.optString("start").isEmpty()) try { invite = inviteDetails(id, cancel) } catch (_: Exception) {}
         }
+        val files = filesOf(it)
+        val body = own(it, "Body").replace("\r\n", "\n").replace(Regex("\\n{3,}"), "\n\n").trim()
+        // the recipient list; when a server leaves it out, the names it shows in DisplayTo / DisplayCc
+        val to = boxes(it, "ToRecipients").ifEmpty { names(own(it, "DisplayTo")) }
+        val cc = boxes(it, "CcRecipients").ifEmpty { names(own(it, "DisplayCc")) }
+        return MailMessage(h, kind, to, cc, body, files, invite)
+    }
+
+    /** File attachments and attached items (forwarded e-mails, meetings) of an item. */
+    private fun filesOf(it: Element): List<MailFile> {
+        fun attId(a: Element) = Xml.kids(a, "AttachmentId").firstOrNull()?.getAttribute("Id") ?: ""
         val files = Xml.kids(it, "FileAttachment").map { a ->
-            MailFile(Xml.kids(a, "AttachmentId").firstOrNull()?.getAttribute("Id") ?: "", Xml.txt(a, "Name"), Xml.txt(a, "ContentType"), Xml.txt(a, "Size").toLongOrNull() ?: 0, Xml.txt(a, "IsInline") == "true")
+            MailFile(attId(a), own(a, "Name"), own(a, "ContentType"), own(a, "Size").toLongOrNull() ?: 0, own(a, "IsInline") == "true")
         }
-        val body = Xml.txt(it, "Body").replace("\r\n", "\n").replace(Regex("\\n{3,}"), "\n\n").trim()
-        return MailMessage(h, kind, boxes(it, "ToRecipients"), boxes(it, "CcRecipients"), body, files, invite)
+        val items = Xml.kids(it, "ItemAttachment").map { a ->
+            MailFile(attId(a), own(a, "Name").ifEmpty { "attached item" }, own(a, "ContentType").ifEmpty { "message/rfc822" }, own(a, "Size").toLongOrNull() ?: 0, false, item = true)
+        }
+        return (files + items).filter { f -> f.id.isNotEmpty() }
     }
 
     private fun inviteOf(it: Element): JSONObject {
@@ -593,11 +751,40 @@ class Exchange(val t: MailTransport) {
 
     class Attachment(val name: String, val type: String, val bytes: ByteArray)
 
+    /** Downloads one attachment. An attached e-mail comes back as readable text (name ends in .txt). */
     fun attachment(attId: String, cancel: Cancel? = null): Attachment {
-        val doc = call("<m:GetAttachment><m:AttachmentIds><t:AttachmentId Id=\"${Xml.esc(attId)}\"/></m:AttachmentIds></m:GetAttachment>", 120000, cancel)
-        val a = Xml.kids(doc, "FileAttachment").firstOrNull() ?: throw MailException("attachment not found")
-        val b64 = Xml.txt(a, "Content").replace(Regex("\\s+"), "")
-        return Attachment(Xml.txt(a, "Name"), Xml.txt(a, "ContentType").ifEmpty { "application/octet-stream" }, android.util.Base64.decode(b64, android.util.Base64.DEFAULT))
+        val owa = t as? OwaTransport
+        val doc = try {
+            call("<m:GetAttachment><m:AttachmentIds><t:AttachmentId Id=\"${Xml.esc(attId)}\"/></m:AttachmentIds></m:GetAttachment>", 120000, cancel)
+        } catch (e: MailException) {
+            // Outlook on the web: its own download address works where the JSON GetAttachment is refused
+            if (owa != null && e.code != "ErrorItemNotFound") owa.download(attId, cancel)?.let { return it }
+            throw e
+        }
+        val a = Xml.kids(doc, "FileAttachment").firstOrNull()
+        if (a != null) {
+            val b64 = own(a, "Content").replace(Regex("\\s+"), "")
+            if (b64.isEmpty() && owa != null) owa.download(attId, cancel)?.let { d -> return Attachment(own(a, "Name"), own(a, "ContentType").ifEmpty { d.type }, d.bytes) }
+            return Attachment(own(a, "Name"), own(a, "ContentType").ifEmpty { "application/octet-stream" }, android.util.Base64.decode(b64, android.util.Base64.DEFAULT))
+        }
+        val ia = Xml.kids(doc, "ItemAttachment").firstOrNull() ?: throw MailException(Y.t("attachment not found", "ek bulunamadı"))
+        val item = Xml.children(ia).firstOrNull { x -> Xml.children(x).any { it.localName == "Subject" || it.localName == "ItemId" || it.localName == "Body" } }
+        val name = own(ia, "Name").ifEmpty { item?.let { own(it, "Subject") } ?: "" }.ifEmpty { "attached item" }
+        val text = StringBuilder()
+        if (item != null) {
+            text.append("Subject: ").append(own(item, "Subject")).append('\n')
+            box(Xml.children(item).firstOrNull { it.localName == "From" })?.let { text.append("From: ").append(it).append('\n') }
+            boxes(item, "ToRecipients").ifEmpty { names(own(item, "DisplayTo")) }.takeIf { it.isNotEmpty() }?.let { l -> text.append("To: ").append(l.joinToString(", ")).append('\n') }
+            boxes(item, "CcRecipients").ifEmpty { names(own(item, "DisplayCc")) }.takeIf { it.isNotEmpty() }?.let { l -> text.append("Cc: ").append(l.joinToString(", ")).append('\n') }
+            own(item, "DateTimeSent").ifEmpty { own(item, "DateTimeReceived") }.takeIf { it.isNotEmpty() }?.let { text.append("Date: ").append(MailTools.fmt(parseTime(it))).append('\n') }
+            if (own(item, "Start").isNotEmpty()) text.append("When: ").append(MailTools.fmt(parseTime(own(item, "Start")))).append(" – ").append(MailTools.fmt(parseTime(own(item, "End")))).append('\n')
+            val bodyEl = Xml.children(item).firstOrNull { it.localName == "Body" }
+            val body = bodyEl?.textContent ?: ""
+            val isHtml = bodyEl?.getAttribute("BodyType")?.equals("HTML", true) == true || Regex("^\\s*<(!doctype|html|div|p|table|body|meta)", RegexOption.IGNORE_CASE).containsMatchIn(body)
+            text.append('\n').append(if (isHtml) Html.toText(body) else body.replace("\r\n", "\n"))
+        }
+        val safe = name.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]+"), "_").take(120)
+        return Attachment(if (safe.endsWith(".txt", true)) safe else "$safe.txt", "text/plain", text.toString().trim().toByteArray(Charsets.UTF_8))
     }
 
     /** kind: new | reply | replyall | forward. send=false saves to Drafts. Returns the new item id (drafts) or "". */
@@ -642,9 +829,10 @@ class Exchange(val t: MailTransport) {
         }
     }
 
-    fun events(start: Long, end: Long, cancel: Cancel? = null): List<CalEvent> {
+    /** Calendar items overlapping [start, end) (recurring meetings expanded), sorted by start. */
+    fun events(start: Long, end: Long, cancel: Cancel? = null, max: Int = 500): List<CalEvent> {
         val props = listOf("item:Subject", "calendar:Start", "calendar:End", "calendar:Location", "calendar:Organizer", "calendar:IsAllDayEvent", "calendar:MyResponseType", "calendar:IsCancelled", "calendar:IsMeeting", "item:DateTimeCreated")
-        val doc = call("<m:FindItem Traversal=\"Shallow\"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>${props.joinToString("") { "<t:FieldURI FieldURI=\"$it\"/>" }}</t:AdditionalProperties></m:ItemShape><m:CalendarView MaxEntriesReturned=\"200\" StartDate=\"${iso(start)}\" EndDate=\"${iso(end)}\"/><m:ParentFolderIds><t:DistinguishedFolderId Id=\"calendar\"/></m:ParentFolderIds></m:FindItem>", cancel = cancel)
+        val doc = call("<m:FindItem Traversal=\"Shallow\"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>${props.joinToString("") { "<t:FieldURI FieldURI=\"$it\"/>" }}</t:AdditionalProperties></m:ItemShape><m:CalendarView MaxEntriesReturned=\"${max.coerceIn(1, 1000)}\" StartDate=\"${iso(start)}\" EndDate=\"${iso(end)}\"/><m:ParentFolderIds><t:DistinguishedFolderId Id=\"calendar\"/></m:ParentFolderIds></m:FindItem>", cancel = cancel)
         val items = Xml.kids(doc, "Items").firstOrNull() ?: return emptyList()
         return Xml.children(items).map { c ->
             CalEvent(idOf(c)?.first ?: "", Xml.txt(c, "Subject").ifEmpty { "(no title)" }, Xml.txt(c, "Start"), Xml.txt(c, "End"), Xml.txt(c, "Location"),
@@ -675,8 +863,14 @@ class Exchange(val t: MailTransport) {
 
     fun resolve(q: String, limit: Int = 8, cancel: Cancel? = null): List<Person> {
         if (q.trim().length < 2) return emptyList()
+        val owa = t is OwaTransport
+        fun req(shape: Boolean) = call("<m:ResolveNames ReturnFullContactData=\"true\" SearchScope=\"ActiveDirectoryContacts\"${if (shape) " ContactDataShape=\"Default\"" else ""}><m:UnresolvedEntry>${Xml.esc(q.trim())}</m:UnresolvedEntry></m:ResolveNames>", 20000, cancel)
         val doc = try {
-            call("<m:ResolveNames ReturnFullContactData=\"true\" SearchScope=\"ActiveDirectoryContacts\"><m:UnresolvedEntry>${Xml.esc(q.trim())}</m:UnresolvedEntry></m:ResolveNames>", 20000, cancel)
+            // Outlook web may leave the directory contact (with the real name) out unless the shape is named
+            if (owa && !noContactShape) try { req(true) } catch (e: MailException) {
+                if (Regex("NoResults|NameResolution|No results", RegexOption.IGNORE_CASE).containsMatchIn(e.code + " " + e.message)) throw e
+                noContactShape = true; req(false)
+            } else req(false)
         } catch (e: MailException) {
             if (Regex("NoResults|NameResolution|No results", RegexOption.IGNORE_CASE).containsMatchIn(e.code + " " + e.message)) return emptyList()
             throw e
@@ -685,11 +879,32 @@ class Exchange(val t: MailTransport) {
         for (r in Xml.kids(doc, "Resolution")) {
             val b = box(r) ?: continue
             if (b.email.isEmpty() || out.any { it.email.equals(b.email, true) }) continue
-            // the mailbox name is often just the account (a00058); the contact part has the real name
-            val shown = Xml.txt(r, "DisplayName").ifEmpty { listOf(Xml.txt(r, "GivenName"), Xml.txt(r, "Surname")).filter { it.isNotBlank() }.joinToString(" ") }
-            val name = if (shown.isNotBlank()) shown else b.name.ifEmpty { b.email }
-            out.add(Person(name, b.email, Xml.txt(r, "JobTitle"), Xml.txt(r, "Department")))
+            // the mailbox name is often just the account (a00058, t18503); the contact part has the real name
+            val c = Xml.kids(r, "Contact").firstOrNull()
+            val shown = listOf(own(c, "DisplayName"), Xml.txt(c, "FullName"), listOf(own(c, "GivenName"), own(c, "Surname")).filter { it.isNotBlank() }.joinToString(" "), Xml.txt(r, "DisplayName"))
+                .map { it.trim() }.firstOrNull { it.isNotEmpty() && !accountLike(it) } ?: ""
+            val name = shown.ifEmpty { realName(b.email, b.name) }
+            out.add(Person(name, b.email, own(c, "JobTitle").ifEmpty { Xml.txt(r, "JobTitle") }, own(c, "Department").ifEmpty { Xml.txt(r, "Department") }))
         }
         return out.take(limit)
+    }
+
+    private var noContactShape = false
+
+    /** "t18503", "a00058": an account id, not a person's name. */
+    fun accountLike(n: String) = Regex("^[a-z]{0,2}\\d{4,}$", RegexOption.IGNORE_CASE).matches(n.trim())
+
+    /**
+     * A readable name for a directory entry whose name is an account id: the name seen in recent mail
+     * (local index), else the address' local part ("emre.akyilmaz" → "Emre Akyilmaz").
+     */
+    fun realName(email: String, name: String): String {
+        if (name.isNotBlank() && !accountLike(name) && !name.equals(email, true)) return name
+        try { MailIndex.nameOf(email)?.let { return it } } catch (_: Throwable) {}
+        val local = email.substringBefore('@')
+        if (local.isEmpty() || accountLike(local)) return name.ifBlank { email }
+        val loc = if (try { Y.tr } catch (_: Throwable) { false }) java.util.Locale("tr", "TR") else java.util.Locale.ROOT
+        return local.split(Regex("[._-]+")).filter { it.isNotEmpty() && !it.all { ch -> ch.isDigit() } }
+            .joinToString(" ") { w -> w.lowercase(loc).replaceFirstChar { ch -> ch.titlecase(loc) } }.ifEmpty { name.ifBlank { email } }
     }
 }

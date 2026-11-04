@@ -19,7 +19,7 @@
 
   /* ------------------------------------------------------------ state */
   var S = { lang: "tr", state: null, convo: null, convoId: "", live: "", liveStatus: "", liveTool: null, running: {}, atts: [], convos: [], pages: [], voiceTurn: false, mail: { folder: "inbox", tab: "mail", items: [], query: "" },
-    side: {}, fu: {}, plan: {}, ctx: {}, subs: {}, fbAsk: null, todoOpen: false, overdue: 0, kb: { tab: "memory", q: "", filter: "all", sort: "use" }, tasks: { q: "", owner: "", status: "open", sort: "" } };
+    side: {}, fu: {}, plan: {}, ctx: {}, subs: {}, doneAt: {}, queued: {}, fbAsk: null, todoOpen: false, overdue: 0, kb: { tab: "memory", q: "", filter: "all", sort: "use" }, tasks: { q: "", owner: "", status: "open", sort: "" } };
   function T(en, tr) { return S.lang === "tr" ? tr : en; }
 
   /* ------------------------------------------------------------ dom helpers */
@@ -54,6 +54,8 @@
   var toastT = 0;
   function toast(msg, onClick, ms) {
     if (!msg) return;
+    /* "SIGNIN:" = the mail session ended: never show the prefix, and let the toast open the sign-in page */
+    if (/^SIGNIN:/.test(String(msg))) { msg = String(msg).replace(/^SIGNIN:\s*/, "") || T("Sign in to your mail", "Postada oturum açın"); if (!onClick) onClick = function () { signInMail(); }; }
     var t = $(".toast") || document.body.appendChild(h("div", { class: "toast", role: "status" }));
     t.textContent = String(msg); t.classList.add("on");
     t.classList.toggle("act", !!onClick);
@@ -254,6 +256,7 @@
   function parseArgs(s) { try { return JSON.parse(s || "{}"); } catch (e) { return {}; } }
 
   function renderThread() {
+    if (!$("#thread")) return;
     var scroll = $("#scroll"), th = clear($("#thread"));
     var msgs = (S.convo && S.convo.messages) || [];
     renderPlanBar(); renderCtx();
@@ -393,6 +396,14 @@
     if (!id) { S.convo = null; S.convoId = ""; S.live = ""; renderThread(); syncSend(); return Promise.resolve(); }
     return call("convos.load", { id: id }).then(function (c) {
       S.convo = c; S.convoId = c.id;
+      /* messages typed while yaver worked: shown as queued until the core adds them to the chat */
+      var q = S.queued[c.id];
+      if (q) {
+        var users = (c.messages || []).filter(function (m) { return m.role === "user"; }).map(function (m) { return String(m.display || "") + "\n" + String(m.content || ""); });
+        q = q.filter(function (t) { return !users.some(function (u) { return u.indexOf(t) >= 0; }); });
+        if (q.length && (c.running || Date.now() - (S.doneAt[c.id] || 0) < 4000)) { S.queued[c.id] = q; c.messages = (c.messages || []).concat(q.map(function (t) { return { role: "user", content: t, display: t, queued: true }; })); }
+        else delete S.queued[c.id];
+      }
       if (c.running) { S.running[c.id] = true; S.live = c.live || ""; S.liveStatus = c.status || ""; } else delete S.running[c.id];
       var fuItems = Array.isArray(c.followups) ? c.followups : (c.followups && c.followups.items) || null;
       if (fuItems && fuItems.length && !(S.fu[c.id] && S.fu[c.id].state === "loading")) S.fu[c.id] = { state: "ready", items: fuItems, labels: (c.followups && c.followups.labels) || null };
@@ -457,16 +468,23 @@
     if (opts.label) args.label = opts.label;
     if (opts.internal) args.internal = true;
     if (opts.display) args.display = opts.display;
+    var sentAt = Date.now();
     call("chat.send", args).then(function (r) {
       r = r || {};
       if (r.steered || r.queued) {
         var lm = S.convo && S.convo.messages && S.convo.messages[S.convo.messages.length - 1];
         if (lm && lm.role === "user" && lm.content === t) { lm.queued = true; if (S.convoId === tmpId) renderThread(); }
+        /* the core keeps it outside the chat until its next step: remember it so a reload does not hide it */
+        var qid = r.convoId || tmpId; (S.queued[qid] = S.queued[qid] || []).push(t);
         if (r.convoId && S.convoId === "_new") { moveSide("_new", r.convoId); S.convoId = r.convoId; S.convo.id = r.convoId; }
         return;
       }
-      delete S.running["_new"]; if (r.convoId) S.running[r.convoId] = true;
+      delete S.running["_new"];
+      /* the turn can end (e.g. an instant model error) before this answer arrives: then it is not running any more */
+      var finished = r.convoId && S.doneAt[r.convoId] >= sentAt;
+      if (r.convoId && !finished) S.running[r.convoId] = true;
       if (r.convoId && (S.convoId === "_new" || S.convoId === tmpId)) { moveSide(tmpId, r.convoId); S.convoId = r.convoId; S.convo.id = r.convoId; S.convo.title = r.title || S.convo.title; }
+      if (finished && S.convoId === r.convoId) { S.live = ""; S.liveTool = null; S.liveStatus = ""; loadConvo(r.convoId); if (S.doneErr && S.doneErr[r.convoId]) toast(S.doneErr[r.convoId]); }
       updateTitle(); refreshConvos();
     }).catch(function (e) {
       if (!steering) delete S.running[tmpId];
@@ -496,7 +514,9 @@
     addSide(S.convoId || "_new", "cmd", { text: text });
     call("command", { convoId: cid, text: text }).then(function (r) {
       r = r || {};
-      if (r.convoId && !S.convoId) { moveSide("_new", r.convoId); S.convoId = r.convoId; if (!S.convo) S.convo = { id: r.convoId, title: "", messages: [] }; }
+      /* a command on a new chat (/plan, /goal …): the core made the chat, so it now has an id */
+      if (r.convoId && (!S.convoId || S.convoId === "_new") && !S.running["_new"]) { moveSide("_new", r.convoId); S.convoId = r.convoId; if (!S.convo) S.convo = { id: r.convoId, title: "", messages: [] }; else S.convo.id = r.convoId; refreshConvos(); }
+      if (r.planning && r.convoId) { S.plan[r.convoId] = r.planning; renderPlanBar(); }
       if (r.note) addSide(r.convoId || S.convoId, "note", { text: r.note });
       if (r.started) { var sc = r.convoId || S.convoId; if (sc && sc !== "_new") { S.running[sc] = true; loadConvo(sc); refreshConvos(); } }
       else if (r.send) send(r.send, { label: r.label, internal: r.internal });
@@ -582,11 +602,12 @@
       var id = d.convoId;
       if (d.phase === "done") {
         delete S.running[id];
+        S.doneAt[id] = Date.now(); S.doneErr = S.doneErr || {}; S.doneErr[id] = d.error || "";
         if (id === S.convoId) { S.live = ""; S.liveTool = null; S.liveStatus = ""; loadConvo(id); if (d.error) toast(d.error); }
         refreshConvos(); return;
       }
       if (d.phase === "start") {
-        S.running[id] = true;
+        S.running[id] = true; delete S.doneAt[id];
         if (id === S.convoId) { S.live = ""; S.liveTool = null; S.liveStatus = d.label || ""; if (S.fu[id]) delete S.fu[id]; loadConvo(id); }
         refreshConvos(); return;
       }
@@ -603,16 +624,19 @@
     else if (type === "launch") onLaunch(d);
     else if (type === "toast") toast(d.text);
     else if (type === "refresh") { refreshState(); refreshConvos(); }
-    else if (type === "resume") { S.state = d; if (S.convoId) loadConvo(S.convoId); if (topPage() === "mail") loadMail(); if (topPage() === "settings") renderSettings(); }
+    else if (type === "resume") { S.state = d; if (d.lang) S.lang = d.lang; if (S.convoId) loadConvo(S.convoId); if (topPage() === "mail") loadMail(); if (topPage() === "settings") renderSettings(); }
     else if (type === "mail" || type === "mail.changed") { refreshState().then(function () { if (topPage() === "mail") loadMail(); }); }
-    else if (type === "note") addSide(d.convoId, "note", { text: d.text });
+    /* notes without a chat (Outlook backup, background jobs) are toasts, not lines in whatever chat happens to be open */
+    else if (type === "note") { if (d.convoId) addSide(d.convoId, "note", { text: d.text }); else toast(stripEmoji(d.text)); }
     else if (type === "followups") {
       var fid = d.convoId; if (!fid) return;
       if (d.state === "none") delete S.fu[fid];
       else S.fu[fid] = { state: d.state, items: d.items || [], labels: d.labels || null, text: d.text };
       if (fid === S.convoId && !S.running[fid]) renderThread();
     }
-    else if (type === "memory") addSide(d.convoId, "memory", d);
+    /* "memory" with a label = a chip for that chat (Agent); without one = the store changed (Outlook restore/merge) */
+    else if (type === "memory") { if (d.label && d.convoId) addSide(d.convoId, "memory", d); kbChanged(); }
+    else if (type === "skills") kbChanged();
     else if (type === "refine") {
       if (d.convoId || S.convoId) addSide(d.convoId || S.convoId, "refine", d, d.id ? "refine:" + d.id : null);
       else toast(d.title || "", function () { openKnowledge("lessons"); });
@@ -662,7 +686,7 @@
     return null;
   }
   function subStatus(s) { return { starting: T("starting", "başlıyor"), running: T("working", "çalışıyor"), idle: T("done", "bitti"), stopped: T("stopped", "durduruldu"), error: T("error", "hata") }[s] || s || ""; }
-  function stripEmoji(t) { return String(t || "").replace(/^\s*(🗜|🧠|✨|🤖|💓|✅|🌙|⚠️|📋|🎯)\s*/u, ""); }
+  function stripEmoji(t) { return String(t || "").replace(/^\s*(?:\p{Extended_Pictographic}️?\s*)+/u, ""); }
   function noteIcon(t) {
     t = String(t || "");
     if (/^\s*🗜/u.test(t)) return "minimize-2"; if (/^\s*🧠/u.test(t)) return "brain"; if (/^\s*✨/u.test(t)) return "sparkles"; if (/^\s*🤖/u.test(t)) return "rocket";
@@ -790,7 +814,7 @@
   function planCardEl(it) {
     return planBody(it, function (a, shown) {
       if (it.done) return; it.done = true; it.answer = shown;
-      if (a.action === "approve") call("plan.approve", { convoId: it.d.convoId || S.convoId, plan: a.plan || null }).then(function () { S.running[S.convoId] = true; renderThread(); syncSend(); }).catch(function (e) { it.done = false; toast(e.message); renderThread(); });
+      if (a.action === "approve") call("plan.approve", { convoId: it.d.convoId || S.convoId, plan: a.plan || null }).then(function (r) { if (r && r.started === false) { it.done = false; toast(T("Could not start — check the model in Settings", "Başlatılamadı — Ayarlar'dan modeli kontrol edin")); } renderThread(); syncSend(); }).catch(function (e) { it.done = false; toast(e.message); renderThread(); });
       else { renderThread(); send(a.text || T("Keep planning: revise the plan.", "Planlamaya devam: planı gözden geçir.")); }
       renderThread();
     });
@@ -901,7 +925,7 @@
       actions: [[T("Close", "Kapat")], [T("Compact now", "Şimdi sıkıştır"), "p", function () {
         if (S.running[cid]) { toast(T("Wait until yaver finishes", "yaver bitirene kadar bekleyin")); return false; }
         toast(T("Compacting…", "Sıkıştırılıyor…"));
-        call("ctx.compact", { convoId: cid }).then(function (r) { if (r && (r.note || r.text || typeof r === "string")) toast(r.note || r.text || r); refreshCtx(cid); if (cid === S.convoId) loadConvo(cid); }).catch(function (e) { toast(e.message); });
+        call("ctx.compact", { convoId: cid }).then(function (r) { if (r && (r.note || r.text || typeof r === "string")) toast(stripEmoji(r.note || r.text || r)); refreshCtx(cid); if (cid === S.convoId) loadConvo(cid); }).catch(function (e) { toast(e.message); });
       }]] });
   }
 
@@ -941,7 +965,7 @@
       o.actions && o.actions.length ? h("div", { class: "sf" }, o.actions.map(function (a) {
         return h("button", { class: "btn " + (a[1] || ""), onclick: function () { var keep = a[2] && a[2]() === false; if (!keep) close(); } }, a[0]);
       })) : null);
-    var rec = { close: close, onClose: o.onClose };
+    var rec = { close: close, onClose: o.onClose, el: sh };
     function close() {
       if (rec.closed) return; rec.closed = true;
       sh.classList.remove("on"); bg.classList.remove("on");
@@ -1020,7 +1044,7 @@
         var pressT = 0, long = false;
         var b = h("button", { class: "citem" + (c.id === S.convoId ? " cur" : "") },
           c.background ? icon("clock", "xs") : icon("message-square", "xs"),
-          h("span", null, c.title || "—", c.snippet ? h("small", null, c.snippet) : null),
+          h("span", null, c.title || "—", c.snippet ? h("small", null, String(c.snippet).replace(/^\[(user|assistant)\]\s*/, "")) : null),
           S.running[c.id] ? h("i", { class: "run" }) : null);
         b.addEventListener("click", function () { if (long) return; closeDrawer(); loadConvo(c.id); });
         b.addEventListener("touchstart", function () { long = false; pressT = setTimeout(function () { long = true; convoMenu(c); }, 520); }, { passive: true });
@@ -1033,9 +1057,17 @@
   }
 
   function convoMenu(c) {
-    var s = sheet({ title: c.title, body: h("div", null,
-      h("button", { class: "opt", onclick: function () { s.close(); editSheet({ title: T("Rename chat", "Sohbeti yeniden adlandır"), value: c.title, save: function (v) { call("convos.rename", { id: c.id, title: v }).then(function () { refreshConvos(); if (c.id === S.convoId) { S.convo.title = v; updateTitle(); } }); } }); } }, icon("pencil", "s"), T("Rename", "Yeniden adlandır")),
-      h("button", { class: "opt", style: "color:var(--bad)", onclick: function () { s.close(); call("convos.delete", { id: c.id }).then(function () { if (c.id === S.convoId) newChat(); refreshConvos(); toast(T("Chat deleted", "Sohbet silindi")); }); } }, icon("trash-2", "s"), T("Delete", "Sil"))) });
+    var s = sheet({ title: c.title || T("Chat", "Sohbet"), body: h("div", null,
+      h("button", { class: "opt", onclick: function () { s.close(); editSheet({ title: T("Rename chat", "Sohbeti yeniden adlandır"), value: c.title, save: function (v) {
+        v = v.trim(); if (!v) { toast(T("Give it a name", "Bir ad verin")); return false; }
+        call("convos.rename", { id: c.id, title: v }).then(function () { refreshConvos(); if (c.id === S.convoId && S.convo) { S.convo.title = v; updateTitle(); } }).catch(function (e) { toast(e.message); });
+      } }); } }, icon("pencil", "s"), T("Rename", "Yeniden adlandır")),
+      h("button", { class: "opt bad", onclick: function () { s.close();
+        sheet({ title: T("Delete this chat?", "Bu sohbet silinsin mi?"), text: c.title, actions: [[T("Cancel", "İptal")], [T("Delete", "Sil"), "danger", function () {
+          if (S.running[c.id]) call("chat.stop", { convoId: c.id }).catch(function () {});
+          call("convos.delete", { id: c.id }).then(function () { if (c.id === S.convoId) newChat(); refreshConvos(); toast(T("Chat deleted", "Sohbet silindi")); }).catch(function (e) { toast(e.message); });
+        }]] });
+      } }, icon("trash-2", "s"), T("Delete", "Sil"))) });
   }
 
   /* ------------------------------------------------------------ pages */
@@ -1094,7 +1126,9 @@
     var box = clear($("#mailbox", p.body));
     if (S.mail.tab === "mail") {
       var q = h("input", { type: "search", placeholder: T("Search mail", "Postalarda ara"), value: S.mail.query });
-      q.addEventListener("keydown", function (e) { if (e.key === "Enter") { S.mail.query = q.value.trim(); loadMail(); q.blur(); } });
+      q.addEventListener("keydown", function (e) { if (e.key === "Enter") { S.mail.query = q.value.trim(); loadMail(true); q.blur(); } });
+      /* clearing the box (its ×, or deleting the text) shows the folder again */
+      q.addEventListener("input", function () { if (!q.value.trim() && S.mail.query) { S.mail.query = ""; loadMail(true); } });
       box.appendChild(h("div", { class: "toolbar" },
         h("button", { class: "select", onclick: function () { optionsSheet(T("Folder", "Klasör"), FOLDERS.map(function (f) { return [f[0], T(f[1], f[2]), f[3]]; }), S.mail.folder, function (v) { S.mail.folder = v; S.mail.query = ""; renderMailShell(); loadMail(); }); } }, folderName(S.mail.folder), icon("chevron-down", "xs")),
         h("label", { class: "search" }, icon("search", "xs"), q)));
@@ -1139,12 +1173,14 @@
       var list2 = clear($("#maillist"));
       if (!S.mail.items.length) { list2.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon("inbox")), h("h3", null, S.mail.query ? T("Nothing found", "Bir şey bulunamadı") : T("No mail here", "Burada posta yok")))); return; }
       S.mail.items.forEach(function (m) {
-        var from = m.from ? (m.from.name || m.from.email) : "?";
+        /* Sent Items / Drafts: who it went to matters, not me as the sender */
+        var outbox = S.mail.folder === "sentitems" || S.mail.folder === "drafts";
+        var from = outbox ? T("To: ", "Kime: ") + (String(m.displayTo || "").trim() || T("(no recipients)", "(alıcı yok)")) : boxName(m.from) || T("(unknown sender)", "(bilinmeyen gönderen)");
         list2.appendChild(swipeRow(m, h("button", { class: "mrow" + (m.read ? "" : " unread"), "data-id": m.id, onclick: function (e) { if (this.dataset.swiped) { e.preventDefault(); return; } m.read = true; this.classList.remove("unread"); openMail(m.id, m); } },
-          avatar(from, m.from && m.from.email),
+          outbox ? avatar(String(m.displayTo || "?").split(/[;,]/)[0]) : avatar(from, m.from && m.from.email),
           h("div", { class: "mc" },
             h("div", { class: "l1" }, h("span", { class: "from" }, from), h("span", { class: "time" }, m.importance === "High" ? icon("octagon-alert", "xs flag") : null, m.attachments ? icon("paperclip", "xs") : null, shortWhen(m.received))),
-            h("div", { class: "subj" }, m.subject),
+            h("div", { class: "subj" }, m.subject || T("(no subject)", "(konu yok)")),
             m.preview ? h("div", { class: "prev" }, m.preview.replace(/\s+/g, " ")) : null))));
       });
     }).catch(function (e) { mailBlocked(e.message); });
@@ -1182,6 +1218,30 @@
     call("mail.respond", { id: id, response: r }).then(function () { toast(T("Response sent", "Yanıt gönderildi")); loadMail(); }).catch(function (e) { toast(e.message); });
   }
 
+  /* a mailbox as the UI shows it: the name, else the address ("" when neither is there) */
+  function boxName(x) { if (!x) return ""; if (typeof x === "string") return x.trim(); return String(x.name || "").trim() || String(x.email || "").trim(); }
+  /* To / Cc of the reading view: names (address on long-press/tooltip), long lists folded; no row at all when empty */
+  function rcptBlock(to, cc) {
+    function line(label, list) {
+      list = (Array.isArray(list) ? list : []).filter(function (x) { return boxName(x); });
+      if (!list.length) return null;
+      var MAX = 4, el = h("div", { class: "rl" }, h("b", null, label), " ");
+      function draw(all) {
+        while (el.childNodes.length > 2) el.removeChild(el.lastChild);
+        (all ? list : list.slice(0, MAX)).forEach(function (x, i) {
+          if (i) el.appendChild(document.createTextNode(", "));
+          var mail = typeof x === "string" ? "" : String(x.email || "").trim();
+          el.appendChild(h("span", { class: "rn", title: mail || null }, boxName(x)));
+        });
+        if (!all && list.length > MAX) { el.appendChild(document.createTextNode(" ")); el.appendChild(h("button", { class: "more", onclick: function () { draw(true); } }, T("+" + (list.length - MAX) + " more", "+" + (list.length - MAX) + " kişi daha"))); }
+      }
+      draw(false);
+      return el;
+    }
+    var a = line(T("To", "Kime"), to), b = line("Cc", cc);
+    return a || b ? h("div", { class: "rcpt" }, a, b) : null;
+  }
+
   function openMail(id, head) {
     closeDrawer();
     var cur = null;
@@ -1191,29 +1251,33 @@
       h("button", { onclick: function () { if (cur) composeSheet("forward", cur); } }, icon("forward", "s"), T("Forward", "İlet")),
       h("button", { onclick: function () { if (cur) deleteMail(cur); } }, icon("trash-2", "s"), T("Delete", "Sil")),
       h("button", { class: "prim", onclick: function () { if (cur) askAbout(cur); } }, icon("sparkles", "s"), T("Ask yaver", "yaver'e sor")));
-    pushPage("mailread", head ? head.subject : T("E-mail", "E-posta"), function (body) {
+    pushPage("mailread", head && head.subject ? head.subject : T("E-mail", "E-posta"), function (body, rec) {
       body.appendChild(h("div", { class: "status", style: "padding:24px 16px" }, h("div", { class: "spin" }), T("Opening…", "Açılıyor…")));
       call("mail.get", { id: id }).then(function (m) {
         cur = m;
         clear(body);
-        var from = m.from ? (m.from.name || m.from.email) : "?";
+        var from = boxName(m.from) || T("(unknown sender)", "(bilinmeyen gönderen)"), fromMail = m.from && m.from.email ? String(m.from.email).trim() : "";
+        if (m.subject) rec.title.firstChild.textContent = m.subject;
         body.appendChild(h("div", { class: "rhead" },
-          h("h2", null, m.subject),
-          h("div", { class: "sender" }, avatar(from, m.from && m.from.email), h("div", { class: "sn" }, h("b", null, from), h("span", null, (m.from && m.from.email ? m.from.email + " — " : "") + longWhen(m.received)))),
-          h("div", { class: "rcpt" }, h("b", null, T("To ", "Kime ")), (m.to || []).map(function (x) { return x.name || x.email; }).join(", "),
-            m.cc && m.cc.length ? [h("br"), h("b", null, "Cc "), m.cc.map(function (x) { return x.name || x.email; }).join(", ")] : null)));
+          h("h2", null, m.subject || T("(no subject)", "(konu yok)")),
+          h("div", { class: "sender" }, avatar(from, fromMail), h("div", { class: "sn" }, h("b", null, from), h("span", null, (fromMail && fromMail !== from ? fromMail + " — " : "") + (m.received ? longWhen(m.received) : "")))),
+          rcptBlock(m.to, m.cc)));
         if (m.invite && m.invite.start) {
-          var st = new Date(m.invite.start).getTime ? Date.parse(m.invite.start) : 0;
-          body.appendChild(h("div", { class: "invite" },
-            h("div", { class: "when" }, icon("calendar", "s"), isNaN(st) ? m.invite.start : longWhen(st)),
-            h("div", { class: "where" }, [m.invite.location, m.invite.organizer].filter(Boolean).join(" — ")),
-            /Cancellation/.test(m.kind) ? null : h("div", { class: "btnrow" },
+          var inv = m.invite, st = Date.parse(inv.start), en = Date.parse(inv.end || ""), cancelled = /Cancellation/.test(m.kind || "");
+          var whenTxt = isNaN(st) ? inv.start : inv.allDay ? new Date(st).toLocaleDateString(loc(), { weekday: "long", day: "numeric", month: "long" }) + " · " + T("All day", "Tüm gün") : longWhen(st) + (!isNaN(en) ? " – " + (sameDay(new Date(st), new Date(en)) ? timeOf(en) : longWhen(en)) : "");
+          var myResp = { Accept: T("You accepted", "Kabul ettiniz"), Tentative: T("You answered maybe", "Belki dediniz"), Decline: T("You declined", "Reddettiniz") }[inv.response];
+          body.appendChild(h("div", { class: "invite" + (cancelled ? " cancelled" : "") },
+            h("div", { class: "when" }, icon(cancelled ? "calendar-x" : "calendar", "s"), h("span", null, whenTxt)),
+            cancelled ? h("div", { class: "where" }, T("This meeting was cancelled.", "Bu toplantı iptal edildi.")) : null,
+            [inv.location, inv.organizer].filter(Boolean).length ? h("div", { class: "where" }, [inv.location, String(inv.organizer || "").replace(/^(.+?)\s*<[^>]*>$/, "$1")].filter(Boolean).join(" — ")) : null,
+            myResp && !cancelled ? h("div", { class: "where" }, icon("check", "xs"), " " + myResp) : null,
+            cancelled ? null : h("div", { class: "btnrow" },
               h("button", { class: "btn sm", onclick: function () { respond(m.id, "decline"); } }, T("Decline", "Reddet")),
               h("button", { class: "btn sm", onclick: function () { respond(m.id, "tentative"); } }, T("Maybe", "Belki")),
               h("button", { class: "btn sm p", onclick: function () { respond(m.id, "accept"); } }, T("Accept", "Kabul")))));
         }
         if (m.files && m.files.length) body.appendChild(h("div", { class: "files" }, m.files.map(function (f) {
-          return h("button", { class: "fileb", onclick: function () { toast(T("Opening ", "Açılıyor: ") + f.name); call("mail.attachment", { id: m.id, attId: f.id, name: f.name }).catch(function (e) { toast(e.message); }); } }, icon("paperclip", "xs"), h("span", null, f.name), h("small", null, bytes(f.size)));
+          return h("button", { class: "fileb", onclick: function () { toast(T("Opening ", "Açılıyor: ") + f.name); call("mail.attachment", { id: m.id, attId: f.id, name: f.name }).catch(function (e) { toast(e.message); }); } }, icon(f.item || /^message\//.test(f.type || "") ? "mail" : "paperclip", "xs"), h("span", null, f.name || T("attachment", "ek")), f.size > 0 ? h("small", null, bytes(f.size)) : null);
         })));
         var bodyEl = h("div", { class: "mbody" });
         linkify(bodyEl, m.body || "");
@@ -1316,26 +1380,42 @@
     var subj = h("input", { type: "text" });
     var body = h("textarea", { rows: kind === "forward" ? 4 : 8, placeholder: kind === "forward" ? T("Add a note (optional) — the original e-mail goes below it", "Not ekleyin (isteğe bağlı) — orijinal e-posta altına eklenir") : T("Write your message", "Mesajınızı yazın") });
     var title = { new: T("New e-mail", "Yeni e-posta"), reply: T("Reply", "Yanıtla"), replyall: T("Reply all", "Tümünü yanıtla"), forward: T("Forward", "İlet") }[kind];
+    /* reply / reply all: Exchange picks the recipients; show who they are (without me) so the user knows */
+    var me = String(((S.state || {}).mail || {}).user || "").toLowerCase();
+    var meU = me.split("\\").pop();
+    var mine = function (x) { var e = String((x && x.email) || "").toLowerCase(); return !!e && !!me && (e === me || (me.indexOf("@") < 0 && e.split("@")[0] === meU)); };
+    var replyTo = !m ? [] : kind === "reply" ? [m.from] : kind === "replyall" ? [m.from].concat(m.to || [], m.cc || []) : [];
+    var seen = {};
+    replyTo = replyTo.filter(function (x) { var k = String((x && (x.email || x.name)) || "").toLowerCase(); if (!boxName(x) || seen[k] || mine(x)) return false; seen[k] = 1; return true; });
     var fields = h("div", null,
       kind === "new" || kind === "forward" ? h("div", { class: "field" }, h("span", null, T("To", "Kime")), to, suggestPeople(to)) : null,
-      kind === "new" ? h("div", { class: "field" }, h("span", null, "Cc"), cc, suggestPeople(cc)) : null,
+      replyTo.length ? h("div", { class: "field" }, h("span", null, T("To", "Kime")), h("div", { class: "rto" }, replyTo.map(boxName).join(", "))) : null,
+      h("div", { class: "field" }, h("span", null, "Cc"), cc, suggestPeople(cc)),
       kind === "new" ? h("label", { class: "field" }, h("span", null, T("Subject", "Konu")), subj) : null,
-      h("label", { class: "field" }, h("span", null, m ? (kind === "forward" ? "FW: " : "RE: ") + m.subject : T("Message", "Mesaj")), body),
+      h("label", { class: "field" }, h("span", null, m ? (/^\s*(re|fw|fwd|ynt|ilt|i̇lt)\s*:/i.test(m.subject || "") && (kind === "forward") === /^\s*(fw|fwd|ilt|i̇lt)\s*:/i.test(m.subject || "") ? m.subject : (kind === "forward" ? "FW: " : "RE: ") + (m.subject || "")) : T("Message", "Mesaj")), body),
       m ? h("details", { class: "quoted", open: kind === "forward" ? true : null }, h("summary", null, (kind === "forward" ? T("Forwarded e-mail", "İletilen e-posta") : T("Original e-mail", "Orijinal e-posta")) + (m.files && m.files.length && kind === "forward" ? T(" · " + m.files.length + " attachment(s) included", " · " + m.files.length + " ek dahil") : "")),
-        h("div", { class: "qh" }, (m.from ? (m.from.name || m.from.email) : "") + (m.received ? " — " + longWhen(m.received) : "")),
+        h("div", { class: "qh" }, (boxName(m.from)) + (m.received ? " — " + longWhen(m.received) : "")),
         h("div", { class: "qb" }, String(m.body || "").slice(0, 2500) + (String(m.body || "").length > 2500 ? "…" : ""))) : null);
+    var busy = false, s = null;
     function go(sendIt) {
-      var args = { kind: kind, ref: m ? m.id : "", to: to.value.split(/[;,]/).map(function (s) { return s.trim(); }).filter(Boolean), cc: cc.value.split(/[;,]/).map(function (s) { return s.trim(); }).filter(Boolean), subject: subj.value, body: body.value, send: sendIt };
+      if (busy) return false;
+      var args = { kind: kind, ref: m ? m.id : "", to: to.value.split(/[;,]/).map(function (x) { return x.trim(); }).filter(Boolean), cc: cc.value.split(/[;,]/).map(function (x) { return x.trim(); }).filter(Boolean), subject: subj.value, body: body.value, send: sendIt };
       if ((kind === "new" || kind === "forward") && !args.to.length) { toast(T("Add a recipient", "Alıcı ekleyin")); return false; }
-      call("mail.compose", args).then(function () { toast(sendIt ? T("Sent", "Gönderildi") : T("Saved in Drafts", "Taslaklara kaydedildi")); }).catch(function (e) { toast(e.message); });
+      if (kind === "new" && sendIt && !args.subject.trim() && !args.body.trim()) { toast(T("Write a subject or a message", "Bir konu ya da mesaj yazın")); return false; }
+      /* the sheet stays open until the server took it — a failed send must not lose what was written */
+      busy = true; s.el.classList.add("busy");
+      toast(sendIt ? T("Sending…", "Gönderiliyor…") : T("Saving…", "Kaydediliyor…"));
+      call("mail.compose", args).then(function () { busy = false; s.close(); toast(sendIt ? T("Sent", "Gönderildi") : T("Saved in Drafts", "Taslaklara kaydedildi")); })
+        .catch(function (e) { busy = false; s.el.classList.remove("busy"); toast(e.message); });
+      return false;
     }
-    sheet({ title: title, body: fields, actions: [[T("Save draft", "Taslak"), "", function () { return go(false); }], [T("Send", "Gönder"), "p", function () { return go(true); }]] });
+    s = sheet({ title: title, body: fields, actions: [[T("Save draft", "Taslak"), "", function () { return go(false); }], [T("Send", "Gönder"), "p", function () { return go(true); }]] });
     setTimeout(function () { (kind === "new" || kind === "forward" ? to : body).focus(); }, 260);
   }
 
   /* ------------------------------------------------------------ settings */
   function refreshState() { return call("state").then(function (s) { S.state = s; S.lang = s.lang; return s; }); }
-  function setCfg(key, value) { return call("cfg.set", { key: key, value: value }).then(function (s) { S.state = s; S.lang = s.lang; if (topPage() === "settings") renderSettings(); return s; }).catch(function (e) { toast(e.message); }); }
+  function setCfg(key, value) { return call("cfg.set", { key: key, value: value }).then(function (s) { S.state = s; S.lang = s.lang; if (topPage() === "settings") renderSettings(); return s; }).catch(function (e) { toast(e.message); if (topPage() === "settings") renderSettings(); return null; }); }
 
   function openSettings(focus) {
     closeDrawer();
@@ -1344,7 +1424,7 @@
   }
 
   function row(o) {
-    var b = h(o.toggle != null ? "div" : "button", { class: "row", onclick: o.toggle != null ? function () { var on = !sw.classList.contains("on"); sw.classList.toggle("on", on); o.onToggle(on); } : o.onclick, role: o.toggle != null ? "switch" : null, "aria-checked": o.toggle != null ? String(!!o.toggle) : null },
+    var b = h(o.toggle != null ? "div" : "button", { class: "row", onclick: o.toggle != null ? function () { var on = !sw.classList.contains("on"); sw.classList.toggle("on", on); b.setAttribute("aria-checked", String(on)); o.onToggle(on); } : o.onclick, role: o.toggle != null ? "switch" : null, "aria-checked": o.toggle != null ? String(!!o.toggle) : null },
       o.icon ? h("div", { class: "tile", style: o.tint ? "background:" + o.tint + ";color:#fff" : null }, icon(o.icon)) : null,
       h("div", { class: "rt" }, h("b", null, o.label), o.sub ? h("span", { class: o.wrap ? "wrap" : "" }, o.sub) : null),
       o.check != null ? h("div", { class: "check " + (o.check ? "ok" : "no") }, icon(o.check ? "check" : "circle-help", "xs")) : null,
@@ -1429,7 +1509,7 @@
     ]));
 
     wrap.appendChild(group(T("Assistant", "Asistan"), [
-      row({ icon: "languages", label: T("Answer language", "Cevap dili"), value: { auto: T("Like my message", "Mesajım gibi"), tr: "Türkçe", en: "English" }[st.langSetting] || st.langSetting, onclick: function () { optionsSheet(T("Answer language", "Cevap dili"), [["auto", T("Same as my message", "Mesajımla aynı")], ["tr", "Türkçe"], ["en", "English"]], st.langSetting, function (v) { setCfg("lang", v).then(function () { renderShell(); }); }); } }),
+      row({ icon: "languages", label: T("Answer language", "Cevap dili"), value: { auto: T("Like my message", "Mesajım gibi"), tr: "Türkçe", en: "English" }[st.langSetting] || st.langSetting, onclick: function () { optionsSheet(T("Answer language", "Cevap dili"), [["auto", T("Same as my message", "Mesajımla aynı")], ["tr", "Türkçe"], ["en", "English"]], st.langSetting, function (v) { setCfg("lang", v).then(function (st2) { if (!st2) return; document.documentElement.lang = S.lang; renderShell(); S.pages.forEach(function (pg) { if (pg.name === "settings") pg.title.firstChild.textContent = T("Settings", "Ayarlar"); }); }); }); } }),
       row({ icon: "user", label: T("Personality", "Kişilik"), sub: st.persona ? st.persona : T("Default", "Varsayılan"), onclick: function () { editSheet({ title: T("Personality", "Kişilik"), text: T("Who yaver is and how it talks. Leave empty for the default.", "yaver kimdir ve nasıl konuşur. Varsayılan için boş bırakın."), multi: true, value: st.persona, placeholder: st.personaDefault, save: function (v) { setCfg("persona", v); } }); } }),
       row({ icon: "shield-check", label: T("Ask before actions", "İşlemlerden önce sor"), sub: T("Deleting, moving, overwriting. Sending mail is always confirmed.", "Silme, taşıma, üzerine yazma. E-posta gönderimi her zaman onaylatılır."), wrap: true, toggle: st.askRisky, onToggle: function (on) { setCfg("askRisky", on); } }),
       row({ icon: "brain", label: T("Memory", "Hafıza"), sub: T("What yaver knows about you", "yaver'in sizin hakkınızda bildikleri"), onclick: function () { openKnowledge(); } }),
@@ -1467,8 +1547,8 @@
     ]));
 
     wrap.appendChild(group(T("Web search", "Web arama"), [
-      row({ icon: "search", label: "Brave Search", value: masked(W.hasBrave), onclick: function () { editSheet({ title: "Brave Search API", secret: true, save: function (v) { setCfg("braveKey", v.trim()); } }); } }),
-      row({ icon: "search", label: "Tavily", value: masked(W.hasTavily), onclick: function () { editSheet({ title: "Tavily API", secret: true, save: function (v) { setCfg("tavilyKey", v.trim()); } }); } }),
+      row({ icon: "search", label: "Brave Search", value: masked(W.hasBrave), onclick: function () { keySheet("Brave Search API", "braveKey", W.hasBrave); } }),
+      row({ icon: "search", label: "Tavily", value: masked(W.hasTavily), onclick: function () { keySheet("Tavily API", "tavilyKey", W.hasTavily); } }),
       row({ icon: "globe", label: "SearXNG", sub: W.searxng || T("Your own search server", "Kendi arama sunucunuz"), onclick: function () { editSheet({ title: "SearXNG", value: W.searxng, type: "url", save: function (v) { setCfg("searxng", v.trim()); } }); } })
     ], T("Search works without keys (DuckDuckGo, Bing, Mojeek from the phone). Keys make it faster and more reliable.", "Arama anahtarsız çalışır (telefondan DuckDuckGo, Bing, Mojeek). Anahtarlar daha hızlı ve güvenilir yapar.")));
 
@@ -1485,6 +1565,12 @@
     loadExtras();
   }
 
+  /* a secret: an empty Save keeps the stored key; "Remove" clears it */
+  function keySheet(title, key, has) {
+    editSheet({ title: title, secret: true, placeholder: has ? "••••••••" : "", help: T("Stored encrypted on this phone.", "Bu telefonda şifreli saklanır."),
+      save: function (v) { if (v.trim()) setCfg(key, v.trim()).then(function (st) { if (st) toast(T("Saved", "Kaydedildi")); }); },
+      extra: has ? [[T("Remove", "Kaldır"), "", function () { setCfg(key, ""); }]] : [] });
+  }
   function diagSheet() {
     var box = h("div", { class: "res", style: "display:block;white-space:pre-wrap;font-size:11.5px;line-height:1.45;max-height:52vh;overflow:auto" }, T("Loading…", "Yükleniyor…"));
     sheet({ title: T("Diagnostic log", "Tanılama günlüğü"), text: T("Share it to show what happened. Passwords, codes and keys are never written to it.", "Ne olduğunu göstermek için paylaşın. Şifreler, kodlar ve anahtarlar asla yazılmaz."), body: box,
@@ -1533,7 +1619,7 @@
       var shown = all.filter(function (m) { return !f || m.toLowerCase().indexOf(f) >= 0; }).slice(0, 300);
       if (!shown.length) list.appendChild(h("div", { class: "status" }, T("No model matches.", "Eşleşen model yok.")));
       shown.forEach(function (m) {
-        list.appendChild(h("button", { class: "opt", onclick: function () { s.close(); setCfg(key, m).then(function () { toast(T("Model: ", "Model: ") + m); if (topPage() === "setup") renderSetup(); }); } },
+        list.appendChild(h("button", { class: "opt", onclick: function () { s.close(); setCfg(key, m).then(function (st) { if (!st) return; toast(T("Model: ", "Model: ") + m); if (topPage() === "setup") renderSetup(); }); } },
           h("div", null, m.split("/").pop(), h("small", null, m.indexOf("/") > 0 ? m.split("/")[0] + (/:free$/.test(m) ? T(" · free", " · ücretsiz") : "") : "")), (S.state.llm[key] === m) ? icon("check", "s c") : null));
       });
     }
@@ -1848,10 +1934,11 @@
           t.source && t.source.mailId ? h("span", { class: "tchip none" }, icon("mail", "xs")) : null),
         t.updated ? h("div", { class: "tupd" }, T("Updated ", "Güncellendi ") + shortWhen(t.updated) + (t.lastBy === "yaver" || (!t.lastBy && t.by === "yaver") ? T(" by yaver", " · yaver") : "")) : null),
       manual ? h("div", { class: "tmove" },
-        h("button", { class: "ib sm", "aria-label": T("Move up", "Yukarı taşı"), disabled: i === 0 || null, onclick: function () { moveTask(t.id, i - 1); } }, icon("move-up", "xs")),
-        h("button", { class: "ib sm", "aria-label": T("Move down", "Aşağı taşı"), disabled: i === all.length - 1 || null, onclick: function () { moveTask(t.id, i + 1); } }, icon("move-down", "xs"))) : null);
+        h("button", { class: "ib sm", "aria-label": T("Move up", "Yukarı taşı"), disabled: i === 0 || null, onclick: function () { moveTask(t.id, all[i - 1].id); } }, icon("move-up", "xs")),
+        h("button", { class: "ib sm", "aria-label": T("Move down", "Aşağı taşı"), disabled: i === all.length - 1 || null, onclick: function () { moveTask(t.id, all[i + 2] ? all[i + 2].id : ""); } }, icon("move-down", "xs"))) : null);
   }
-  function moveTask(id, index) { call("tasks.move", taskArgs({ id: id, index: index })).then(renderTasks).catch(function (e) { toast(e.message); }); }
+  /* by neighbour id, not index: the board's order includes tasks this filter hides (done ones under "Open") */
+  function moveTask(id, beforeId) { call("tasks.move", taskArgs({ id: id, before: beforeId || "" })).then(renderTasks).catch(function (e) { toast(e.message); }); }
   function updTask(id, patch) {
     var a = { id: id }; for (var k2 in patch) a[k2] = patch[k2];
     return call("tasks.update", a).then(function (t) { loadTasks(); refreshOverdue(); return t; }).catch(function (e) { toast(e.message); });
@@ -1980,7 +2067,7 @@
     });
   }
   function setX(method, args, after) {
-    return call(method, args).then(function (r) { if (after) after(r); return loadExtras(); }).catch(function (e) { toast(e.message); });
+    return call(method, args).then(function (r) { if (after) after(r); return loadExtras(); }).catch(function (e) { toast(e.message); return loadExtras(); });
   }
   function renderExtras() {
     var p = S.pages.filter(function (x) { return x.name === "settings"; })[0]; if (!p) return;
@@ -2013,7 +2100,7 @@
       box.appendChild(group("System-1", [
         row({ icon: "cpu", label: T("Decision model", "Karar modeli"), sub: T("Fast model for routine decisions in the loop", "Döngüdeki rutin kararlar için hızlı model"), value: beName, onclick: function () { optionsSheet("System-1", backends, be, function (v) { setX("s1.set", { backend: v }); }); } }),
         remote ? row({ icon: "globe", label: T("Address", "Adres"), sub: cfg.url || "", onclick: function () { editSheet({ title: T("System-1 address", "System-1 adresi"), type: "url", value: cfg.url, save: function (v) { setX("s1.set", { url: v.trim() }); } }); } }) : null,
-        remote ? row({ icon: "key-round", label: T("API key", "API anahtarı"), value: masked(cfg.keySet), onclick: function () { editSheet({ title: "System-1 API", secret: true, help: T("Stored encrypted on this phone.", "Bu telefonda şifreli saklanır."), save: function (v) { setX("s1.set", { key: v.trim() }); } }); } }) : null,
+        remote ? row({ icon: "key-round", label: T("API key", "API anahtarı"), value: masked(cfg.keySet), onclick: function () { editSheet({ title: "System-1 API", secret: true, placeholder: cfg.keySet ? "••••••••" : "", help: T("Stored encrypted on this phone.", "Bu telefonda şifreli saklanır."), save: function (v) { if (v.trim()) setX("s1.set", { key: v.trim() }); }, extra: cfg.keySet ? [[T("Remove", "Kaldır"), "", function () { setX("s1.set", { key: "" }); }]] : [] }); } }) : null,
         remote ? row({ icon: "cpu", label: T("Model", "Model"), value: cfg.model || "", onclick: function () { editSheet({ title: T("System-1 model", "System-1 modeli"), value: cfg.model, save: function (v) { setX("s1.set", { model: v.trim() }); } }); } }) : null,
         be !== "off" ? row({ icon: "gauge", label: T("Confidence needed", "Gereken güven"), sub: T("Below this, the decision goes to the LLM or you", "Altında karar LLM'e veya size gider"), value: String(cfg.threshold || 0.7), onclick: function () { optionsSheet(T("Confidence threshold", "Güven eşiği"), ["0.5", "0.6", "0.7", "0.8", "0.9"].map(function (n) { return [n, n]; }), String(cfg.threshold || 0.7), function (v) { setX("s1.set", { threshold: +v }); }); } }) : null,
         row({ icon: "sliders-horizontal", label: T("Decision points", "Karar noktaları"), sub: T("Which gates System-1 handles", "System-1'in üstlendiği kararlar"), onclick: gatesSheet }),
@@ -2115,19 +2202,22 @@
 
   /* ------------------------------------------------------------ memory, schedule */
   function openSchedule() {
-    pushPage("schedule", T("Reminders and tasks", "Hatırlatmalar ve görevler"), function (body) {
+    closeDrawer();
+    if (topPage() === "schedule") return;
+    pushPage("schedule", T("Reminders and scheduled tasks", "Hatırlatmalar ve zamanlanmış görevler"), function (body) {
+      body.appendChild(loading());
       function draw() {
         call("schedule.list").then(function (all) {
-          clear(body);
+          clear(body); all = all || [];
           if (!all.length) { body.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon("alarm-clock")), h("h3", null, T("Nothing scheduled", "Planlanmış bir şey yok")), h("p", null, T("Ask yaver, e.g. “every weekday at 8:30 summarize my unread mail” or “remind me at 4 pm to call Ayşe”.", "yaver'e söyleyin, ör. “hafta içi her gün 8:30'da okunmamış postalarımı özetle” ya da “16:00'da Ayşe'yi aramamı hatırlat”.")))); return; }
           body.appendChild(group("", all.sort(function (a, b) { return a.next - b.next; }).map(function (o) {
             var rep = o.kind === "task" ? (o.daily ? T("Every day at ", "Her gün ") + o.daily : T("Every " + o.every + " min", "Her " + o.every + " dakikada")) : T("Once", "Bir kez");
             return row({ icon: o.kind === "task" ? "refresh-cw" : "bell", label: o.title, sub: rep + " — " + T("next ", "sonraki ") + longWhen(o.next), onclick: function () {
               sheet({ title: o.title, body: h("dl", { class: "dl" }, h("dt", null, T("Next", "Sonraki")), h("dd", null, longWhen(o.next)), o.prompt ? [h("dt", null, T("yaver will", "yaver")), h("dd", null, o.prompt)] : null, o.text ? [h("dt", null, T("Note", "Not")), h("dd", null, o.text)] : null),
-                actions: [[T("Close", "Kapat")], [T("Cancel it", "İptal et"), "danger", function () { call("schedule.cancel", { id: o.id }).then(draw); }]] });
+                actions: [[T("Close", "Kapat")], [T("Cancel it", "İptal et"), "danger", function () { call("schedule.cancel", { id: o.id }).then(function () { toast(T("Cancelled", "İptal edildi")); draw(); }).catch(function (e) { toast(e.message); }); }]] });
             } });
           })));
-        });
+        }).catch(function (e) { errorView(clear(body), e); });
       }
       draw();
     });
