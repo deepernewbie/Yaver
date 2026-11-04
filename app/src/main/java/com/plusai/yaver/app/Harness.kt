@@ -146,6 +146,38 @@ Return JSON only:
 
     fun rev(): Int = load().optInt("rev", 0)
 
+    /** Global lessons (all kinds) for the Outlook backup, so another phone learns the same. */
+    fun exportGlobal(): JSONArray = JSONArray().also { out ->
+        val st = load()
+        for (k in KINDS) for (e in objs(entries(st, k))) if (s(e, "scope") == "global") out.put(JSONObject(e.toString()).put("kind", k))
+    }
+
+    /** Replaces the global lessons with [arr] (live sync); conversation-local lessons stay. */
+    fun replaceGlobal(arr: JSONArray) {
+        val st = load()
+        for (k in KINDS) { val en = entries(st, k); for (e in objs(en)) if (s(e, "scope") == "global") en.remove(s(e, "id")) }
+        for (i in 0 until arr.length()) { val e = arr.optJSONObject(i) ?: continue; val k = s(e, "kind").takeIf { it in KINDS } ?: continue; val id = s(e, "id"); if (id.isEmpty()) continue
+            entries(st, k).put(id, JSONObject(e.toString()).put("scope", "global").put("session", JSONObject.NULL)) }
+        save(st)
+    }
+
+    /** Adds the backed-up global lessons that are not here yet (by id, or by the same title in the same kind). Returns how many were added. */
+    fun importGlobal(arr: JSONArray?): Int {
+        if (arr == null || arr.length() == 0) return 0
+        val st = load(); var n = 0
+        for (i in 0 until arr.length()) {
+            val e = arr.optJSONObject(i) ?: continue
+            val k = s(e, "kind").takeIf { it in KINDS } ?: continue
+            val id = s(e, "id"); if (id.isEmpty()) continue
+            val en = entries(st, k)
+            if (en.has(id) || objs(en).any { s(it, "title").equals(s(e, "title"), true) }) continue
+            en.put(id, JSONObject(e.toString()).put("scope", "global").put("session", JSONObject.NULL))
+            n++
+        }
+        if (n > 0) { save(st); Diag.i("harness", "restored $n global lessons from the Outlook backup") }
+        return n
+    }
+
     fun entries(st: JSONObject, kind: String): JSONObject = st.getJSONObject("entries").optJSONObject(kind) ?: JSONObject().also { st.getJSONObject("entries").put(kind, it) }
 
     fun all(st: JSONObject): List<JSONObject> = KINDS.flatMap { objs(entries(st, it)) }

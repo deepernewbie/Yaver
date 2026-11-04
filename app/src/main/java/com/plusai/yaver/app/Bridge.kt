@@ -264,9 +264,9 @@ object Bridge {
                 .put("body", msg.body).put("invite", msg.invite ?: JSONObject.NULL)
                 .put("files", JSONArray(msg.files.filter { !(it.inline && it.type.startsWith("image/")) }.map { JSONObject().put("id", it.id).put("name", it.name).put("type", it.type).put("size", it.size) }))
         }
-        "mail.markRead" -> { Mail.use { it.markRead(a.str("id"), a.optBoolean("read", true)) }; true }
-        "mail.remove" -> { Mail.use { it.remove(a.str("id"), false) }; true }
-        "mail.move" -> { Mail.use { it.move(a.str("id"), a.str("folder")) }; true }
+        "mail.markRead" -> { Mail.use { it.markRead(a.str("id"), a.optBoolean("read", true)) }; try { MailIndex.markRead(a.str("id"), a.optBoolean("read", true)) } catch (_: Throwable) {}; true }
+        "mail.remove" -> { Mail.use { it.remove(a.str("id"), false) }; try { MailIndex.forget(a.str("id")) } catch (_: Throwable) {}; true }
+        "mail.move" -> { Mail.use { it.move(a.str("id"), a.str("folder")) }; try { MailIndex.forget(a.str("id")) } catch (_: Throwable) {}; true }
         "mail.compose" -> Mail.use { it.compose(a.str("kind").ifEmpty { "new" }, a.str("ref"), a.list("to"), a.list("cc"), a.str("subject"), a.optString("body"), a.optBoolean("send")) }
         "mail.attachment" -> {
             val att = Mail.use { it.attachment(a.str("attId")) }
@@ -348,6 +348,7 @@ object Bridge {
             JSONObject().put("autoCompact", CtxCfg.autoCompact).put("compactAt", CtxCfg.compactAt).put("keepTurns", CtxCfg.keepTurns).put("window", CtxCfg.window)
         }
         "ctx.stats" -> if (a.str("convoId").isEmpty() || a.str("convoId") == "_new") JSONObject().put("autoCompact", CtxCfg.autoCompact).put("compactAt", CtxCfg.compactAt).put("keepTurns", CtxCfg.keepTurns).put("window", CtxCfg.window).put("windowSource", if (CtxCfg.window > 0) "set" else "").put("budget", Compactor.budget()) else Compactor.stats(convo(a))
+        "mail.photo" -> MailPhotos.get(a.str("email")) ?: JSONObject.NULL
         "people.search" -> {
             val q = a.str("q")
             val out = JSONArray(); val seen = HashSet<String>()
@@ -362,6 +363,7 @@ object Bridge {
                 ?: try { val m = Mail.use { it.get(id) }; JSONObject().put("subject", m.h.subject).put("from", m.h.from?.let { it.name.ifEmpty { it.email } } ?: "") } catch (e: Throwable) { JSONObject() }
         }
         "followups.clear" -> { FollowUps.clear(a.str("convoId")); true }
+        "ctx.clear" -> JSONObject().put("note", clearContext(a.str("convoId")))
         "ctx.compact" -> {
             val c = convo(a)
             if (runs.containsKey(c.id)) throw IllegalStateException(Y.t("Stop the running task first", "Önce çalışan işi durdurun"))
@@ -398,6 +400,24 @@ object Bridge {
     private fun learnState() = JSONObject().put("learn", LearnSettings.learn).put("every", Harness.every()).put("followups", FollowUps.enabled)
         .put("sleepLog", JSONArray(Learn.sleepLog().take(10))).put("failures", Learn.failures().size)
 
+    /**
+     * /clear (as in the original): yaver forgets the earlier messages of this chat; they stay visible, dimmed,
+     * behind a divider. Todos and follow-ups go, an active goal is paused.
+     */
+    private fun clearContext(convoId: String): String {
+        if (runs.containsKey(convoId)) return Y.t("Stop the running task first", "Önce çalışan işi durdurun")
+        val c = Convos.load(convoId) ?: return Y.t("Conversation not found", "Sohbet bulunamadı")
+        if (c.messages.length() == 0 || c.summaryUpTo >= c.messages.length()) return Y.t("The context is already empty", "Bağlam zaten boş")
+        c.messages.put(JSONObject().put("role", "assistant").put("content", "").put("local", true).put("divider", true).put("ts", System.currentTimeMillis()))
+        c.summary = ""; c.summaryUpTo = c.messages.length()
+        try { Compactor.forget(c.id) } catch (_: Throwable) {}
+        try { Planning.onContextCleared(c) } catch (_: Throwable) {}
+        try { FollowUps.clear(c.id) } catch (_: Throwable) {}
+        Convos.save(c)
+        Diag.i("ctx", "context cleared in ${c.id}")
+        return Y.t("Context cleared — yaver no longer sees the earlier messages", "Bağlam temizlendi — yaver önceki mesajları artık görmüyor")
+    }
+
     /** Slash commands typed in the composer. Returns {note?, send?, started?}: [send] is sent by the UI as the user's message. */
     private fun command(convoId: String, text: String): JSONObject {
         val out = JSONObject()
@@ -430,6 +450,7 @@ object Bridge {
             "subagents" -> out.put("note", Children.command(convoId, rest))
             "btw" -> SideQuestion.command(convoId, rest)?.let { out.put("note", it) }
             "today" -> out.put("send", MailPlus.dailyPlanPrompt())
+            "clear" -> out.put("note", clearContext(convoId))
             else -> out.put("send", text)
         }
         return out

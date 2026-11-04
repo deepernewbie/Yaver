@@ -211,7 +211,7 @@ object MailPlus {
             try { (onDailyPlan ?: { ctx, p, l -> AgentService.runBackground(ctx, p, l) }).invoke(c, dailyPlanPrompt(), label) } catch (e: Throwable) { Diag.e("mailx", "daily plan", e) }
         }
         try {
-            if (OSync.mode() != "off" && (osyncChecked == 0L || System.currentTimeMillis() - osyncChecked > 15 * 60000)) { osyncChecked = System.currentTimeMillis(); OSync.check() }
+            if (OSync.mode() != "off" && (osyncChecked == 0L || System.currentTimeMillis() - osyncChecked > 5 * 60000)) { osyncChecked = System.currentTimeMillis(); OSync.check() }
             else if (OSync.on()) OSync.push()
         } catch (e: Throwable) { Diag.e("osync", "background", e) }
     }
@@ -957,13 +957,17 @@ object OSync {
 
     private fun localSkillCount(): Int = try { skillsDir()?.listFiles()?.count { it.isDirectory && File(it, "SKILL.md").isFile } ?: 0 } catch (e: Throwable) { 0 }
 
+    /** Tells this phone apart from another phone of the same model. */
+    private fun installId(): String = Prefs.get("installId", "").ifEmpty { java.lang.Long.toString((Math.random() * 1e12).toLong(), 36).take(6).also { Prefs.put("installId", it) } }
+
     fun indexData(): JSONObject {
         val b = TaskBoard.load()
         val mm = try { memMetaExport?.invoke() } catch (e: Throwable) { null } ?: JSONObject().put("items", JSONObject()).put("trash", JSONArray()).put("turns", 0)
-        return JSONObject().put("kind", "index").put("v", 1).put("savedAt", System.currentTimeMillis()).put("device", ("${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (yaver Android)").take(80))
+        return JSONObject().put("kind", "index").put("v", 1).put("savedAt", System.currentTimeMillis()).put("device", ("${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (yaver Android ${installId()})").take(80))
             .put("people", JSONArray(b.people.toList())).put("seq", b.seq).put("taskIds", JSONArray(b.tasks.map { it.id }))
             .put("memory", JSONObject().put("memory", JSONArray(Memory.entries("notes"))).put("user", JSONArray(Memory.entries("user"))))
             .put("memMeta", mm).put("skills", skillsData())
+            .put("lessons", try { Harness.exportGlobal() } catch (e: Throwable) { JSONArray() })
     }
 
     private fun strs(a: JSONArray?): List<String> = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
@@ -977,6 +981,8 @@ object OSync {
         l.addAll(strs(mem.optJSONArray("user")).map { "• " + it.replace("\n", "\n  ") })
         val sk = x.optJSONArray("skills")
         l.add(""); l.add("Skills: ${(0 until (sk?.length() ?: 0)).joinToString(", ") { sk!!.optJSONObject(it)?.optString("dir") ?: "" }.ifEmpty { "—" }}")
+        val ls = x.optJSONArray("lessons")
+        if (ls != null && ls.length() > 0) { l.add(""); l.add("Lessons:"); for (i in 0 until ls.length()) ls.optJSONObject(i)?.let { l.add("• [" + it.optString("kind") + "] " + it.optString("title")) } }
         l.add(""); l.add("yaver-data: " + b64enc(x.toString()))
         return l.joinToString("\n")
     }
@@ -1043,7 +1049,7 @@ object OSync {
                 val items = mm.optJSONObject("items") ?: JSONObject()
                 val pinned = items.keys().asSequence().count { items.optJSONObject(it)?.optBoolean("pinned") == true }
                 val hx = hash(JSONArray().put(x.optJSONArray("people")).put(x.optInt("seq")).put(x.optJSONArray("taskIds")).put(x.optJSONObject("memory"))
-                    .put(items.length()).put(mm.optJSONArray("trash")?.length() ?: 0).put(pinned).put(x.optJSONArray("skills")))
+                    .put(items.length()).put(mm.optJSONArray("trash")?.length() ?: 0).put(pinned).put(x.optJSONArray("skills")).put(x.optJSONArray("lessons")))
                 if (hx != st.optString("idxHash") || st.optString("idxId").isEmpty()) {
                     var idr: Pair<String, String>? = null
                     val subject = "yaver · memory & board backup (do not delete)"
@@ -1114,6 +1120,8 @@ object OSync {
                 Y.t("Here ${what.joinToString(" and ")} ${if (what.size > 1) "are" else "is"} empty, but the Outlook backup (saved ${MxText.relTime(saved)}) has them.",
                     "Burada ${what.joinToString(" ve ")} boş; ama Outlook yedeğinde (${MxText.relTime(saved)} kaydedilmiş) var."), "warn", mapOf("tasks" to false))
         }
+        // 2b) live memory: Outlook is the shared store — another phone's memory, lessons and skills flow in (three-way merge, deletions too)
+        if (on() && !memPaused && rIx != null) try { liveMerge(rIx, st) } catch (e: Exception) { Diag.e("osync", "live merge", e) }
         // 3) edits made in Outlook → yaver
         val changedList = ArrayList<String>()
         for (r in rTasks) {
@@ -1140,7 +1148,10 @@ object OSync {
         // 4) tasks in Outlook that are not on this board (another device, or created in Outlook)
         val mapped = m.keys().asSequence().mapNotNull { m.optJSONObject(it)?.optString("itemId") }.toSet()
         val unknown = rTasks.filter { it.itemId !in mapped }.map { it to remoteTask(it) }.filter { (_, t) -> !(t.id.isNotEmpty() && (t.id in localIds || t.id in deleted)) }
-        if (unknown.isNotEmpty() && card == null) {
+        if (unknown.isNotEmpty() && on()) {
+            val n = importTasks(unknown)
+            if (n > 0) note(Y.t("🔄 $n task${if (n == 1) "" else "s"} came from Outlook (another device or Outlook itself).", "🔄 Outlook'tan $n görev geldi (başka cihaz ya da Outlook)."))
+        } else if (unknown.isNotEmpty() && card == null) {
             cardUnknown = unknown
             prompt("import", "", "${unknown.size} task${if (unknown.size == 1) "" else "s"} in Outlook are not on this board",
                 "Found in the Outlook “yaver” folder: ${unknown.take(4).joinToString(", ") { "“" + it.second.title.take(40) + "”" }}${if (unknown.size > 4) "…" else ""}. They may come from another device or were created in Outlook.",
@@ -1159,6 +1170,73 @@ object OSync {
         if (mode() == "ask") offerEnable(true)
         else if (on() && !paused) push()
         changed()
+    }
+
+    /** Keeps x when both sides have it, or when one side added it since the last sync; a side that removed it since then wins. */
+    private fun merge3(local: List<String>, remote: List<String>, base: List<String>?): List<String> {
+        val f = { x: String -> MxText.memFold(x) }
+        val L = local.map(f).toSet(); val R = remote.map(f).toSet(); val B = base?.map(f)?.toSet()
+        val out = ArrayList<String>(); val seen = HashSet<String>()
+        fun keep(k: String) = (k in L && k in R) || B == null || (k in L && k !in B) || (k in R && k !in B)
+        for (x in local + remote) { val k = f(x); if (k in seen) continue; seen.add(k); if (keep(k)) out.add(x) }
+        return out
+    }
+
+    private fun lessonsMerge(local: JSONArray, remote: JSONArray, base: JSONObject?): JSONArray {
+        fun map(a: JSONArray) = (0 until a.length()).mapNotNull { a.optJSONObject(it) }.associateBy { it.optString("id") }
+        val L = map(local); val R = map(remote)
+        val out = JSONArray()
+        for (id in (L.keys + R.keys).toSet()) {
+            val l = L[id]; val r = R[id]; val inB = base?.has(id) == true
+            val pick = when {
+                l != null && r != null -> if (r.optString("updated_at") > l.optString("updated_at")) r else l
+                l != null -> if (base == null || !inB) l else null      // only here: new here, or deleted on the other phone
+                r != null -> if (base == null || !inB) r else null      // only there: new there, or deleted here
+                else -> null
+            }
+            if (pick != null) out.put(pick)
+        }
+        return out
+    }
+
+    /** Merges the other phones' memory, lessons and skills from the Outlook index into this phone, then remembers what was merged. */
+    private fun liveMerge(rIx: JSONObject, st: JSONObject) {
+        val rSaved = rIx.optLong("savedAt"); val myDevice = indexData().optString("device")
+        val base = st.optJSONObject("memBase")
+        val fromOther = rIx.optString("device") != myDevice && rSaved > st.optLong("memSeenAt")
+        if (!fromOther && base != null) return
+        val rMem = rIx.optJSONObject("memory") ?: JSONObject()
+        val added = ArrayList<String>()
+        val newBase = JSONObject()
+        for ((local, remoteKey) in listOf("notes" to "memory", "user" to "user")) {
+            val cur = Memory.entries(local).toList()
+            val merged = merge3(cur, strs(rMem.optJSONArray(remoteKey)), base?.optJSONArray(remoteKey)?.let { strs(it) })
+            if (merged.map { MxText.memFold(it) } != cur.map { MxText.memFold(it) }) {
+                val plus = merged.count { m -> cur.none { MxText.memFold(it) == MxText.memFold(m) } }
+                val minus = cur.count { c -> merged.none { MxText.memFold(it) == MxText.memFold(c) } }
+                Memory.set(local, merged)
+                if (plus > 0) added.add("+$plus ${if (local == "user") "about you" else "memory"}")
+                if (minus > 0) added.add("−$minus ${if (local == "user") "about you" else "memory"}")
+            }
+            newBase.put(remoteKey, JSONArray(merged))
+        }
+        rIx.optJSONObject("memMeta")?.let { mm -> try { memMetaImport?.invoke(mm) } catch (_: Throwable) {} }
+        val rLessons = rIx.optJSONArray("lessons")
+        if (rLessons != null) {
+            val cur = Harness.exportGlobal()
+            val merged = lessonsMerge(cur, rLessons, base?.optJSONObject("lessons"))
+            if (merged.toString().length != cur.toString().length || merged.length() != cur.length()) { Harness.replaceGlobal(merged); added.add("lessons ${merged.length()}") }
+            newBase.put("lessons", JSONObject().also { o -> for (i in 0 until merged.length()) merged.optJSONObject(i)?.let { o.put(it.optString("id"), it.optString("updated_at")) } })
+        }
+        val skMiss = skillsMissing(rIx); val dir = try { skillsDir() } catch (e: Throwable) { null }
+        if (skMiss.isNotEmpty() && dir != null) {
+            for (sk in skMiss) { val files = sk.optJSONObject("files") ?: continue
+                for (rel in files.keys()) try { val f = File(File(dir, sk.optString("dir")), rel); if (!f.canonicalPath.startsWith(dir.canonicalPath)) continue; f.parentFile?.mkdirs(); f.writeText(files.optString(rel)) } catch (_: Exception) {} }
+            added.add("+${skMiss.size} skills"); MailPlus.event("skills")
+        }
+        st.put("memBase", newBase); st.put("memSeenAt", maxOf(rSaved, st.optLong("memSeenAt")))
+        saveBoard()
+        if (added.isNotEmpty() && fromOther) { note("🔄 " + Y.t("Synced from ${rIx.optString("device").ifEmpty { "another device" }}: ", "${rIx.optString("device").ifEmpty { "başka cihaz" }} ile eşitlendi: ") + added.joinToString(" · ")); MailPlus.event("memory"); Diag.i("osync", "live merge: ${added.joinToString(", ")}") }
     }
 
     fun importTasks(list: List<Pair<RemoteItem, BoardTask>>): Int {
@@ -1225,6 +1303,8 @@ object OSync {
             }
             ix?.optJSONObject("memMeta")?.let { mm -> try { memMetaImport?.invoke(mm) } catch (_: Throwable) {} }
             msg.add("${(mem!!.optJSONArray("memory")?.length() ?: 0) + (mem.optJSONArray("user")?.length() ?: 0)} memory entries")
+            val nl = try { Harness.importGlobal(ix?.optJSONArray("lessons")) } catch (e: Throwable) { 0 }
+            if (nl > 0) msg.add("$nl lessons")
             MailPlus.event("memory")
         }
         if (skills && ix != null) {

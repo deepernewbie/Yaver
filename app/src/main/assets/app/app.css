@@ -678,3 +678,17 @@ button.kcard:active { background: var(--sunken); }
 .quoted summary { cursor: pointer; font-weight: 600; font-size: 13.5px; color: var(--muted); }
 .quoted .qh { margin-top: 8px; font-size: 13px; font-weight: 600; color: var(--ink); }
 .quoted .qb { margin-top: 6px; font-size: 13px; line-height: 1.5; color: var(--muted); white-space: pre-wrap; max-height: 34vh; overflow: auto; }
+/* cleared context: divider + dimmed earlier messages */
+.ctxdiv { display: flex; align-items: center; gap: 10px; margin: 18px 0 8px; color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.ctxdiv::before, .ctxdiv::after { content: ""; flex: 1; border-top: 1px dashed var(--line); }
+.thread .forgotten { opacity: .45; }
+/* mail list: swipe actions */
+.mswipe { position: relative; overflow: hidden; background: var(--bg); transition: height .25s ease; }
+.mswipe .mrow { position: relative; z-index: 1; background: var(--bg); touch-action: pan-y; will-change: transform; }
+.mswipe .mact { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; gap: 6px; padding: 0 22px; color: #fff; font-weight: 700; font-size: 14px; opacity: 0; }
+.mswipe .mact.left { left: 0; right: 0; background: var(--violet); justify-content: flex-start; }
+.mswipe .mact.right { right: 0; left: 0; background: #E5484D; justify-content: flex-end; border: 0; }
+.mswipe.l .mact.left, .mswipe.r .mact.right { opacity: 1; }
+.mswipe.far .mact.right span { font-size: 15px; }
+.mswipe.gone { opacity: .0; }
+.av.photo { background-size: cover; background-position: center; color: transparent; }

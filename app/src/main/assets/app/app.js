@@ -83,7 +83,27 @@
   }
   function initials(name) { var p = String(name || "?").replace(/[<>"]/g, "").trim().split(/\s+/); return ((p[0] || "?")[0] + (p.length > 1 ? p[p.length - 1][0] : "")).toUpperCase(); }
   var AV = ["#5B4FE0", "#0F8B8D", "#C2410C", "#2563EB", "#9333EA", "#15803D", "#B45309", "#BE185D", "#0E7490", "#4D7C0F"];
-  function avatar(name, email) { var s = String(email || name || ""), n = 0; for (var i = 0; i < s.length; i++) n = (n * 31 + s.charCodeAt(i)) >>> 0; return h("div", { class: "av", style: "background:" + AV[n % AV.length] }, initials(name || email)); }
+  /* directory photos (the original's Photos): cached per address, fetched two at a time */
+  var PHOTO = {}, PQ = [], PRUN = 0;
+  function paintPhoto(el, d) { el.style.backgroundImage = 'url("' + d + '")'; el.classList.add("photo"); el.textContent = ""; }
+  function photoNext() {
+    while (PRUN < 2 && PQ.length) {
+      var job = PQ.shift(); if (PHOTO[job.e] !== undefined && PHOTO[job.e] !== null) { if (PHOTO[job.e]) job.els.forEach(function (el) { paintPhoto(el, PHOTO[job.e]); }); continue; }
+      PRUN++;
+      (function (job) {
+        call("mail.photo", { email: job.e }).then(function (d) { if (d !== null && d !== undefined) PHOTO[job.e] = d; if (d) job.els.forEach(function (el) { if (el.isConnected) paintPhoto(el, d); }); })
+          .catch(function () {}).then(function () { PRUN--; photoNext(); });
+      })(job);
+    }
+  }
+  function wantPhoto(el, email) {
+    var e = String(email || "").trim().toLowerCase(); if (!/@/.test(e)) return;
+    if (PHOTO[e]) { paintPhoto(el, PHOTO[e]); return; }
+    if (PHOTO[e] === "") return;
+    var j = PQ.filter(function (x) { return x.e === e; })[0]; if (j) j.els.push(el); else PQ.push({ e: e, els: [el] });
+    photoNext();
+  }
+  function avatar(name, email) { var s = String(email || name || ""), n = 0; for (var i = 0; i < s.length; i++) n = (n * 31 + s.charCodeAt(i)) >>> 0; var el = h("div", { class: "av", style: "background-color:" + AV[n % AV.length] }, initials(name || email)); if (email) wantPhoto(el, email); return el; }
   function bytes(n) { return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) + " KB" : (n / 1048576).toFixed(1) + " MB"; }
 
   /* ------------------------------------------------------------ markdown */
@@ -259,6 +279,11 @@
     msgs.forEach(function (m, idx) {
       flushSide(idx);
       if (m.harness) return;
+      if (m.divider) {
+        trace = null; turn = null;
+        th.appendChild(h("div", { class: "ctxdiv" }, h("span", null, T("Context cleared", "Bağlam temizlendi") + (m.ts ? " · " + timeOf(m.ts) : ""))));
+        return;
+      }
       if (m.role === "user") {
         if (isInternalUser(m)) { trace = null; ensureTurn().appendChild(h("div", { class: "chiprow" }, h("span", { class: "nchip" }, icon(/goal round/.test(m.content) ? "target" : /heartbeat/.test(m.content) ? "heart-pulse" : "sparkle", "xs"), h("span", null, String(m.display || m.content).replace(/^(\(Reply in [^)]*\) )?/, "").slice(0, 160))))); return; }
         trace = null; turn = null; lastText = null;
@@ -306,6 +331,8 @@
       t.appendChild(h("div", { class: "status", id: "lstatus" }, h("div", { class: "spin" }), h("span", null, S.liveStatus || (S.liveTool ? stepInfo(S.liveTool.name, S.liveTool.args).label + "…" : (S.live ? T("Writing…", "Yazıyor…") : (waitText() || T("Thinking…", "Düşünüyor…")))))));
     }
     // collapse long traces
+    var divs = th.querySelectorAll(".ctxdiv");
+    if (divs.length) { var dv = divs[divs.length - 1], el = dv.previousElementSibling; while (el) { el.classList.add("forgotten"); el = el.previousElementSibling; } }
     th.querySelectorAll(".trace").forEach(function (tr) {
       var steps = tr.querySelectorAll(".step:not(.run)");
       if (steps.length > 4) {
@@ -453,6 +480,8 @@
     ["/goal", "Keep working on an objective in rounds (pause | resume | clear)", "Bir hedef üzerinde turlarla çalış (pause | resume | clear)", "target"],
     ["/autonomous", "Work without asking (on [limits] | off | status)", "Sormadan çalış (on [sınırlar] | off | status)", "rocket"],
     ["/compact", "Compact the context now", "Bağlamı şimdi sıkıştır", "minimize-2"],
+    ["/clear", "Clear the context: yaver forgets the earlier messages", "Bağlamı temizle: yaver önceki mesajları unutur", "eraser"],
+    ["/new", "Start a new conversation", "Yeni sohbet başlat", "square-pen"],
     ["/refine", "Learn a lesson from this chat", "Bu sohbetten ders çıkar", "sparkles"],
     ["/harness", "Show what yaver learned", "yaver'in öğrendiklerini göster", "graduation-cap"],
     ["/heartbeat", "Repeat an instruction (e.g. 30m check mail)", "Bir talimatı tekrarla (ör. 30m postaya bak)", "heart-pulse"],
@@ -462,6 +491,7 @@
     ["/today", "What's on today", "Bugün neler var", "sun"]
   ];
   function runCommand(text) {
+    if (/^\/new\b/.test(text)) { newChat(true); return; }
     var cid = S.convoId === "_new" ? "" : S.convoId;
     addSide(S.convoId || "_new", "cmd", { text: text });
     call("command", { convoId: cid, text: text }).then(function (r) {
@@ -470,7 +500,7 @@
       if (r.note) addSide(r.convoId || S.convoId, "note", { text: r.note });
       if (r.started) { var sc = r.convoId || S.convoId; if (sc && sc !== "_new") { S.running[sc] = true; loadConvo(sc); refreshConvos(); } }
       else if (r.send) send(r.send, { label: r.label, internal: r.internal });
-      if (/^\/compact\b/.test(text)) refreshCtx(S.convoId);
+      if (/^\/(compact|clear)\b/.test(text)) { refreshCtx(S.convoId); if (/^\/clear\b/.test(text) && S.convoId && S.convoId !== "_new") { if (S.fu) delete S.fu[S.convoId]; loadConvo(S.convoId); } }
     }).catch(function (e) { addSide(S.convoId, "note", { text: e.message, bad: true }); });
   }
   function hideHints() { var b = $("#hints"); if (b) b.classList.add("hidden"); }
@@ -1110,12 +1140,12 @@
       if (!S.mail.items.length) { list2.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon("inbox")), h("h3", null, S.mail.query ? T("Nothing found", "Bir şey bulunamadı") : T("No mail here", "Burada posta yok")))); return; }
       S.mail.items.forEach(function (m) {
         var from = m.from ? (m.from.name || m.from.email) : "?";
-        list2.appendChild(h("button", { class: "mrow" + (m.read ? "" : " unread"), onclick: function () { openMail(m.id, m); } },
+        list2.appendChild(swipeRow(m, h("button", { class: "mrow" + (m.read ? "" : " unread"), "data-id": m.id, onclick: function (e) { if (this.dataset.swiped) { e.preventDefault(); return; } m.read = true; this.classList.remove("unread"); openMail(m.id, m); } },
           avatar(from, m.from && m.from.email),
           h("div", { class: "mc" },
             h("div", { class: "l1" }, h("span", { class: "from" }, from), h("span", { class: "time" }, m.importance === "High" ? icon("octagon-alert", "xs flag") : null, m.attachments ? icon("paperclip", "xs") : null, shortWhen(m.received))),
             h("div", { class: "subj" }, m.subject),
-            m.preview ? h("div", { class: "prev" }, m.preview.replace(/\s+/g, " ")) : null)));
+            m.preview ? h("div", { class: "prev" }, m.preview.replace(/\s+/g, " ")) : null))));
       });
     }).catch(function (e) { mailBlocked(e.message); });
   }
@@ -1203,9 +1233,52 @@
     el.appendChild(document.createTextNode(text.slice(last)));
   }
 
+  /* delete at once (it only moves to Deleted Items): the row disappears now, the server catches up */
+  function removeMailNow(id) {
+    var row = document.querySelector('.mswipe[data-id="' + CSS.escape(id) + '"]');
+    var idx = S.mail.items.findIndex(function (x) { return x.id === id; }), item = idx >= 0 ? S.mail.items[idx] : null;
+    if (idx >= 0) S.mail.items.splice(idx, 1);
+    if (row) { row.style.height = row.offsetHeight + "px"; row.classList.add("gone"); requestAnimationFrame(function () { row.style.height = "0px"; }); setTimeout(function () { row.remove(); }, 260); }
+    call("mail.remove", { id: id }).then(function () { toast(T("Moved to Deleted Items", "Silinmiş Öğeler'e taşındı")); })
+      .catch(function (e) { toast(e.message.replace(/^SIGNIN:/, "")); if (item) { S.mail.items.splice(Math.max(0, idx), 0, item); } loadMail(); });
+  }
+  function setMailRead(m, read, rowBtn) {
+    m.read = read; if (rowBtn) rowBtn.classList.toggle("unread", !read);
+    call("mail.markRead", { id: m.id, read: read }).catch(function (e) { m.read = !read; if (rowBtn) rowBtn.classList.toggle("unread", read); toast(e.message.replace(/^SIGNIN:/, "")); });
+  }
+  /* iPhone/Outlook-style swipe: left = delete (red), right = read/unread */
+  function swipeRow(m, btn) {
+    var wrap = h("div", { class: "mswipe", "data-id": m.id },
+      h("div", { class: "mact left" }, icon(m.read ? "mail" : "mail-open", "s"), h("span", null, m.read ? T("Unread", "Okunmadı") : T("Read", "Okundu"))),
+      h("button", { class: "mact right", "aria-label": T("Delete", "Sil"), onclick: function () { removeMailNow(m.id); } }, icon("trash-2", "s"), h("span", null, T("Delete", "Sil"))),
+      btn);
+    var x0 = 0, y0 = 0, dx = 0, mode = "", open = 0, W = 0, OPEN = 92;
+    function setX(x, anim) { btn.style.transition = anim ? "transform .2s ease" : "none"; btn.style.transform = "translateX(" + x + "px)"; wrap.classList.toggle("l", x > 0); wrap.classList.toggle("r", x < 0); }
+    btn.addEventListener("touchstart", function (e) { var t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; dx = 0; mode = ""; W = wrap.offsetWidth; delete btn.dataset.swiped; }, { passive: true });
+    btn.addEventListener("touchmove", function (e) {
+      var t = e.touches[0], mx = t.clientX - x0, my = t.clientY - y0;
+      if (!mode) { if (Math.abs(mx) > 10 && Math.abs(mx) > Math.abs(my) * 1.3) mode = "h"; else if (Math.abs(my) > 10) mode = "v"; }
+      if (mode !== "h") return;
+      e.preventDefault(); dx = open + mx; btn.dataset.swiped = "1";
+      if (dx > W * 0.6) dx = W * 0.6;
+      setX(dx, false);
+      wrap.classList.toggle("far", dx < -W * 0.45);
+    }, { passive: false });
+    btn.addEventListener("touchend", function () {
+      if (mode !== "h") { if (open) { open = 0; setX(0, true); } return; }
+      setTimeout(function () { delete btn.dataset.swiped; }, 350);
+      if (dx < -W * 0.45) { setX(-W, true); removeMailNow(m.id); return; }
+      if (dx < -60) { open = -OPEN; setX(-OPEN, true); return; }
+      if (dx > W * 0.28) { setMailRead(m, !m.read, btn); wrap.querySelector(".mact.left span").textContent = m.read ? T("Unread", "Okunmadı") : T("Read", "Okundu"); }
+      open = 0; setX(0, true);
+    });
+    return wrap;
+  }
+
   function deleteMail(m) {
-    sheet({ title: T("Delete this e-mail?", "Bu e-posta silinsin mi?"), text: T("It moves to Deleted Items.", "Silinmiş Öğeler'e taşınır."),
-      actions: [[T("Cancel", "İptal")], [T("Delete", "Sil"), "danger", function () { call("mail.remove", { id: m.id }).then(function () { toast(T("Moved to Deleted Items", "Silinmiş Öğeler'e taşındı")); popPage(); loadMail(); }).catch(function (e) { toast(e.message); }); }]] });
+    popPage();
+    if (S.mail.items.some(function (x) { return x.id === m.id; })) removeMailNow(m.id);
+    else call("mail.remove", { id: m.id }).then(function () { toast(T("Moved to Deleted Items", "Silinmiş Öğeler'e taşındı")); }).catch(function (e) { toast(e.message.replace(/^SIGNIN:/, "")); });
   }
 
   function askAbout(m) {
@@ -1430,6 +1503,7 @@
   }
   function chatMenu() {
     var s = sheet({ body: h("div", null,
+      h("button", { class: "opt", onclick: function () { s.close(); if (!S.convoId || S.convoId === "_new") { toast(T("The context is already empty", "Bağlam zaten boş")); return; } runCommand("/clear"); } }, icon("eraser", "s"), h("div", null, T("Clear the context", "Bağlamı temizle"), h("small", null, T("yaver forgets the earlier messages; they stay visible", "yaver önceki mesajları unutur; ekranda kalırlar")))),
       h("button", { class: "opt", onclick: function () { s.close(); exportConvo(); } }, icon("download", "s"), h("div", null, T("Export this chat", "Bu sohbeti dışa aktar"), h("small", null, T("Readable copy + full record for troubleshooting", "Okunabilir kopya + sorun giderme için tam kayıt")))),
       h("button", { class: "opt", onclick: function () { s.close(); diagSheet(); } }, icon("file-text", "s"), h("div", null, T("Diagnostic log", "Tanılama günlüğü"))),
       h("button", { class: "opt", onclick: function () { s.close(); newChat(true); } }, icon("square-pen", "s"), h("div", null, T("New chat", "Yeni sohbet")))) });

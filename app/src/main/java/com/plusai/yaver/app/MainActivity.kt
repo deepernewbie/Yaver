@@ -86,10 +86,14 @@ class MainActivity : Activity() {
 
     override fun onNewIntent(intent: Intent?) { super.onNewIntent(intent); handleIntent(intent) }
 
+    private var lastSyncCheck = 0L
+
     override fun onResume() {
         super.onResume()
         resumedNow = true
         Bridge.host = this
+        // live memory: pick up what another phone learned (at most once a minute)
+        if (System.currentTimeMillis() - lastSyncCheck > 60_000L) { lastSyncCheck = System.currentTimeMillis(); Y.bg { try { if (OSync.on() && Mail.connected) OSync.check() } catch (e: Throwable) { Diag.e("osync", "resume check", e) } } }
         PermGate.activity = this
         Bridge.emit("resume", Bridge.state())
         Learn.touch()

@@ -61,7 +61,8 @@ object WebOwa {
     }
 
     /** POSTs (or GETs when body is null) from the mail server's own page. Redirects are not followed: code 0 + redirected=true. */
-    fun send(origin: String, url: String, headers: Map<String, String>, body: String?, timeoutMs: Int, cancel: Cancel?): Resp {
+    /** binary=true: the answer text is "<content-type>\n<base64>". */
+    fun send(origin: String, url: String, headers: Map<String, String>, body: String?, timeoutMs: Int, cancel: Cancel?, binary: Boolean = false): Resp {
         ensure(origin)
         val id = seq.incrementAndGet()
         val latch = CountDownLatch(1)
@@ -72,7 +73,8 @@ object WebOwa {
         if (body != null) opts.put("body", body)
         val js = "(function(){var o=$opts;fetch(${JSONObject.quote(url)},o).then(function(r){" +
             "if(r.type==='opaqueredirect'){YaverOwa.done($id,0,true,r.url,'');return;}" +
-            "return r.text().then(function(t){YaverOwa.done($id,r.status,r.redirected,r.url,t);});" +
+            (if (binary) "return r.arrayBuffer().then(function(b){var u=new Uint8Array(b),s='',k=0;for(;k<u.length;k+=32768)s+=String.fromCharCode.apply(null,u.subarray(k,k+32768));YaverOwa.done($id,r.status,r.redirected,r.url,(r.headers.get('content-type')||'')+'\\n'+btoa(s));});"
+            else "return r.text().then(function(t){YaverOwa.done($id,r.status,r.redirected,r.url,t);});") +
             "}).catch(function(e){YaverOwa.done($id,-1,false,'',String(e&&e.message||e));});})();"
         Y.main.post { try { val v = view ?: throw IllegalStateException("web view closed"); v.evaluateJavascript(js, null) } catch (e: Throwable) { box[0] = Resp(-1, false, "", e.message ?: ""); latch.countDown() } }
         try {
