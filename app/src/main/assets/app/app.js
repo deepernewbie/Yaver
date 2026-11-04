@@ -2139,8 +2139,12 @@
             else mset("briefAt", v);
           });
         } }),
-        row({ icon: "cloud", label: T("Outlook Tasks backup", "Outlook Görevler yedeği"), sub: osyncText(O.kind ? O : { kind: mode === "off" ? "off" : "idle", mode: mode }), value: { on: T("On", "Açık"), ask: T("Ask", "Sor"), off: T("Off", "Kapalı") }[mode], onclick: function () {
+        row({ icon: "cloud", label: T("Outlook sync (shared memory)", "Outlook eşitleme (ortak hafıza)"), sub: osyncText(O.kind ? O : { kind: mode === "off" ? "off" : "idle", mode: mode }), value: { on: T("On", "Açık"), ask: T("Ask", "Sor"), off: T("Off", "Kapalı") }[mode], onclick: function () {
           optionsSheet(T("Outlook Tasks backup", "Outlook Görevler yedeği"), [["on", T("Keep a copy in Outlook", "Outlook'ta kopya tut")], ["ask", T("Ask me", "Bana sor")], ["off", T("Off", "Kapalı")]], mode, function (v) { setX("osync.mode", { mode: v }); });
+        } }),
+        row({ icon: "refresh-cw", label: T("Get it from Outlook now", "Outlook'tan şimdi al"), sub: T("Bring in the tasks, memory, lessons and skills saved in Outlook (also by the web version) and keep them in sync", "Outlook'a kaydedilmiş görevleri, hafızayı, dersleri ve becerileri (web sürümünün kaydettikleri dahil) al ve eşit tut"), wrap: true, onclick: function () {
+          toast(T("Reading the Outlook “yaver” folder…", "Outlook “yaver” klasörü okunuyor…"));
+          call("osync.pull").then(function (r) { if (r && r.note) sheet({ title: T("Outlook", "Outlook"), text: r.note, actions: [[T("OK", "Tamam"), "p"]] }); loadExtras(); }).catch(function (e) { toast(String(e.message || e).replace(/^SIGNIN:/, "")); });
         } }),
         row({ icon: "shield-check", label: T("Confirm work changes", "İş değişikliklerini onaylat"), sub: T("Approval cards for task, calendar and mail changes", "Görev, takvim ve posta değişiklikleri için onay kartı"), wrap: true, toggle: MX.workConfirm !== false, onToggle: function (on) { mset("workConfirm", on); } }),
         row({ icon: "search", label: T("Mail search index", "Posta arama dizini"), value: T((MX.indexMax || 1500) + " per folder", "klasör başına " + (MX.indexMax || 1500)), onclick: function () { optionsSheet(T("Mails kept in the search index", "Arama dizininde tutulan posta"), ["500", "1500", "3000", "5000"].map(function (n) { return [n, T(n + " per folder", "klasör başına " + n)]; }), String(MX.indexMax || 1500), function (v) { mset("indexMax", +v); }); } })

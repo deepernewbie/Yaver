@@ -906,14 +906,53 @@ object OSync {
                 if (data == null && parsed.data != null) data = parsed.data
                 val r = RemoteItem(idp.first, idp.second, Xml.txt(it, "Subject"), Xml.txt(it, "Status"), dueFrom(Xml.txt(it, "DueDate")), Exchange.parseTime(Xml.txt(it, "LastModifiedTime")),
                     Xml.kids(it, "String").map { s -> s.textContent }, data, parsed, bodyText)
-                if (data?.optString("kind") == "index" || "yaver-index" in r.categories) {
+                if (data?.optString("kind") == "index" || "yaver-index" in r.categories || r.subject.startsWith("yaver · memory & board backup")) {
                     val cur = out.index
                     if (cur == null || (data != null && cur.data != null && data.optLong("savedAt") > cur.data.optLong("savedAt"))) out.index = r
                 } else out.tasks.add(r)
             }
             i += 50
         }
+        // some servers (web mail) leave out the hidden data and the body with the IdOnly shape: read those again with the default shape
+        val bare = (out.tasks + listOfNotNull(out.index)).filter { it.data == null && it.body.isBlank() }
+        if (bare.isNotEmpty()) try {
+            for (part in bare.chunked(20)) {
+                val doc = MxEws.call("<m:GetItem><m:ItemShape><t:BaseShape>Default</t:BaseShape><t:BodyType>Text</t:BodyType></m:ItemShape><m:ItemIds>${part.joinToString("") { "<t:ItemId Id=\"${Xml.esc(it.itemId)}\"/>" }}</m:ItemIds></m:GetItem>", 120000)
+                for (el in Xml.kids(doc, "Task")) {
+                    val idp = MxText.itemId(el) ?: continue
+                    val old = bare.firstOrNull { it.itemId == idp.first } ?: continue
+                    val body = Xml.txt(el, "Body"); val parsed = parseBody(body)
+                    val nr = RemoteItem(old.itemId, old.ck, old.subject.ifEmpty { Xml.txt(el, "Subject") }, old.status.ifEmpty { Xml.txt(el, "Status") }, old.due, old.modified, old.categories, parsed.data, parsed, body)
+                    if (out.index === old) out.index = nr else { val k = out.tasks.indexOf(old); if (k >= 0) out.tasks[k] = nr }
+                    if (nr.data?.optString("kind") == "index" && out.index !== nr) { out.tasks.remove(nr); if (out.index == null || (out.index!!.data?.optLong("savedAt") ?: 0L) < nr.data.optLong("savedAt")) out.index = nr }
+                }
+            }
+        } catch (e: Exception) { Diag.e("osync", "re-read with the default shape", e) }
+        val withData = out.tasks.count { it.data != null }
+        Diag.i("osync", "Outlook yaver folder: ${out.tasks.size} tasks ($withData with yaver data), index ${if (out.index == null) "missing" else if (out.index!!.data == null) "found but unreadable" else "ok · memory ${out.index!!.data!!.optJSONObject("memory")?.optJSONArray("memory")?.length() ?: 0}+${out.index!!.data!!.optJSONObject("memory")?.optJSONArray("user")?.length() ?: 0}, skills ${out.index!!.data!!.optJSONArray("skills")?.length() ?: 0}, lessons ${out.index!!.data!!.optJSONArray("lessons")?.length() ?: 0}, from ${out.index!!.data!!.optString("device")}"}")
         return out
+    }
+
+    /**
+     * "Get it from Outlook now": brings in everything the folder has that this phone lacks — tasks, memory, lessons,
+     * skills (nothing here is deleted) — and turns sync on, so the phones share it from now on.
+     */
+    fun pull(): String {
+        if (!Cfg.mailConfigured) return Y.t("Company mail is not set up.", "Kurum postası ayarlı değil.")
+        val fid = folder(false) ?: return Y.t("There is no “yaver” folder in your Outlook Tasks yet.", "Outlook Görevler'de henüz “yaver” klasörü yok.")
+        val remote = fetchRemote(fid)
+        val m = map()
+        val mapped = m.keys().asSequence().mapNotNull { m.optJSONObject(it)?.optString("itemId") }.toSet()
+        val localIds = TaskBoard.load().tasks.map { it.id }.toSet()
+        val local = TaskBoard.load().tasks.map { MxText.memFold(it.title) }.toSet()
+        val newTasks = remote.tasks.filter { r -> r.itemId !in mapped && remoteTask(r).let { t -> !(t.id.isNotEmpty() && t.id in localIds && MxText.memFold(t.title) in local) } }
+        paused = false; memPaused = false
+        if (MailPlusCfg.outlookSync != "on") MailPlusCfg.outlookSync = "on"
+        restore(Remote(ArrayList(newTasks), remote.index))
+        val ix = remote.index?.data
+        return if (remote.index == null && remote.tasks.isEmpty()) Y.t("The Outlook “yaver” folder is empty.", "Outlook “yaver” klasörü boş.")
+        else if (ix == null && remote.index != null) Y.t("The memory item in Outlook could not be read (see the diagnostic log).", "Outlook'taki hafıza kaydı okunamadı (tanılama günlüğüne bakın).")
+        else Y.t("Synced with Outlook: ${newTasks.size} new tasks; memory, lessons and skills merged. Sync is on.", "Outlook ile eşitlendi: ${newTasks.size} yeni görev; hafıza, dersler ve beceriler birleştirildi. Eşitleme açık.")
     }
 
     /** A task as Outlook has it now: hidden data first, then the encoded body line, then the readable fields. */
@@ -1401,6 +1440,7 @@ object OSync {
         "osync.state" -> state()
         "osync.mode" -> { MailPlusCfg.outlookSync = a.str("mode").takeIf { it in setOf("ask", "on", "off") } ?: "ask"; if (on()) push(); state() }
         "osync.push" -> { push(); state() }
+        "osync.pull" -> JSONObject(state().toString()).put("note", pull())
         "osync.check" -> { check(true); JSONObject(state().toString()).put("found", card != null) }
         "osync.restoreOffer" -> {
             val fid = folder(false)
