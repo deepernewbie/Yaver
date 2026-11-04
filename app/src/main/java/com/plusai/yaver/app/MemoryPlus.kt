@@ -367,7 +367,7 @@ object MemoryX {
     }
 
     // ---------------- tiers: DRAFT (trial) → ACTIVE ----------------
-    private fun promptCeil(): Int = max(4000, (Cfg.contextTokens * 0.25 * 3.5).roundToInt())
+    private fun promptCeil(): Int = max(4000, (minOf(Compactor.budget(), 120000) * 0.25 * 3.5).roundToInt())
     private fun todayKey(): String { val c = java.util.Calendar.getInstance(); return "${c.get(java.util.Calendar.YEAR)}-${c.get(java.util.Calendar.MONTH) + 1}-${c.get(java.util.Calendar.DAY_OF_MONTH)}" }
     @Synchronized fun dayCount(): Int = meta().optInt("dayCount", 0)
     /** Counts a new day of use (true when today is a new one). noteUse() calls it after every turn. */

@@ -241,12 +241,12 @@ object MailPlus {
 
         Tools.add(Tool(
             "calendar",
-            "The user's company calendar (Exchange). Times are local unless they end in Z. Actions: list (start, end or days; default today), free (find free slots: start/end or days, duration_minutes, work hours 09:00–18:00), create (subject, start, end, location, body, attendees; invites are sent only after the user confirms), respond (id, response accept|tentative|decline, message; the user confirms), cancel (id of your own meeting; the user confirms).",
+            "The user's company calendar (Exchange). Times are local unless they end in Z. Actions: list (start, end or days; default today; query = words that must appear in the subject, location or organizer — use it instead of listing months of events; meetings show when their invitation arrived), free (find free slots: start/end or days, duration_minutes, work hours 09:00–18:00), create (subject, start, end, location, body, attendees; invites are sent only after the user confirms), respond (id, response accept|tentative|decline, message; the user confirms), cancel (id of your own meeting; the user confirms).",
             P.props(
                 "action" to P.s("list | free | create | respond | cancel", "list", "free", "create", "respond", "cancel"),
                 "start" to P.s("Date or date-time, e.g. 2026-09-25 or 2026-09-25T14:00"), "end" to P.s("Date or date-time"), "days" to P.n("Number of days from start (default 1)"),
                 "duration_minutes" to P.n("For free: meeting length (default 30)"), "subject" to P.s("For create"), "location" to P.s("For create"), "body" to P.s("For create: agenda"),
-                "attendees" to P.arr("For create: attendee emails"), "id" to P.s("Event id"), "response" to P.s("accept | tentative | decline", "accept", "tentative", "decline"), "message" to P.s("For respond: optional note")
+                "attendees" to P.arr("For create: attendee emails"), "id" to P.s("Event id"), "query" to P.s("For list: filter words (subject, location, organizer), e.g. a person's name or a project"), "response" to P.s("accept | tentative | decline", "accept", "tentative", "decline"), "message" to P.s("For respond: optional note")
             ),
             listOf("action")
         ) { a, ctx -> calendar(a, ctx) })
@@ -507,7 +507,8 @@ object MailPlus {
         val s = Exchange.parseTime(e.start); val en = Exchange.parseTime(e.end)
         return "- id=${e.id}\n  ${if (e.allDay) java.text.DateFormat.getDateInstance().format(Date(s)) + " all day" else "${dayLabel(s)} ${MailTools.hm(s)}–${MailTools.hm(en)}"} · ${e.subject}" +
             (if (e.location.isNotEmpty()) " · " + e.location else "") + (e.organizer?.let { " · organizer " + MxText.who(it) } ?: "") +
-            (if (e.cancelled) " · CANCELLED" else "") + (if (e.meeting && e.response.isNotEmpty()) " · my response: " + e.response else "")
+            (if (e.cancelled) " · CANCELLED" else "") + (if (e.meeting && e.response.isNotEmpty()) " · my response: " + e.response else "") +
+            (if (e.meeting && e.created.isNotEmpty()) " · invite arrived " + MailTools.fmt(Exchange.parseTime(e.created)) else "")
     }
 
     private fun calendar(a: JSONObject, ctx: ToolCtx): String {
@@ -516,8 +517,13 @@ object MailPlus {
         when (a.str("action")) {
             "list" -> {
                 val (s, e) = dayRange(a, 1)
-                val evs = Mail.use(c) { it.events(s, e, c) }
-                return if (evs.isNotEmpty()) "${evs.size} event(s) ${full(s)} → ${full(e)}:\n" + evs.joinToString("\n") { evLine(it) } else "No events between ${full(s)} and ${full(e)}."
+                val all = Mail.use(c) { it.events(s, e, c) }
+                // query: keep only events whose subject, location or organizer match every word (Turkish-insensitive)
+                val q = a.str("query")
+                val words = MxText.fold(q).split(Regex("\\s+")).filter { it.length > 1 }
+                val evs = if (words.isEmpty()) all else all.filter { ev -> val hay = MxText.fold(ev.subject + " " + ev.location + " " + (ev.organizer?.let { it.name + " " + it.email } ?: "")); words.all { hay.contains(it) } }
+                val head = if (words.isEmpty()) "${evs.size} event(s)" else "${evs.size} of ${all.size} event(s) matching \"$q\""
+                return if (evs.isNotEmpty()) "$head ${full(s)} → ${full(e)}:\n" + evs.joinToString("\n") { evLine(it) } else if (words.isNotEmpty()) "No events matching \"$q\" between ${full(s)} and ${full(e)} (${all.size} other events in that range)." else "No events between ${full(s)} and ${full(e)}."
             }
             "free" -> {
                 val (s, e) = dayRange(a, 1)

@@ -461,7 +461,7 @@ class MailBox(val name: String, val email: String) {
 class MailHeader(val id: String, val ck: String, val subject: String, val from: MailBox?, val received: String, val read: Boolean, val attachments: Boolean, val importance: String, val preview: String)
 class MailFile(val id: String, val name: String, val type: String, val size: Long, val inline: Boolean)
 class MailMessage(val h: MailHeader, val kind: String, val to: List<MailBox>, val cc: List<MailBox>, val body: String, val files: List<MailFile>, val invite: JSONObject?)
-class CalEvent(val id: String, val subject: String, val start: String, val end: String, val location: String, val organizer: MailBox?, val allDay: Boolean, val response: String, val cancelled: Boolean, val meeting: Boolean)
+class CalEvent(val id: String, val subject: String, val start: String, val end: String, val location: String, val organizer: MailBox?, val allDay: Boolean, val response: String, val cancelled: Boolean, val meeting: Boolean, val created: String = "")
 
 /** Mailbox operations (ported from yaver's EWS object). Works the same over EWS or Outlook web. */
 class Exchange(val t: MailTransport) {
@@ -643,12 +643,12 @@ class Exchange(val t: MailTransport) {
     }
 
     fun events(start: Long, end: Long, cancel: Cancel? = null): List<CalEvent> {
-        val props = listOf("item:Subject", "calendar:Start", "calendar:End", "calendar:Location", "calendar:Organizer", "calendar:IsAllDayEvent", "calendar:MyResponseType", "calendar:IsCancelled", "calendar:IsMeeting")
+        val props = listOf("item:Subject", "calendar:Start", "calendar:End", "calendar:Location", "calendar:Organizer", "calendar:IsAllDayEvent", "calendar:MyResponseType", "calendar:IsCancelled", "calendar:IsMeeting", "item:DateTimeCreated")
         val doc = call("<m:FindItem Traversal=\"Shallow\"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>${props.joinToString("") { "<t:FieldURI FieldURI=\"$it\"/>" }}</t:AdditionalProperties></m:ItemShape><m:CalendarView MaxEntriesReturned=\"200\" StartDate=\"${iso(start)}\" EndDate=\"${iso(end)}\"/><m:ParentFolderIds><t:DistinguishedFolderId Id=\"calendar\"/></m:ParentFolderIds></m:FindItem>", cancel = cancel)
         val items = Xml.kids(doc, "Items").firstOrNull() ?: return emptyList()
         return Xml.children(items).map { c ->
             CalEvent(idOf(c)?.first ?: "", Xml.txt(c, "Subject").ifEmpty { "(no title)" }, Xml.txt(c, "Start"), Xml.txt(c, "End"), Xml.txt(c, "Location"),
-                box(Xml.kids(c, "Organizer").firstOrNull()), Xml.txt(c, "IsAllDayEvent") == "true", Xml.txt(c, "MyResponseType"), Xml.txt(c, "IsCancelled") == "true", Xml.txt(c, "IsMeeting") == "true")
+                box(Xml.kids(c, "Organizer").firstOrNull()), Xml.txt(c, "IsAllDayEvent") == "true", Xml.txt(c, "MyResponseType"), Xml.txt(c, "IsCancelled") == "true", Xml.txt(c, "IsMeeting") == "true", Xml.txt(c, "DateTimeCreated"))
         }.sortedBy { parseTime(it.start) }
     }
 
@@ -685,7 +685,10 @@ class Exchange(val t: MailTransport) {
         for (r in Xml.kids(doc, "Resolution")) {
             val b = box(r) ?: continue
             if (b.email.isEmpty() || out.any { it.email.equals(b.email, true) }) continue
-            out.add(Person(b.name.ifEmpty { b.email }, b.email, Xml.txt(r, "JobTitle"), Xml.txt(r, "Department")))
+            // the mailbox name is often just the account (a00058); the contact part has the real name
+            val shown = Xml.txt(r, "DisplayName").ifEmpty { listOf(Xml.txt(r, "GivenName"), Xml.txt(r, "Surname")).filter { it.isNotBlank() }.joinToString(" ") }
+            val name = if (shown.isNotBlank()) shown else b.name.ifEmpty { b.email }
+            out.add(Person(name, b.email, Xml.txt(r, "JobTitle"), Xml.txt(r, "Department")))
         }
         return out.take(limit)
     }

@@ -103,7 +103,7 @@ object Bridge {
             "llmBase" -> Cfg.llmBase = s; "llmKey" -> Cfg.llmKey = s; "model" -> Cfg.model = s; "fastModel" -> Cfg.fastModel = s; "visionModel" -> Cfg.visionModel = s
             "stream" -> Cfg.stream = b; "sendImages" -> Cfg.sendImages = b
             "maxSteps" -> s.toIntOrNull()?.let { Cfg.maxSteps = it.coerceIn(3, 100) }
-            "contextTokens" -> s.toIntOrNull()?.let { Cfg.contextTokens = it.coerceIn(4000, 2000000) }
+            "contextTokens" -> s.toIntOrNull()?.let { Cfg.contextTokens = if (it <= 0) 0 else it.coerceIn(4000, 2000000) }
             "maxOut" -> s.toIntOrNull()?.let { Cfg.maxOut = it.coerceIn(0, 200000) }
             "lang" -> { Cfg.lang = s; Shortcuts.publish(Y.app) }
             "persona" -> Cfg.persona = s; "askRisky" -> Cfg.askRisky = b
@@ -187,7 +187,13 @@ object Bridge {
 
     // ---------------------------------------------------------------- dispatch (worker thread)
 
-    fun dispatch(m: String, a: JSONObject): Any? = when (m) {
+    fun dispatch(m: String, a: JSONObject): Any? {
+        // short mail handles (m3k9x2ab) used in answers and links → real Exchange ids
+        if (m.startsWith("mail.") || m.startsWith("tasks.")) for (k in listOf("id", "ref", "attId")) if (a.has(k)) a.put(k, Refs.real(a.optString(k)))
+        return dispatch0(m, a)
+    }
+
+    private fun dispatch0(m: String, a: JSONObject): Any? = when (m) {
         "state" -> state()
         "cfg.set" -> { setCfg(a.str("key"), a.opt("value")); state() }
         "models" -> JSONArray(Llm.models())
@@ -333,7 +339,7 @@ object Bridge {
             if (a.has("window")) {
                 val w = a.optInt("window", 0)
                 // a window set by hand also lifts the token budget to use it (the user can lower "Context budget" again)
-                if (w > 0) { val usable = ((w - Compactor.outReserve(w)) * 0.92).toInt(); if (Cfg.contextTokens < usable) Cfg.contextTokens = usable }
+                if (w > 0 && Cfg.contextTokens in 1 until ((w - Compactor.outReserve(w)) * 0.92).toInt()) Cfg.contextTokens = 0  // automatic now uses the window
             }
             if (a.has("autoCompact")) CtxCfg.autoCompact = a.optBoolean("autoCompact")
             if (a.has("compactAt")) CtxCfg.compactAt = a.optInt("compactAt", 90)
@@ -342,6 +348,14 @@ object Bridge {
             JSONObject().put("autoCompact", CtxCfg.autoCompact).put("compactAt", CtxCfg.compactAt).put("keepTurns", CtxCfg.keepTurns).put("window", CtxCfg.window)
         }
         "ctx.stats" -> if (a.str("convoId").isEmpty() || a.str("convoId") == "_new") JSONObject().put("autoCompact", CtxCfg.autoCompact).put("compactAt", CtxCfg.compactAt).put("keepTurns", CtxCfg.keepTurns).put("window", CtxCfg.window).put("windowSource", if (CtxCfg.window > 0) "set" else "").put("budget", Compactor.budget()) else Compactor.stats(convo(a))
+        "people.search" -> {
+            val q = a.str("q")
+            val out = JSONArray(); val seen = HashSet<String>()
+            fun add(name: String, email: String, extra: String) { if (email.isNotEmpty() && seen.add(email.lowercase())) out.put(JSONObject().put("name", name.ifEmpty { email }).put("email", email).put("extra", extra)) }
+            try { MailIndex.people(q, 8).forEach { add(it.name, it.email, "") } } catch (_: Throwable) {}
+            if (out.length() < 8 && q.trim().length >= 2) try { Mail.use { it.resolve(q, 8) }.forEach { add(it.name, it.email, listOf(it.title, it.dept).filter { s -> s.isNotBlank() }.joinToString(" · ")) } } catch (_: Throwable) {}
+            out
+        }
         "mail.title" -> {
             val id = a.str("id")
             MailIndex.entry(id)?.let { e -> JSONObject().put("subject", e.s).put("from", e.fr?.let { it.name.ifEmpty { it.email } } ?: "") }

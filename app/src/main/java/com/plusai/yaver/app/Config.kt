@@ -17,7 +17,8 @@ object Cfg {
     var maxSteps: Int get() = s("maxSteps", "30").toIntOrNull() ?: 30; set(v) = ps("maxSteps", v.toString())
     /** Most tokens the model may write in one reply (0 = the service's default). */
     var maxOut: Int get() = s("maxOut", "0").toIntOrNull() ?: 0; set(v) = ps("maxOut", v.toString())
-    var contextTokens: Int get() = s("contextTokens", "48000").toIntOrNull() ?: 48000; set(v) = ps("contextTokens", v.toString())
+    /** Context budget in tokens; 0 = automatic (from the model's window). */
+    var contextTokens: Int get() = s("contextTokens", "0").toIntOrNull() ?: 0; set(v) = ps("contextTokens", v.toString())
     var stream: Boolean get() = s("stream", "1") == "1"; set(v) = ps("stream", if (v) "1" else "0")
     var sendImages: Boolean get() = s("sendImages", "1") == "1"; set(v) = ps("sendImages", if (v) "1" else "0")
 

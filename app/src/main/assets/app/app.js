@@ -1215,17 +1215,42 @@
       "Şu e-postaya bak (mail id=" + m.id + ", konu \"" + m.subject + "\", gönderen " + (m.from && (m.from.name || m.from.email)) + "). Özetle, benden ne bekleniyor söyle ve bir yanıt öner."), { display: T("About “" + m.subject + "” from " + who + ": summarize it, what is expected of me, and suggest a reply.", "“" + m.subject + "” (" + who + ") e-postasını özetle, benden ne bekleniyor söyle ve bir yanıt öner.") });
   }
 
+  /* recipient suggestions from recent mail and the company address book */
+  function suggestPeople(input) {
+    var box = h("div", { class: "psug hidden" }), t = 0, seq = 0;
+    function last() { var v = input.value, i = Math.max(v.lastIndexOf(","), v.lastIndexOf(";")); return { head: i >= 0 ? v.slice(0, i + 1) + " " : "", q: v.slice(i + 1).trim() }; }
+    input.addEventListener("input", function () {
+      clearTimeout(t); var L = last();
+      if (L.q.length < 2 || /@.+\./.test(L.q)) { box.classList.add("hidden"); return; }
+      t = setTimeout(function () {
+        var my = ++seq;
+        call("people.search", { q: L.q }).then(function (list) {
+          if (my !== seq) return; clear(box);
+          (list || []).slice(0, 6).forEach(function (p) {
+            box.appendChild(h("button", { type: "button", class: "opt", onclick: function () { var L2 = last(); input.value = L2.head + p.email + ", "; box.classList.add("hidden"); input.focus(); } },
+              avatar(p.name, p.email), h("div", null, p.name, h("small", null, p.email + (p.extra ? " · " + p.extra : "")))));
+          });
+          box.classList.toggle("hidden", !box.firstChild);
+        }).catch(function () { box.classList.add("hidden"); });
+      }, 250);
+    });
+    return box;
+  }
+
   function composeSheet(kind, m) {
-    var to = h("input", { type: "email", placeholder: "ad@sirket.com.tr", autocapitalize: "off" });
-    var cc = h("input", { type: "email", placeholder: T("optional", "isteğe bağlı"), autocapitalize: "off" });
+    var to = h("input", { type: "text", inputmode: "email", placeholder: T("Name or e-mail", "İsim ya da e-posta"), autocapitalize: "off", autocomplete: "off", spellcheck: "false" });
+    var cc = h("input", { type: "text", inputmode: "email", placeholder: T("optional", "isteğe bağlı"), autocapitalize: "off", autocomplete: "off", spellcheck: "false" });
     var subj = h("input", { type: "text" });
-    var body = h("textarea", { rows: 8, placeholder: T("Write your message", "Mesajınızı yazın") });
+    var body = h("textarea", { rows: kind === "forward" ? 4 : 8, placeholder: kind === "forward" ? T("Add a note (optional) — the original e-mail goes below it", "Not ekleyin (isteğe bağlı) — orijinal e-posta altına eklenir") : T("Write your message", "Mesajınızı yazın") });
     var title = { new: T("New e-mail", "Yeni e-posta"), reply: T("Reply", "Yanıtla"), replyall: T("Reply all", "Tümünü yanıtla"), forward: T("Forward", "İlet") }[kind];
     var fields = h("div", null,
-      kind === "new" || kind === "forward" ? h("label", { class: "field" }, h("span", null, T("To", "Kime")), to) : null,
-      kind === "new" ? h("label", { class: "field" }, h("span", null, "Cc"), cc) : null,
+      kind === "new" || kind === "forward" ? h("div", { class: "field" }, h("span", null, T("To", "Kime")), to, suggestPeople(to)) : null,
+      kind === "new" ? h("div", { class: "field" }, h("span", null, "Cc"), cc, suggestPeople(cc)) : null,
       kind === "new" ? h("label", { class: "field" }, h("span", null, T("Subject", "Konu")), subj) : null,
-      h("label", { class: "field" }, h("span", null, m ? (kind === "forward" ? "FW: " : "RE: ") + m.subject : T("Message", "Mesaj")), body));
+      h("label", { class: "field" }, h("span", null, m ? (kind === "forward" ? "FW: " : "RE: ") + m.subject : T("Message", "Mesaj")), body),
+      m ? h("details", { class: "quoted", open: kind === "forward" ? true : null }, h("summary", null, (kind === "forward" ? T("Forwarded e-mail", "İletilen e-posta") : T("Original e-mail", "Orijinal e-posta")) + (m.files && m.files.length && kind === "forward" ? T(" · " + m.files.length + " attachment(s) included", " · " + m.files.length + " ek dahil") : "")),
+        h("div", { class: "qh" }, (m.from ? (m.from.name || m.from.email) : "") + (m.received ? " — " + longWhen(m.received) : "")),
+        h("div", { class: "qb" }, String(m.body || "").slice(0, 2500) + (String(m.body || "").length > 2500 ? "…" : ""))) : null);
     function go(sendIt) {
       var args = { kind: kind, ref: m ? m.id : "", to: to.value.split(/[;,]/).map(function (s) { return s.trim(); }).filter(Boolean), cc: cc.value.split(/[;,]/).map(function (s) { return s.trim(); }).filter(Boolean), subject: subj.value, body: body.value, send: sendIt };
       if ((kind === "new" || kind === "forward") && !args.to.length) { toast(T("Add a recipient", "Alıcı ekleyin")); return false; }
@@ -1904,7 +1929,7 @@
         row({ icon: "gauge", label: T("Compact at", "Sıkıştırma eşiği"), value: "%" + at, onclick: function () { optionsSheet(T("Compact when the context is", "Bağlam şu orana gelince sıkıştır"), [60, 70, 80, 85, 90, 95].map(function (n) { return [String(n), "%" + n]; }), String(at), function (v) { setX("ctx.set", { key: "compactAt", value: +v }); }); } }),
         row({ icon: "messages-square", label: T("Turns kept word for word", "Aynen korunan turlar"), value: String(keep), onclick: function () { optionsSheet(T("Recent turns kept word for word", "Aynen korunan son turlar"), [1, 2, 3, 4, 5, 8, 12].map(function (n) { return [String(n), String(n)]; }), String(keep), function (v) { setX("ctx.set", { key: "keepTurns", value: +v }); }); } }),
         row({ icon: "layers", label: T("Model context window", "Model bağlam penceresi"), sub: win ? T("Set by you", "Sizin ayarınız") : T("Automatic: from the service or learned", "Otomatik: hizmetten veya öğrenilir"), value: win ? k(win) : (C.window ? T("auto · ", "otomatik · ") + k(C.window) : T("auto", "otomatik")), onclick: function () { editSheet({ title: T("Model context window", "Model bağlam penceresi"), type: "number", inputmode: "numeric", value: win ? String(win) : "", placeholder: T("auto", "otomatik"), help: T("Tokens. Leave empty for automatic — set it only if compaction starts too late.", "Token. Otomatik için boş bırakın — yalnızca sıkıştırma geç başlıyorsa ayarlayın."), save: function (v) { var n = Math.max(0, parseInt(String(v).replace(/[^0-9]/g, ""), 10) || 0); setX("ctx.set", { key: "window", value: n }, function () { refreshState().then(function () { renderSettings(); toast(n ? T("Context window: " + k(n), "Bağlam penceresi: " + k(n)) : T("Context window: automatic", "Bağlam penceresi: otomatik")); }); }); } }); } }),
-        row({ icon: "gauge", label: T("Context budget", "Bağlam bütçesi"), sub: T("Most tokens sent per request; the meter in the chat counts against this", "İstek başına gönderilen en fazla token; sohbetteki gösterge buna göre sayar"), wrap: true, value: k((S.state.llm || {}).contextTokens || 48000), onclick: function () { optionsSheet(T("Context budget (tokens)", "Bağlam bütçesi (token)"), [16000, 32000, 48000, 64000, 96000, 128000, 200000].map(function (n) { return [String(n), k(n)]; }), String((S.state.llm || {}).contextTokens || 48000), function (v) { setCfg("contextTokens", Number(v)).then(function () { renderSettings(); }); }); } })
+        row({ icon: "gauge", label: T("Context budget", "Bağlam bütçesi"), sub: T("Most tokens sent per request; the meter in the chat counts against this", "İstek başına gönderilen en fazla token; sohbetteki gösterge buna göre sayar"), wrap: true, value: (S.state.llm || {}).contextTokens ? k(S.state.llm.contextTokens) : T("Automatic", "Otomatik") + (C.budget ? " · " + k(C.budget) : ""), onclick: function () { optionsSheet(T("Context budget (tokens)", "Bağlam bütçesi (token)"), [[0, T("Automatic — from the model's window", "Otomatik — modelin penceresine göre")]].concat([32000, 64000, 96000, 128000, 200000, 400000].map(function (n) { return [n, k(n)]; })).map(function (x) { return [String(x[0]), x[1]]; }), String((S.state.llm || {}).contextTokens || 0), function (v) { setCfg("contextTokens", Number(v)).then(function () { renderSettings(); }); }); } })
       ]));
 
       var s1 = X.s1 || {}, cfg = s1.cfg || s1, be = cfg.backend || "off";

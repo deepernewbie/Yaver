@@ -259,7 +259,7 @@ object Agent {
             if (route.recall) content += try { MemoryX.recallBlock(text, c.id) } catch (_: Throwable) { "" }
             content += Lang.onUserMessage(c, text, isInternal)
             content += "\n\n" + Prompt.nowNote()
-            um = userMessage(content, images, files).put("display", display ?: text)
+            um = userMessage(Refs.short(content), images, files).put("display", display ?: text)
             if (route.chips.isNotEmpty()) um.put("s1", route.chipsJson())
             if (memInfo != null) um.put("mem", memInfo)
             if (internal != null) um.put("internal", internal)
@@ -530,7 +530,7 @@ object Agent {
                         val gate = Planning.gate(c, t.name, args!!)
                         if (gate != null) gate else try {
                             currentTool.set(t.name); currentArgs.set(args)
-                            tool.run(args, ctx)
+                            tool.run(Refs.expand(args), ctx)
                         } catch (e: CancelledException) {
                             throw e
                         } catch (e: Throwable) {
@@ -541,7 +541,7 @@ object Agent {
                 }
             }
             if (result.startsWith("Error") || result.startsWith("Not executed")) ok = false
-            result = LoopUtil.finishResult(result, t.name, t.args, st)
+            result = LoopUtil.finishResult(Refs.short(result), t.name, t.args, st)
             c.messages.put(JSONObject().put("role", "tool").put("tool_call_id", t.id).put("name", t.name).put("content", result).put("ok", ok))
             Convos.save(c)
             listener?.onToolEnd(t.name, result, ok)

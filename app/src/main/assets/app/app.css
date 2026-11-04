@@ -668,3 +668,13 @@ button.kcard:active { background: var(--sunken); }
 .sgroup.fold.open { padding-bottom: 14px; }
 @media (prefers-reduced-motion: reduce) { .sgroup.fold > h4 .chev { transition: none; } }
 .searching .warncard { display: none; }
+/* compose: recipient suggestions + quoted original */
+.psug { margin-top: 6px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); overflow: hidden; }
+.psug.hidden { display: none; }
+.psug .opt { margin: 0; border-radius: 0; border-bottom: 1px solid var(--line); }
+.psug .opt:last-child { border-bottom: 0; }
+.psug .av { width: 30px; height: 30px; font-size: 12px; flex: none; }
+.quoted { margin-top: 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--sunken); padding: 10px 12px; }
+.quoted summary { cursor: pointer; font-weight: 600; font-size: 13.5px; color: var(--muted); }
+.quoted .qh { margin-top: 8px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.quoted .qb { margin-top: 6px; font-size: 13px; line-height: 1.5; color: var(--muted); white-space: pre-wrap; max-height: 34vh; overflow: auto; }

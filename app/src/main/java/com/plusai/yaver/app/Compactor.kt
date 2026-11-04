@@ -16,7 +16,8 @@ object CtxCfg {
     /** Model context window set by hand (tokens, 0 = auto: discovered from the gateway or learned from errors). */
     var window: Int get() = maxOf(0, Prefs.int("ctx.window", 0)); set(v) = Prefs.put("ctx.window", maxOf(0, v).toString())
     /** Upper limit for the conversation ("Context budget"): the existing Cfg.contextTokens. */
-    val budgetCap: Int get() = Cfg.contextTokens.takeIf { it > 0 } ?: 60000
+    /** 0 = automatic: as much of the model's window as fits (100k when the window is unknown). */
+    val budgetCap: Int get() = Cfg.contextTokens.takeIf { it > 0 } ?: 0
     /** Output tokens reserved (the original used its max-tokens setting, default 4096; the app has none). */
     const val MAX_OUTPUT = 4096
 }
@@ -73,7 +74,12 @@ object Compactor {
     }
 
     fun outReserve(w: Int): Int { val want = maxOf(1024, minOf(64000, if (Cfg.maxOut > 0) Cfg.maxOut else CtxCfg.MAX_OUTPUT)); return if (w > 0) minOf(want, maxOf(768, (w * 0.2).toInt())) else want }
-    fun budget(model: String? = null): Int { val cap = CtxCfg.budgetCap; val w = window(model); return if (w > 0) maxOf(2000, minOf(cap, ((w - outReserve(w)) * 0.92).toInt())) else cap }
+    fun budget(model: String? = null): Int {
+        val cap = CtxCfg.budgetCap; val w = window(model)
+        if (w <= 0) return if (cap > 0) cap else 100000
+        val usable = ((w - outReserve(w)) * 0.92).toInt()
+        return maxOf(2000, if (cap > 0) minOf(cap, usable) else usable)
+    }
 
     // ---------------------------------------------------------------- per-conversation state (harness/ctx/<id>.json)
     class State(
@@ -125,7 +131,7 @@ object Compactor {
         if (c.summary.isBlank()) return out
         val s = state(c)
         out.put(JSONObject().put("role", "user").put("summary", true).put("content",
-            "[Context summary — the earlier part of this conversation was compacted (${maxOf(1, s.compactions)}×). Treat this as your memory of it.]\n\n${c.summary}\n\n${anchorsBlock(c)}"))
+            "[Context summary — the earlier part of this conversation was compacted (${maxOf(1, s.compactions)}×). Treat this as your memory of it. It describes EARLIER turns only: what it calls the current task may be finished — the user's newest message below is what to work on now.]\n\n${c.summary}\n\n${anchorsBlock(c)}"))
         var i = anchorEnd(c)
         while (i < c.messages.length() && c.messages.getJSONObject(i).optBoolean("local")) i++
         if (i < c.messages.length() && c.messages.getJSONObject(i).optString("role") == "user")

@@ -170,6 +170,24 @@ object MailIndex {
 
     fun count(): Int = synchronized(lock) { load().size }
     fun entry(id: String): MailEntry? = synchronized(lock) { load()[id] }
+
+    /** People seen in recent mail (senders and recipients) whose name or address starts with the query words; most frequent first. */
+    fun people(q: String, limit: Int = 8): List<MailBox> {
+        val words = MxText.fold(q).split(Regex("[\\s,;]+")).filter { it.isNotEmpty() }
+        if (words.isEmpty()) return emptyList()
+        val count = HashMap<String, Int>(); val best = HashMap<String, MailBox>()
+        for (e in all()) for (b in listOfNotNull(e.fr) + e.to + e.cc) {
+            if (b.email.isEmpty()) continue
+            val key = b.email.lowercase()
+            count[key] = (count[key] ?: 0) + 1
+            val cur = best[key]
+            if (cur == null || (cur.name.isEmpty() || cur.name.equals(cur.email, true) || Regex("^[a-z]?\\d{4,}$", RegexOption.IGNORE_CASE).matches(cur.name)) && b.name.isNotEmpty()) best[key] = b
+        }
+        return best.values.filter { b ->
+            val hay = MxText.fold(b.name + " " + b.email).split(Regex("[\\s.@_<>-]+"))
+            words.all { w -> hay.any { it.startsWith(w) } }
+        }.sortedByDescending { count[it.email.lowercase()] ?: 0 }.take(limit)
+    }
     fun max(): Int = maxOf(200, MailPlusCfg.indexMax)
     private fun all(): List<MailEntry> = synchronized(lock) { load().values.toList() }
 
