@@ -877,7 +877,7 @@ object OSync {
     }
 
     class RemoteItem(val itemId: String, val ck: String, val subject: String, val status: String, val due: String, val modified: Long, val categories: List<String>, val data: JSONObject?, val parsed: Parsed, val body: String)
-    class Remote(val tasks: MutableList<RemoteItem>, var index: RemoteItem?)
+    class Remote(val tasks: MutableList<RemoteItem>, var index: RemoteItem?) { val indexes = ArrayList<RemoteItem>() }
 
     /** Everything in the Outlook folder, parsed. */
     fun fetchRemote(fid: String): Remote {
@@ -895,18 +895,34 @@ object OSync {
         var i = 0
         while (i < ids.size) {
             val chunk = ids.subList(i, minOf(i + 50, ids.size))
-            val doc = MxEws.call("<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:BodyType>Text</t:BodyType><t:AdditionalProperties><t:FieldURI FieldURI=\"item:Subject\"/><t:FieldURI FieldURI=\"item:Body\"/><t:FieldURI FieldURI=\"item:Categories\"/><t:FieldURI FieldURI=\"item:LastModifiedTime\"/><t:FieldURI FieldURI=\"task:Status\"/><t:FieldURI FieldURI=\"task:DueDate\"/>$EXT</t:AdditionalProperties></m:ItemShape><m:ItemIds>${chunk.joinToString("") { "<t:ItemId Id=\"${Xml.esc(it)}\"/>" }}</m:ItemIds></m:GetItem>", 120000)
+            // web mail does not know "LastModifiedTime" as a field: ask for the same value as the MAPI property 0x3008 there
+            val modProp = if (MxEws.isOwa()) "<t:ExtendedFieldURI PropertyTag=\"0x3008\" PropertyType=\"SystemTime\"/>" else "<t:FieldURI FieldURI=\"item:LastModifiedTime\"/>"
+            fun req(withMod: Boolean, withBody: Boolean) = "<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:BodyType>Text</t:BodyType><t:AdditionalProperties><t:FieldURI FieldURI=\"item:Subject\"/>" +
+                (if (withBody) "<t:FieldURI FieldURI=\"item:Body\"/>" else "") + "<t:FieldURI FieldURI=\"item:Categories\"/>" + (if (withMod) modProp else "") +
+                "<t:FieldURI FieldURI=\"task:Status\"/><t:FieldURI FieldURI=\"task:DueDate\"/>$EXT</t:AdditionalProperties></m:ItemShape><m:ItemIds>${chunk.joinToString("") { "<t:ItemId Id=\"${Xml.esc(it)}\"/>" }}</m:ItemIds></m:GetItem>"
+            val doc = try { MxEws.call(req(true, true), 120000) } catch (e: MailException) {
+                Diag.i("osync", "GetItem refused (${e.message?.take(120)}) — retrying with fewer fields")
+                try { MxEws.call(req(false, true), 120000) } catch (e2: MailException) { MxEws.call(req(false, false), 120000) }
+            }
             for (it in Xml.kids(doc, "Task")) {
                 val idp = MxText.itemId(it) ?: continue
-                val ext = Xml.kids(it, "ExtendedProperty").firstOrNull()
+                // hidden yaver data and (web mail) the modification time both come as extended properties: tell them apart
                 var data: JSONObject? = null
-                if (ext != null) try { data = JSONObject(Xml.txt(ext, "Value")) } catch (_: Exception) {}
+                var modExt = 0L
+                for (ext in Xml.kids(it, "ExtendedProperty")) {
+                    val uri = Xml.kids(ext, "ExtendedFieldURI").firstOrNull()
+                    val tag = (uri?.getAttribute("PropertyTag")?.ifEmpty { null } ?: uri?.let { u -> Xml.txt(u, "PropertyTag") } ?: "").lowercase()
+                    val v = Xml.txt(ext, "Value").ifEmpty { ext.textContent ?: "" }.trim()
+                    if (tag == "0x3008" || tag == "12296") { modExt = Exchange.parseTime(v); continue }
+                    if (data == null && v.startsWith("{")) try { data = JSONObject(v) } catch (_: Exception) {}
+                }
                 val bodyText = Xml.txt(it, "Body")
                 val parsed = parseBody(bodyText)
                 if (data == null && parsed.data != null) data = parsed.data
-                val r = RemoteItem(idp.first, idp.second, Xml.txt(it, "Subject"), Xml.txt(it, "Status"), dueFrom(Xml.txt(it, "DueDate")), Exchange.parseTime(Xml.txt(it, "LastModifiedTime")),
+                val r = RemoteItem(idp.first, idp.second, Xml.txt(it, "Subject"), Xml.txt(it, "Status"), dueFrom(Xml.txt(it, "DueDate")), Xml.txt(it, "LastModifiedTime").takeIf { it.isNotEmpty() }?.let { Exchange.parseTime(it) } ?: modExt,
                     Xml.kids(it, "String").map { s -> s.textContent }, data, parsed, bodyText)
                 if (data?.optString("kind") == "index" || "yaver-index" in r.categories || r.subject.startsWith("yaver · memory & board backup")) {
+                    out.indexes.add(r)
                     val cur = out.index
                     if (cur == null || (data != null && cur.data != null && data.optLong("savedAt") > cur.data.optLong("savedAt"))) out.index = r
                 } else out.tasks.add(r)
@@ -928,6 +944,33 @@ object OSync {
                 }
             }
         } catch (e: Exception) { Diag.e("osync", "re-read with the default shape", e) }
+        // several index items (each device / the web version may have made one): read them as one — union of everything
+        if (out.indexes.size > 1) {
+            val datas = out.indexes.mapNotNull { it.data }.sortedByDescending { it.optLong("savedAt") }
+            if (datas.size > 1) {
+                val comb = JSONObject(datas[0].toString())
+                val mem = JSONObject()
+                for (k in listOf("memory", "user")) {
+                    val seen = HashSet<String>(); val arr = JSONArray()
+                    for (d in datas) d.optJSONObject("memory")?.optJSONArray(k)?.let { a -> for (i in 0 until a.length()) { val e = a.optString(i); if (e.isNotBlank() && seen.add(MxText.memFold(e))) arr.put(e) } }
+                    mem.put(k, arr)
+                }
+                comb.put("memory", mem)
+                val ppl = LinkedHashSet<String>(); for (d in datas) d.optJSONArray("people")?.let { a -> for (i in 0 until a.length()) ppl.add(a.optString(i)) }
+                comb.put("people", JSONArray(ppl.toList()))
+                val sk = JSONArray(); val skSeen = HashSet<String>(); for (d in datas) d.optJSONArray("skills")?.let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.let { o -> if (skSeen.add(o.optString("dir"))) sk.put(o) } }
+                comb.put("skills", sk)
+                val ls = LinkedHashMap<String, JSONObject>(); for (d in datas) d.optJSONArray("lessons")?.let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.let { o -> val id = o.optString("id"); val cur = ls[id]; if (cur == null || o.optString("updated_at") > cur.optString("updated_at")) ls[id] = o } }
+                comb.put("lessons", JSONArray(ls.values.toList()))
+                comb.put("seq", datas.maxOf { it.optInt("seq") })
+                // the newest item from ANOTHER device decides "is there something new for me"
+                val mine = indexData().optString("device")
+                datas.firstOrNull { it.optString("device") != mine }?.let { o -> comb.put("device", o.optString("device")); comb.put("savedAt", maxOf(o.optLong("savedAt"), comb.optLong("savedAt"))) }
+                val idx = out.index!!
+                out.index = RemoteItem(idx.itemId, idx.ck, idx.subject, idx.status, idx.due, idx.modified, idx.categories, comb, idx.parsed, idx.body)
+                Diag.i("osync", "${out.indexes.size} memory items in Outlook (devices: ${datas.joinToString(", ") { it.optString("device").take(40) }}) — read together")
+            }
+        }
         val withData = out.tasks.count { it.data != null }
         Diag.i("osync", "Outlook yaver folder: ${out.tasks.size} tasks ($withData with yaver data), index ${if (out.index == null) "missing" else if (out.index!!.data == null) "found but unreadable" else "ok · memory ${out.index!!.data!!.optJSONObject("memory")?.optJSONArray("memory")?.length() ?: 0}+${out.index!!.data!!.optJSONObject("memory")?.optJSONArray("user")?.length() ?: 0}, skills ${out.index!!.data!!.optJSONArray("skills")?.length() ?: 0}, lessons ${out.index!!.data!!.optJSONArray("lessons")?.length() ?: 0}, from ${out.index!!.data!!.optString("device")}"}")
         return out
@@ -1167,7 +1210,11 @@ object OSync {
                     "Burada ${what.joinToString(" ve ")} boş; ama Outlook yedeğinde (${MxText.relTime(saved)} kaydedilmiş) var."), "warn", mapOf("tasks" to false))
         }
         // 2b) live memory: Outlook is the shared store — another phone's memory, lessons and skills flow in (three-way merge, deletions too)
-        if (on() && !memPaused && rIx != null) try { liveMerge(rIx, st) } catch (e: Exception) { Diag.e("osync", "live merge", e) }
+        if (on() && !memPaused && rIx != null) try {
+            liveMerge(rIx, st)
+            val keep = remote.index?.itemId
+            for (old in remote.indexes) if (old.itemId != keep) try { remove(old.itemId); Diag.i("osync", "merged and removed an extra memory item from ${old.data?.optString("device") ?: "?"}") } catch (_: Exception) {}
+        } catch (e: Exception) { Diag.e("osync", "live merge", e) }
         // 3) edits made in Outlook → yaver
         val changedList = ArrayList<String>()
         for (r in rTasks) {
