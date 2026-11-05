@@ -1,112 +1,232 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- yaver 5 home-screen widget (RemoteViews: only LinearLayout / TextView / ImageView are used) -->
+<!-- yaver home-screen widget. RemoteViews: only LinearLayout / FrameLayout / TextView / ImageView are used.
+     Header: brand badge + date, mail / reply / alarm chips. Card: the next meeting. Bottom: "Ask yaver" bar + mic. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/five_w_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/five_widget_bg"
     android:orientation="vertical"
-    android:padding="12dp">
+    android:paddingStart="14dp"
+    android:paddingTop="12dp"
+    android:paddingEnd="14dp"
+    android:paddingBottom="12dp">
 
+    <!-- header -->
     <LinearLayout
         android:id="@+id/five_w_head"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="26dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/five_widget_brand"
-            android:textColor="@color/five_w_accent"
-            android:textSize="12sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/five_w_alarm"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:maxLines="1"
-            android:textColor="@color/five_w_text2"
-            android:textSize="11sp"
-            android:visibility="gone" />
-    </LinearLayout>
-
-    <LinearLayout
-        android:id="@+id/five_w_meet"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:background="@drawable/five_widget_row"
-        android:gravity="center_vertical"
-        android:orientation="vertical"
-        android:paddingStart="2dp"
-        android:paddingEnd="2dp">
-
-        <TextView
-            android:id="@+id/five_w_when"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@color/five_w_accent"
-            android:textSize="12sp" />
-
-        <TextView
-            android:id="@+id/five_w_title"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="@string/five_widget_loading"
-            android:textColor="@color/five_w_text"
-            android:textSize="15sp"
-            android:textStyle="bold" />
-    </LinearLayout>
-
-    <TextView
-        android:id="@+id/five_w_mail"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:background="@drawable/five_widget_row"
-        android:ellipsize="end"
-        android:maxLines="1"
-        android:paddingStart="2dp"
-        android:paddingTop="2dp"
-        android:paddingEnd="2dp"
-        android:paddingBottom="4dp"
-        android:textColor="@color/five_w_text2"
-        android:textSize="12sp" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="40dp"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
-
-        <TextView
-            android:id="@+id/five_w_ask"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_weight="1"
-            android:background="@drawable/five_widget_btn"
+            android:id="@+id/five_w_badge"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:background="@drawable/five_w_badge_bg"
+            android:fontFamily="sans-serif-medium"
             android:gravity="center"
-            android:maxLines="1"
-            android:text="@string/five_widget_ask"
+            android:includeFontPadding="false"
+            android:text="y"
             android:textColor="@color/five_w_on_accent"
             android:textSize="15sp"
             android:textStyle="bold" />
 
+        <TextView
+            android:id="@+id/five_w_date"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:fontFamily="sans-serif-medium"
+            android:maxLines="1"
+            android:textColor="@color/five_w_text"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/five_w_unread"
+            android:layout_width="wrap_content"
+            android:layout_height="24dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/five_w_chip_bg"
+            android:drawableStart="@drawable/five_ic_mail"
+            android:drawablePadding="4dp"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center_vertical"
+            android:maxLines="1"
+            android:paddingStart="8dp"
+            android:paddingEnd="9dp"
+            android:textColor="@color/five_w_chip_text"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/five_w_reply"
+            android:layout_width="wrap_content"
+            android:layout_height="24dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/five_w_chip_bg"
+            android:drawableStart="@drawable/five_ic_reply"
+            android:drawablePadding="4dp"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center_vertical"
+            android:maxLines="1"
+            android:paddingStart="8dp"
+            android:paddingEnd="9dp"
+            android:textColor="@color/five_w_chip_text"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/five_w_alarm"
+            android:layout_width="wrap_content"
+            android:layout_height="24dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/five_w_chip_bg"
+            android:drawableStart="@drawable/five_ic_alarm"
+            android:drawablePadding="4dp"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center_vertical"
+            android:maxLines="1"
+            android:paddingStart="8dp"
+            android:paddingEnd="9dp"
+            android:textColor="@color/five_w_chip_text"
+            android:textSize="12sp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- next meeting -->
+    <LinearLayout
+        android:id="@+id/five_w_card"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="10dp"
+        android:layout_weight="1"
+        android:background="@drawable/five_w_card_bg"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="8dp">
+
+        <ImageView
+            android:id="@+id/five_w_bar"
+            android:layout_width="3dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="10dp"
+            android:importantForAccessibility="no"
+            android:scaleType="fitXY"
+            android:src="@drawable/five_w_bar" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/five_w_time"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:fontFamily="sans-serif-medium"
+                android:maxLines="1"
+                android:textColor="@color/five_w_accent"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/five_w_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:ellipsize="end"
+                android:fontFamily="sans-serif-medium"
+                android:maxLines="1"
+                android:text="@string/five_widget_loading"
+                android:textColor="@color/five_w_text"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:id="@+id/five_w_place_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:visibility="gone">
+
+                <ImageView
+                    android:id="@+id/five_w_place_icon"
+                    android:layout_width="13dp"
+                    android:layout_height="13dp"
+                    android:layout_marginEnd="4dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/five_ic_place" />
+
+                <TextView
+                    android:id="@+id/five_w_place"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:textColor="@color/five_w_text2"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- ask bar -->
+    <LinearLayout
+        android:id="@+id/five_w_askrow"
+        android:layout_width="match_parent"
+        android:layout_height="44dp"
+        android:layout_marginTop="10dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <LinearLayout
+            android:id="@+id/five_w_ask"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:background="@drawable/five_w_ask_bg"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp">
+
+            <ImageView
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:layout_marginEnd="8dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/five_ic_spark" />
+
+            <TextView
+                android:id="@+id/five_w_ask_text"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="@string/five_widget_ask"
+                android:textColor="@color/five_w_text2"
+                android:textSize="14sp" />
+        </LinearLayout>
+
         <ImageView
             android:id="@+id/five_w_mic"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
             android:layout_marginStart="8dp"
             android:background="@drawable/five_widget_mic_bg"
             android:contentDescription="@string/five_widget_voice"
-            android:padding="9dp"
+            android:padding="11dp"
             android:scaleType="fitCenter"
             android:src="@drawable/five_ic_mic" />
     </LinearLayout>

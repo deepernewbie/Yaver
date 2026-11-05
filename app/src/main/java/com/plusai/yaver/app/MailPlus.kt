@@ -57,7 +57,7 @@ object MailPlusCfg {
 /** EWS operations the native Exchange class does not have; SOAP bodies sent through the transport. */
 internal object MxEws {
     fun call(inner: String, timeout: Int = 60000, cancel: Cancel? = null) = Mail.use(cancel) { it.t.call(inner, timeout, cancel) }
-    fun isOwa(cancel: Cancel? = null): Boolean = Mail.use(cancel) { it.t is OwaTransport }
+    fun isOwa(cancel: Cancel? = null): Boolean = Mail.use(cancel) { it.t.unwrap() is OwaTransport }
 
     class FolderInfo(val id: String, val name: String, val unread: Int, val total: Int)
     val FOLDERS = listOf("inbox", "drafts", "sentitems", "deleteditems", "junkemail", "archive")
@@ -684,6 +684,21 @@ object MailPlus {
         if (draft != null) step(if (tr) "Kalıcı silme" else "Permanent delete") {
             val id = trashed ?: Mail.use(cancel) { it.compose("new", "", emptyList(), emptyList(), "yaver test 2", "yaver test", false, cancel) }
             Mail.use(cancel) { it.remove(id, true, cancel) }
+            ""
+        }
+        // replies and forwards need the original's version (ChangeKey): saved as drafts only — nothing is sent — then removed
+        val newest = try { Mail.use(cancel) { it.find("inbox", "", false, 1, 0, cancel) }.items.firstOrNull() } catch (e: CancelledException) { throw e } catch (_: Exception) { null }
+        if (newest != null) for ((kind, label) in listOf("reply" to (if (tr) "Yanıt (taslak, gönderilmez)" else "Reply (draft, not sent)"), "forward" to (if (tr) "İletme (taslak, gönderilmez)" else "Forward (draft, not sent)"))) step(label) {
+            val me = Cfg.mailUser.let { u -> if (u.contains("@")) listOf(u) else emptyList() }
+            val id = Mail.use(cancel) { it.compose(kind, newest.id, if (kind == "forward") me else emptyList(), emptyList(), "", "yaver test — safe to delete", false, cancel) }
+            if (id.isNotEmpty()) Mail.use(cancel) { it.remove(id, true, cancel) }
+            if (tr) "“${newest.subject.take(30)}” üzerinden" else "on “${newest.subject.take(30)}”"
+        }
+        step(if (tr) "Randevu oluşturma ve silme" else "Create and delete an appointment") {
+            val at = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, 1); set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+            val id = Mail.use(cancel) { it.createEvent("yaver test", at, at + 15 * 60000L, "", "yaver test — safe to delete", emptyList(), cancel) }
+            if (id.isEmpty()) throw IllegalStateException("no id")
+            Mail.use(cancel) { it.deleteEvent(id, cancel) }
             ""
         }
         return out

@@ -84,23 +84,77 @@ object FiveWidget {
         val brief = try { FiveBrief.snapshot() } catch (e: Throwable) { null }
         val now = System.currentTimeMillis()
         val w = FiveLogic.widgetText(brief, now, TimeZone.getDefault(), Y.tr)
+        val full = views(c, w, now, compact = false)
+        val rv = if (android.os.Build.VERSION.SDK_INT >= 31) {
+            // Android 12+: the launcher picks the layout for the widget's real size; a short widget drops the place line
+            RemoteViews(mapOf(android.util.SizeF(180f, 110f) to views(c, w, now, compact = true), android.util.SizeF(180f, 168f) to full))
+        } else full
+        mgr.updateAppWidget(ids, rv)
+        scheduleTick(c, FiveLogic.nextWidgetTick(brief, now))
+    }
+
+    private fun dp(c: Context, v: Int) = (v * c.resources.displayMetrics.density).toInt()
+
+    private fun views(c: Context, w: FiveLogic.WidgetText, now: Long, compact: Boolean): RemoteViews {
         val rv = RemoteViews(c.packageName, R.layout.five_widget)
-        rv.setTextViewText(R.id.five_w_when, w.meetWhen)
-        rv.setViewVisibility(R.id.five_w_when, if (w.meetWhen.isEmpty()) View.GONE else View.VISIBLE)
-        rv.setTextViewText(R.id.five_w_title, w.meetTitle)
-        rv.setTextViewText(R.id.five_w_mail, w.mailLine)
-        rv.setViewVisibility(R.id.five_w_mail, if (w.mailLine.isEmpty()) View.GONE else View.VISIBLE)
-        rv.setTextViewText(R.id.five_w_alarm, if (w.alarm.isEmpty()) "" else "⏰ " + w.alarm)
+        val loc = if (Y.tr) java.util.Locale("tr", "TR") else java.util.Locale.US
+        rv.setTextViewText(R.id.five_w_date, java.text.SimpleDateFormat(if (Y.tr) "d MMMM EEE" else "EEE, MMM d", loc).format(java.util.Date(now)))
+        // chips: unread / waiting for a reply / next alarm (or "mail not connected")
+        if (!w.connected) {
+            rv.setTextViewText(R.id.five_w_unread, Y.t("Mail off", "Posta kapalı"))
+            rv.setViewVisibility(R.id.five_w_unread, View.VISIBLE)
+            rv.setViewVisibility(R.id.five_w_reply, View.GONE)
+        } else {
+            rv.setTextViewText(R.id.five_w_unread, w.unread.toString())
+            rv.setContentDescription(R.id.five_w_unread, Y.t("${w.unread} unread", "${w.unread} okunmamış"))
+            rv.setViewVisibility(R.id.five_w_unread, View.VISIBLE)
+            rv.setTextViewText(R.id.five_w_reply, w.reply.toString())
+            rv.setContentDescription(R.id.five_w_reply, Y.t("${w.reply} need a reply", "${w.reply} yanıt bekliyor"))
+            rv.setViewVisibility(R.id.five_w_reply, if (w.reply > 0) View.VISIBLE else View.GONE)
+        }
+        rv.setTextViewText(R.id.five_w_alarm, w.alarm)
+        rv.setContentDescription(R.id.five_w_alarm, Y.t("Alarm ", "Alarm ") + w.alarm)
         rv.setViewVisibility(R.id.five_w_alarm, if (w.alarm.isEmpty()) View.GONE else View.VISIBLE)
-        rv.setTextViewText(R.id.five_w_ask, Y.t("Ask yaver", "Sor"))
+        // the next meeting
+        if (w.hasMeeting && compact) {
+            // a short widget: one line "14:00  Title" (the time in the accent colour), tighter spacing
+            val time = if (w.meetTime.contains('–')) w.meetTime.substringBefore('–') else w.meetTime
+            val sp = android.text.SpannableString("$time  ${w.meetTitle}")
+            sp.setSpan(android.text.style.ForegroundColorSpan(c.getColor(R.color.five_w_accent)), 0, time.length, android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            rv.setTextViewText(R.id.five_w_title, sp)
+            rv.setViewVisibility(R.id.five_w_time, View.GONE)
+            rv.setViewVisibility(R.id.five_w_bar, View.VISIBLE)
+        } else if (w.hasMeeting) {
+            rv.setTextViewText(R.id.five_w_time, listOf(w.meetTime, w.meetRel).filter { it.isNotEmpty() }.joinToString(" · "))
+            rv.setViewVisibility(R.id.five_w_time, View.VISIBLE)
+            rv.setViewVisibility(R.id.five_w_bar, View.VISIBLE)
+            rv.setTextViewText(R.id.five_w_title, w.meetTitle)
+        } else {
+            rv.setViewVisibility(R.id.five_w_time, View.GONE)
+            rv.setViewVisibility(R.id.five_w_bar, View.GONE)
+            rv.setTextViewText(R.id.five_w_title, w.meetTitle)
+        }
+        if (compact && android.os.Build.VERSION.SDK_INT >= 31) {
+            rv.setViewLayoutMargin(R.id.five_w_card, RemoteViews.MARGIN_TOP, 6f, android.util.TypedValue.COMPLEX_UNIT_DIP)
+            rv.setViewPadding(R.id.five_w_card, dp(c, 12), dp(c, 4), dp(c, 12), dp(c, 4))
+            rv.setViewLayoutMargin(R.id.five_w_askrow, RemoteViews.MARGIN_TOP, 6f, android.util.TypedValue.COMPLEX_UNIT_DIP)
+        }
+        val place = !compact && w.hasMeeting && w.meetPlace.isNotEmpty()
+        rv.setViewVisibility(R.id.five_w_place_row, if (place) View.VISIBLE else View.GONE)
+        if (place) {
+            rv.setTextViewText(R.id.five_w_place, w.meetPlace)
+            rv.setImageViewResource(R.id.five_w_place_icon, if (w.online) R.drawable.five_ic_video else R.drawable.five_ic_place)
+        }
+        rv.setTextViewText(R.id.five_w_ask_text, Y.t("Ask yaver", "yaver'e sor"))
         rv.setContentDescription(R.id.five_w_mic, Y.t("Ask by voice", "Sesle sor"))
-        rv.setOnClickPendingIntent(R.id.five_w_meet, open(c, 1, "nav", "calendar"))
-        rv.setOnClickPendingIntent(R.id.five_w_mail, open(c, 2, "nav", "mail"))
+        rv.setOnClickPendingIntent(R.id.five_w_card, open(c, 1, "nav", "calendar"))
+        rv.setOnClickPendingIntent(R.id.five_w_unread, open(c, 2, "nav", "mail"))
+        rv.setOnClickPendingIntent(R.id.five_w_reply, open(c, 2, "nav", "mail"))
         rv.setOnClickPendingIntent(R.id.five_w_ask, open(c, 3, "assist", keyboard = true))
         rv.setOnClickPendingIntent(R.id.five_w_mic, open(c, 4, "voice"))
         rv.setOnClickPendingIntent(R.id.five_w_head, open(c, 5, "open"))
-        mgr.updateAppWidget(ids, rv)
-        scheduleTick(c, FiveLogic.nextWidgetTick(brief, now))
+        rv.setOnClickPendingIntent(R.id.five_w_alarm, open(c, 5, "open"))
+        return rv
     }
 
     private fun tickIntent(c: Context): PendingIntent = PendingIntent.getBroadcast(c, 399,

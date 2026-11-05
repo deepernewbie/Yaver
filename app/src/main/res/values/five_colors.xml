@@ -1,9 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- yaver widget palette (matches the app: violet accent, blue→violet brand gradient) -->
 <resources>
-    <color name="five_w_bg">#F5FFFFFF</color>
-    <color name="five_w_text">#1F1F1F</color>
-    <color name="five_w_text2">#5F6368</color>
-    <color name="five_w_accent">#0B57D0</color>
+    <color name="five_w_bg">#FFFFFFFF</color>
+    <color name="five_w_stroke">#E7E7EF</color>
+    <color name="five_w_text">#17171C</color>
+    <color name="five_w_text2">#6B6B78</color>
+    <color name="five_w_accent">#5B4FE0</color>
     <color name="five_w_on_accent">#FFFFFF</color>
-    <color name="five_w_chip">#E8EEF9</color>
+    <color name="five_w_chip">#F1F1F6</color>
+    <color name="five_w_chip_text">#3B3B47</color>
+    <color name="five_w_card">#F3F2FE</color>
+    <color name="five_w_ask">#F2F2F7</color>
+    <color name="five_w_grad1">#5B7BFF</color>
+    <color name="five_w_grad2">#9A4DFF</color>
+    <color name="five_w_press">#14000000</color>
 </resources>

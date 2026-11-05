@@ -799,7 +799,7 @@ class Exchange(val t: MailTransport) {
 
     /** Downloads one attachment. An attached e-mail comes back as readable text (name ends in .txt). */
     fun attachment(attId: String, cancel: Cancel? = null): Attachment {
-        val owa = t as? OwaTransport
+        val owa = t.unwrap() as? OwaTransport
         val doc = try {
             call("<m:GetAttachment><m:AttachmentIds><t:AttachmentId Id=\"${Xml.esc(attId)}\"/></m:AttachmentIds></m:GetAttachment>", 120000, cancel)
         } catch (e: MailException) {
@@ -841,7 +841,7 @@ class Exchange(val t: MailTransport) {
         val item = when (kind) {
             "reply", "replyall", "forward" -> {
                 val tag = when (kind) { "reply" -> "ReplyToItem"; "replyall" -> "ReplyAllToItem"; else -> "ForwardItem" }
-                "<t:$tag>${if (to.isNotEmpty() && kind == "forward") "<t:ToRecipients>${mbx(to)}</t:ToRecipients>" else ""}${if (cc.isNotEmpty()) "<t:CcRecipients>${mbx(cc)}</t:CcRecipients>" else ""}<t:ReferenceItemId Id=\"${Xml.esc(ref)}\"/><t:NewBodyContent BodyType=\"HTML\">${Xml.esc(html)}</t:NewBodyContent></t:$tag>"
+                "<t:$tag>${if (to.isNotEmpty() && kind == "forward") "<t:ToRecipients>${mbx(to)}</t:ToRecipients>" else ""}${if (cc.isNotEmpty()) "<t:CcRecipients>${mbx(cc)}</t:CcRecipients>" else ""}${refId(ref, cancel)}<t:NewBodyContent BodyType=\"HTML\">${Xml.esc(html)}</t:NewBodyContent></t:$tag>"
             }
             else -> "<t:Message><t:Subject>${Xml.esc(subject)}</t:Subject><t:Body BodyType=\"HTML\">${Xml.esc(html)}</t:Body>${if (to.isNotEmpty()) "<t:ToRecipients>${mbx(to)}</t:ToRecipients>" else ""}${if (cc.isNotEmpty()) "<t:CcRecipients>${mbx(cc)}</t:CcRecipients>" else ""}</t:Message>"
         }
@@ -849,8 +849,21 @@ class Exchange(val t: MailTransport) {
         return idOf(doc)?.first ?: ""
     }
 
+    /**
+     * The item's current ChangeKey (its version). Exchange refuses SendItem and replies / forwards / meeting responses
+     * whose ReferenceItemId has no ChangeKey ("ChangeKey is required for this operation"). "" when it cannot be read.
+     */
+    private fun changeKey(id: String, cancel: Cancel?): String = try {
+        idOf(call("<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape></m:ItemShape><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:GetItem>", cancel = cancel))?.second ?: ""
+    } catch (e: CancelledException) { throw e } catch (e: Exception) { Diag.i("mail", "ChangeKey not readable: ${e.message}"); "" }
+
+    private fun refId(id: String, cancel: Cancel?): String {
+        val ck = changeKey(id, cancel)
+        return "<t:ReferenceItemId Id=\"${Xml.esc(id)}\"${if (ck.isNotEmpty()) " ChangeKey=\"${Xml.esc(ck)}\"" else ""}/>"
+    }
+
     fun sendDraft(id: String, cancel: Cancel? = null) {
-        val cur = idOf(call("<m:GetItem><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape></m:ItemShape><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:GetItem>", cancel = cancel))
+        val cur = Pair(id, changeKey(id, cancel))
         call("<m:SendItem SaveItemToFolder=\"true\"><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"${if (!cur?.second.isNullOrEmpty()) " ChangeKey=\"${Xml.esc(cur?.second)}\"" else ""}/></m:ItemIds><m:SavedItemFolderId><t:DistinguishedFolderId Id=\"sentitems\"/></m:SavedItemFolderId></m:SendItem>", cancel = cancel)
     }
 
@@ -900,7 +913,7 @@ class Exchange(val t: MailTransport) {
 
     fun respond(id: String, response: String, message: String, cancel: Cancel? = null) {
         val tag = mapOf("accept" to "AcceptItem", "tentative" to "TentativelyAcceptItem", "decline" to "DeclineItem")[response] ?: throw IllegalArgumentException("response must be accept, tentative or decline")
-        call("<m:CreateItem MessageDisposition=\"SendAndSaveCopy\"><m:Items><t:$tag>${if (message.isNotEmpty()) "<t:Body BodyType=\"Text\">${Xml.esc(message)}</t:Body>" else ""}<t:ReferenceItemId Id=\"${Xml.esc(id)}\"/></t:$tag></m:Items></m:CreateItem>", cancel = cancel)
+        call("<m:CreateItem MessageDisposition=\"SendAndSaveCopy\"><m:Items><t:$tag>${if (message.isNotEmpty()) "<t:Body BodyType=\"Text\">${Xml.esc(message)}</t:Body>" else ""}${refId(id, cancel)}</t:$tag></m:Items></m:CreateItem>", cancel = cancel)
     }
 
     fun cancelEvent(id: String, cancel: Cancel? = null) {
@@ -1037,7 +1050,7 @@ class Exchange(val t: MailTransport) {
 
     fun resolve(q: String, limit: Int = 8, cancel: Cancel? = null): List<Person> {
         if (q.trim().length < 2) return emptyList()
-        val owa = t is OwaTransport
+        val owa = t.unwrap() is OwaTransport
         fun req(shape: Boolean) = call("<m:ResolveNames ReturnFullContactData=\"true\" SearchScope=\"ActiveDirectoryContacts\"${if (shape) " ContactDataShape=\"Default\"" else ""}><m:UnresolvedEntry>${Xml.esc(q.trim())}</m:UnresolvedEntry></m:ResolveNames>", 20000, cancel)
         val doc = try {
             // Outlook web may leave the directory contact (with the real name) out unless the shape is named

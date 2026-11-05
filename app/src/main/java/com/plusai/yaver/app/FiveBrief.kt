@@ -70,7 +70,9 @@ object FiveBrief {
             val mails = mailsNow(s)
             FiveLogic.assemble(
                 s?.fetched?.takeIf { it > 0 } ?: now,
-                s?.mailConnected ?: Mail.connected,
+                // the state now, not the cached one: a refresh that ran before the mailbox connected (app start) saved
+                // "false". Configured and no sign-in needed counts as connected (the app connects on first use).
+                Mail.connected || (Cfg.mailConfigured && !Mail.needsSignIn),
                 FiveLogic.pickEvents(evs, now, TimeZone.getDefault()),
                 FiveLogic.pickNeedReply(mails, now),
                 if (s != null && s.unread >= 0) s.unread else mails.count { !it.read },

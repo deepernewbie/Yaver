@@ -56,7 +56,8 @@ object Mail {
                 try {
                     status = Y.t("Connecting…", "Bağlanılıyor…")
                     Diag.i("mail", "connect try $key")
-                    val t = make()
+                    val wasConnected = ex != null
+                    val t = ChangeKeyTransport(make())
                     val e = Exchange(t)
                     e.probe(cancel)
                     Cfg.mailMode = key
@@ -65,6 +66,8 @@ object Mail {
                     status = t.label
                     lastError = ""
                     Diag.i("mail", "connected via $key")
+                    // the "Bugün" card and the widget may still hold a "not connected" from before: refresh them now
+                    try { if (!wasConnected) FiveBrief.refreshAsync(true) } catch (_: Throwable) {}
                     return e
                 } catch (e: CancelledException) {
                     throw e

@@ -1,3 +1,19 @@
+# yaver 5.0.2
+- **Yanıt, iletme ve toplantı yanıtı düzeldi:** "ChangeKey is required for this operation" hatası artık çıkmıyor. Exchange bu işlemlerde e-postanın sürüm anahtarını istiyordu ama yaver göndermiyordu. Artık bütün posta işlemlerinden önce bu anahtar otomatik ekleniyor. Sunucu başka bir işlemde de isterse anahtar eklenip bir kez daha deneniyor.
+- **Posta işlemleri test edildi:** yeni posta, yanıt, tümünü yanıtla, iletme, taslak kaydetme ve gönderme, toplantı daveti, randevu, tüm gün etkinliği, kabul/belki/ret, toplantı güncelleme, toplantı iptali, randevu silme, posta silme ve kalıcı silme sahte sunucuya karşı denendi (26 kontrol).
+- **"Posta bağlantısını sına" testine yeni adımlar:** gerçek sunucunda yanıt taslağı, iletme taslağı (hiçbir şey gönderilmez, hemen silinir) ve yarın 23:00'e bir test randevusu oluşturup silme.
+- **Widget yeniden tasarlandı:**
+  - "y" rozeti ve tarih
+  - okunmamış, yanıt bekleyen ve alarm için küçük etiketler
+  - sıradaki toplantı kartı: saat aralığı, "20 dk sonra", yer ya da çevrim içi simgesi
+  - "yaver'e sor" çubuğu ve renkli mikrofon düğmesi
+  - açık ve koyu temaya uyum
+  - kısa boyda toplantı tek satıra iner
+  - widget seçicide önizleme resmi
+
+# yaver 5.0.1
+- Posta bağlıyken "Bugün" kartında "Posta bağlı değil" yazması düzeltildi. Uygulama açılışında, posta daha bağlanmadan yapılan ilk denemenin "bağlı değil" sonucu 5 dakika boyunca önbellekte kalıyordu. Kart artık o anki gerçek durumu gösteriyor. Posta bağlanınca kart ve widget hemen tazeleniyor.
+
 # yaver 5.0
 
 ## Yeni

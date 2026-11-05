@@ -88,7 +88,12 @@ object FiveLogic {
         }
     }
 
-    class WidgetText(val meetWhen: String, val meetTitle: String, val hasMeeting: Boolean, val mailLine: String, val alarm: String)
+    class WidgetText(
+        val meetWhen: String, val meetTitle: String, val hasMeeting: Boolean, val mailLine: String, val alarm: String,
+        /** "14:00–15:00" / "Tüm gün"; "20 dk sonra" / "şimdi" / "yarın"; place; online meeting */
+        val meetTime: String = "", val meetRel: String = "", val meetPlace: String = "", val online: Boolean = false,
+        val unread: Int = 0, val reply: Int = 0, val connected: Boolean = false
+    )
 
     /** What the home-screen widget shows, from a brief.today JSON. */
     fun widgetText(brief: JSONObject?, now: Long, tz: TimeZone, tr: Boolean): WidgetText {
@@ -121,7 +126,21 @@ object FiveLogic {
             else -> t("$unread unread", "$unread okunmamış") + " · " + t("$reply need reply", "$reply yanıt bekliyor")
         }
         val alarm = brief?.optString("nextAlarm")?.takeIf { brief.has("nextAlarm") && !brief.isNull("nextAlarm") && it.isNotEmpty() } ?: ""
-        return WidgetText(meetWhen, meetTitle, e != null, mailLine, alarm)
+        var meetTime = ""; var meetRel = ""; var place = ""; var online = false
+        if (e != null) {
+            val st = e.optLong("start"); val en = e.optLong("end")
+            meetTime = if (e.optBoolean("allDay")) t("All day", "Tüm gün") else hhmm(st, tz, tr) + "–" + hhmm(en, tz, tr)
+            val mins = ((st - now) / 60000L).toInt()
+            meetRel = when {
+                st <= now -> t("now", "şimdi")
+                dayStart(st, tz) >= tomorrow -> t("tomorrow", "yarın")
+                mins < 60 -> t("in $mins min", "$mins dk sonra")
+                else -> { val hh = mins / 60; val mm = mins % 60; if (mm == 0) t("in $hh h", "$hh sa sonra") else t("in $hh h $mm min", "$hh sa $mm dk sonra") }
+            }
+            online = e.optBoolean("online")
+            place = e.optString("location").trim().ifEmpty { if (online) t("Online meeting", "Çevrim içi toplantı") else "" }
+        }
+        return WidgetText(meetWhen, meetTitle, e != null, mailLine, alarm, meetTime, meetRel, place, online, unread, reply, connected || unread > 0 || reply > 0)
     }
 
     /** When the widget should next redraw by itself: the end of the shown meeting (or its start), at most [maxMs] ahead. */

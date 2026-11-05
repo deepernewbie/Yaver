@@ -7,6 +7,7 @@
     android:previewLayout="@layout/five_widget"
     android:minWidth="250dp"
     android:minHeight="110dp"
+    android:previewImage="@drawable/five_w_preview"
     android:minResizeWidth="180dp"
     android:minResizeHeight="110dp"
     android:targetCellWidth="4"
