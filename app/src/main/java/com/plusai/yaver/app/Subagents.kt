@@ -26,8 +26,8 @@ class SubRun(
 object Subagents {
     /** Native toolsets (TOOLSETS minus planning). Tools not listed in any set are allowed unless Tool.subagentOk is false. */
     val TOOLSETS: LinkedHashMap<String, List<String>> = linkedMapOf(
-        "files" to listOf("list_files", "read_file", "write_file", "delete_file", "read_document", "export_file", "search_documents", "present_files"),
-        "code" to listOf("run_code"),
+        "files" to listOf("list_files", "read_file", "write_file", "delete_file", "read_document", "export_file", "search_documents", "present_files", "write_document"),
+        "code" to listOf("execute_code", "run_code"),
         "web" to listOf("web_search", "read_page", "http_request", "deep_research", "fetch"),
         "browser" to listOf("browser", "open_in_browser", "browser_use"),
         "vision" to listOf("look_at_image"),

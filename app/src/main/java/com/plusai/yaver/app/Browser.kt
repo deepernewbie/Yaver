@@ -179,6 +179,50 @@ object Browser {
     /** Called by the visible browser when the user closes it. */
     fun userDone(url: String?) { userUrl = url; userLatch?.countDown(); userLatch = null }
 
+    // ---------------------------------------------------------------- the user watches the agent's browser (the original's Browser pane)
+    /** The agent's page as the user sees it in the live view: url, title, loading, and a picture (or its text). Never opens a browser. */
+    fun live(mode: String): JSONObject {
+        val o = JSONObject()
+        val v = view ?: return o.put("url", "").put("open", false)
+        val (url, title) = try { onMain(5) { (v.url ?: "") to (v.title ?: "") } } catch (e: Throwable) { "" to "" }
+        o.put("open", true).put("url", url).put("title", title).put("loading", loading)
+        if (url.isEmpty()) return o
+        if (mode == "text") {
+            o.put("text", try { snapshot(12000) } catch (e: Throwable) { e.message ?: "" })
+        } else try {
+            val bmp = onMain(5) {
+                val b = Bitmap.createBitmap(v.width.coerceAtLeast(1), v.height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+                val c = Canvas(b); c.drawColor(Color.WHITE); v.draw(c); b
+            }
+            val sw = W.coerceAtMost(bmp.width)
+            val small = Bitmap.createScaledBitmap(bmp, sw, (bmp.height * (sw.toFloat() / bmp.width)).toInt().coerceAtLeast(1), true)
+            val out = ByteArrayOutputStream(); small.compress(Bitmap.CompressFormat.JPEG, 70, out)
+            o.put("image", "data:image/jpeg;base64," + android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP))
+        } catch (e: Throwable) { o.put("error", e.message ?: "") }
+        return o
+    }
+
+    /** The URL bar of the live view: open a page (also starts the browser) or go back. */
+    fun userGo(url: String): JSONObject {
+        var u = url.trim(); if (u.isEmpty()) throw IllegalArgumentException(Y.t("Enter an address", "Bir adres girin"))
+        if (!Regex("^[a-z]+:", RegexOption.IGNORE_CASE).containsMatchIn(u)) u = if (u.contains('.') && !u.contains(' ')) "https://$u" else "https://duckduckgo.com/html/?q=" + java.net.URLEncoder.encode(u, "UTF-8")
+        if (!Regex("^https?:", RegexOption.IGNORE_CASE).containsMatchIn(u)) throw IllegalArgumentException(Y.t("Only web addresses", "Yalnızca web adresleri"))
+        val v = ensure(); onMain { v.loadUrl(u) }
+        Diag.i("browser", "live view: user opened ${Diag.url(u)}")
+        return JSONObject().put("url", u)
+    }
+    fun userBack(): JSONObject { val v = view ?: return JSONObject().put("ok", false); val ok = onMain { if (v.canGoBack()) { v.goBack(); true } else false }; return JSONObject().put("ok", ok) }
+    fun userReload(): JSONObject { val v = view ?: return JSONObject().put("ok", false); onMain { v.reload() }; return JSONObject().put("ok", true) }
+    /** Take over: the page in the visible browser (sign in, solve a captcha); the agent's browser follows where the user ends. */
+    fun userTakeOver(): JSONObject {
+        val url = currentUrl().ifEmpty { throw IllegalArgumentException(Y.t("yaver's browser has no page open", "yaver'in tarayıcısında açık sayfa yok")) }
+        Y.ui { Y.app.startActivity(Intent(Y.app, BrowserActivity::class.java).putExtra("url", url).putExtra("agent", false).putExtra("follow", true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        return JSONObject().put("url", url)
+    }
+    /** The user closed the visible browser after taking over: the agent's browser continues from that page (cookies are shared). */
+    fun followUser(url: String?) { if (url.isNullOrBlank() || view == null) return; try { onMain { view?.loadUrl(url) } } catch (_: Throwable) {} }
+    fun pageUrl(): String = if (view == null) "" else currentUrl()
+
     private fun screenshot(ctx: ToolCtx, question: String): String {
         val v = ensure()
         val bmp = onMain {

@@ -20,6 +20,7 @@ import android.webkit.HttpAuthHandler
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
@@ -322,7 +323,9 @@ class BrowserActivity : Activity() {
                 try { startActivity(if (sc == "intent") Intent.parseUri(u.toString(), Intent.URI_INTENT_SCHEME) else Intent(Intent.ACTION_VIEW, u)) } catch (_: Throwable) {}
                 return true
             }
-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) { sub.text = url ?: "" }
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) { sub.text = (url ?: "").let { u -> if (u.contains(LocalView.HOST)) Uri.decode(Uri.parse(u).encodedPath ?: "") else u } }
+            /* a disk file opened from Files: its local CSS/JS/images come from the virtual disk (read-only, no bridge to the app) */
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? = LocalView.serve(request)
         }
         web.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) { progress.progress = newProgress; progress.visibility = if (newProgress >= 100) View.INVISIBLE else View.VISIBLE }
@@ -354,7 +357,7 @@ class BrowserActivity : Activity() {
     @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
     override fun onBackPressed() { if (web.canGoBack()) web.goBack() else finish() }
 
-    override fun onDestroy() { if (agent) Browser.userDone(try { web.url } catch (_: Throwable) { null }); try { web.destroy() } catch (_: Throwable) {}; super.onDestroy() }
+    override fun onDestroy() { if (agent) Browser.userDone(try { web.url } catch (_: Throwable) { null }) else if (intent.getBooleanExtra("follow", false)) Browser.followUser(try { web.url } catch (_: Throwable) { null }); try { web.destroy() } catch (_: Throwable) {}; super.onDestroy() }
 }
 
 

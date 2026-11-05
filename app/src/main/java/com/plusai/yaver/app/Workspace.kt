@@ -21,15 +21,26 @@ import java.io.IOException
 object Workspace {
     val root: File get() = File(Y.app.filesDir, "workspace").apply { mkdirs() }
 
+    /**
+     * The real file behind a path as tools and the screens give it — "/workspace/x", "workspace/x", "x" (all the
+     * same workspace file), "/.yaver/skills/…", "/.yaver/memories/…", "/.yaver/PERSONA.md", "/tmp/…" (see VPath).
+     */
     fun resolve(path: String): File {
-        var p = path.trim().replace('\\', '/')
-        p = p.removePrefix("/workspace/").removePrefix("workspace/").removePrefix("/")
-        val f = File(root, p).canonicalFile
-        if (!f.path.startsWith(root.canonicalPath)) throw IllegalArgumentException("path is outside the workspace: $path")
-        return f
+        val vp = VPath.normTool(path)
+        if (vp == "/") return root.canonicalFile
+        return VPath.file(vp)
     }
 
-    fun rel(f: File): String = f.canonicalPath.removePrefix(root.canonicalPath).trimStart('/')
+    /** "/workspace/…" (or "/.yaver/…") for a real file: how paths are shown to the model and the user. */
+    fun vpath(f: File): String = VPath.of(f)
+
+    /** A workspace file's path relative to the workspace ("uploads/a.pdf"); files elsewhere on the disk get their full virtual path. */
+    fun rel(f: File): String {
+        val c = f.canonicalPath; val r = root.canonicalPath
+        if (c == r) return ""
+        if (c.startsWith("$r/")) return c.substring(r.length + 1)
+        return try { VPath.of(f) } catch (e: Throwable) { f.name }
+    }
 
     fun safeName(name: String?): String {
         val n = (name ?: "").replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]"), "_").trim()
@@ -51,7 +62,11 @@ object Workspace {
         return when (ext) {
             "md" -> "text/markdown"; "txt", "log" -> "text/plain"; "csv" -> "text/csv"; "json" -> "application/json"
             "html", "htm" -> "text/html"; "svg" -> "image/svg+xml"; "py" -> "text/x-python"; "js" -> "text/javascript"
-            else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+            "pdf" -> "application/pdf"; "png" -> "image/png"; "jpg", "jpeg" -> "image/jpeg"; "zip" -> "application/zip"
+            "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            else -> (try { MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) } catch (e: Throwable) { null }) ?: "application/octet-stream"
         }
     }
 
@@ -64,7 +79,7 @@ object Workspace {
         return b.none { it == 0.toByte() }
     }
 
-    /** Copies a picked or shared file into the workspace (uploads/). Returns the workspace path. */
+    /** Copies a picked or shared file into the workspace (uploads/, or [dirName]: a workspace folder or any writable folder of the disk such as "/.yaver/skills/x"). Returns its path ("/workspace/uploads/a.pdf"). */
     fun importUri(c: Context, uri: Uri, dirName: String = "uploads"): String {
         var name = "file"
         try {
@@ -76,18 +91,21 @@ object Workspace {
             val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(c.contentResolver.getType(uri) ?: "")
             if (ext != null) name = "$name.$ext"
         }
-        val f = unique(File(root, dirName), safeName(name))
+        val dir = if (dirName.startsWith("/")) VPath.fileW(VPath.normTool(dirName)) else File(root, dirName)
+        val f = unique(dir, safeName(name))
         val ins = c.contentResolver.openInputStream(uri) ?: throw IOException("cannot read $uri")
         ins.use { i -> f.outputStream().use { o -> i.copyTo(o) } }
-        changed(rel(f))
-        return rel(f)
+        val vp = VPath.of(f)
+        VPath.commit(vp)
+        return vp
     }
 
+    /** Saves bytes as a new file in a workspace folder. Returns its path ("/workspace/<dir>/<name>"). */
     fun write(dirName: String, name: String, bytes: ByteArray): String {
         val f = unique(File(root, dirName), safeName(name))
         f.writeBytes(bytes)
         if (dirName != Spill.DIR) changed(rel(f))
-        return rel(f)
+        return VPath.WS + "/" + rel(f)
     }
 
     /** Re-index documents and sync connected folders after a workspace change (never throws). */
@@ -122,7 +140,12 @@ object Workspace {
         }
     } catch (e: Throwable) { null }
 
-    fun uri(c: Context, f: File): Uri = FileProvider.getUriForFile(c, c.packageName + ".files", f)
+    /** A content:// address for other apps. Files outside the workspace (skills, memory views, persona) go through a copy in the cache. */
+    fun uri(c: Context, f: File): Uri {
+        val inWs = f.canonicalPath.startsWith(root.canonicalPath + "/")
+        val g = if (inWs) f else File(c.cacheDir, "share/" + System.currentTimeMillis() % 100000 + "/" + f.name).also { it.parentFile?.mkdirs(); f.copyTo(it, true) }
+        return FileProvider.getUriForFile(c, c.packageName + ".files", g)
+    }
 
     fun open(c: Context, f: File) {
         val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri(c, f), mime(f.name))

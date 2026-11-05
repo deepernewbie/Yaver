@@ -610,9 +610,12 @@ class MailBox(val name: String, val email: String) {
 /** displayTo: the recipients' names as the server lists them ("Ayşe Yılmaz; Mehmet Kaya"), for Sent Items and Drafts. */
 class MailHeader(val id: String, val ck: String, val subject: String, val from: MailBox?, val received: String, val read: Boolean, val attachments: Boolean, val importance: String, val preview: String, val displayTo: String = "")
 /** item=true: an attached e-mail / meeting (ItemAttachment); downloading it gives its text. */
-class MailFile(val id: String, val name: String, val type: String, val size: Long, val inline: Boolean, val item: Boolean = false)
+class MailFile(val id: String, val name: String, val type: String, val size: Long, val inline: Boolean, val item: Boolean = false, val cid: String = "")
 class MailMessage(val h: MailHeader, val kind: String, val to: List<MailBox>, val cc: List<MailBox>, val body: String, val files: List<MailFile>, val invite: JSONObject?)
-class CalEvent(val id: String, val subject: String, val start: String, val end: String, val location: String, val organizer: MailBox?, val allDay: Boolean, val response: String, val cancelled: Boolean, val meeting: Boolean, val created: String = "")
+class CalEvent(val id: String, val subject: String, val start: String, val end: String, val location: String, val organizer: MailBox?, val allDay: Boolean, val response: String, val cancelled: Boolean, val meeting: Boolean, val created: String = "",
+    val recurring: Boolean = false, val freeBusy: String = "", val categories: List<String> = emptyList())
+/** The reading view's message: the HTML body (when the mail has one), draft flag and send time on top of [MailMessage]. */
+class MailFull(val m: MailMessage, val html: String, val isHtml: Boolean, val isDraft: Boolean, val sent: String)
 
 /** Mailbox operations (ported from yaver's EWS object). Works the same over EWS or Outlook web. */
 class Exchange(val t: MailTransport) {
@@ -768,7 +771,7 @@ class Exchange(val t: MailTransport) {
     private fun filesOf(it: Element): List<MailFile> {
         fun attId(a: Element) = Xml.kids(a, "AttachmentId").firstOrNull()?.getAttribute("Id") ?: ""
         val files = Xml.kids(it, "FileAttachment").map { a ->
-            MailFile(attId(a), own(a, "Name"), own(a, "ContentType"), own(a, "Size").toLongOrNull() ?: 0, own(a, "IsInline") == "true")
+            MailFile(attId(a), own(a, "Name"), own(a, "ContentType"), own(a, "Size").toLongOrNull() ?: 0, own(a, "IsInline") == "true", cid = own(a, "ContentId").trim().removePrefix("<").removeSuffix(">"))
         }
         val items = Xml.kids(it, "ItemAttachment").map { a ->
             MailFile(attId(a), own(a, "Name").ifEmpty { "attached item" }, own(a, "ContentType").ifEmpty { "message/rfc822" }, own(a, "Size").toLongOrNull() ?: 0, false, item = true)
@@ -860,15 +863,17 @@ class Exchange(val t: MailTransport) {
         return idOf(doc)?.first ?: id
     }
 
-    fun remove(id: String, permanent: Boolean, cancel: Cancel? = null) {
+    /** Delete: to Deleted Items (returns the moved item's new id, which Undo needs; null when the server only deleted it), or for good. */
+    fun remove(id: String, permanent: Boolean, cancel: Cancel? = null): String? {
         if (permanent) {
             try { call("<m:DeleteItem DeleteType=\"HardDelete\"><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:DeleteItem>", cancel = cancel) }
             catch (e: MailException) { if (e.code == "ErrorItemNotFound") throw e; call("<m:DeleteItem DeleteType=\"SoftDelete\"><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:DeleteItem>", cancel = cancel) }
-            return
+            return null
         }
-        try { move(id, "deleteditems", cancel) } catch (e: MailException) {
+        return try { move(id, "deleteditems", cancel) } catch (e: MailException) {
             if (e.code == "ErrorItemNotFound") throw e
             call("<m:DeleteItem DeleteType=\"MoveToDeletedItems\"><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:DeleteItem>", cancel = cancel)
+            null
         }
     }
 
@@ -900,6 +905,132 @@ class Exchange(val t: MailTransport) {
 
     fun cancelEvent(id: String, cancel: Cancel? = null) {
         call("<m:DeleteItem DeleteType=\"MoveToDeletedItems\" SendMeetingCancellations=\"SendToAllAndSaveCopy\"><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:DeleteItem>", cancel = cancel)
+    }
+
+    // ---------------------------------------------------------------- reading view, drafts and calendar views (ported from the full Outlook-style view)
+
+    /** The server refused item:IsDraft (old servers): asks without it. */
+    var noIsDraft = false
+    /** The server refused IsRecurring / LegacyFreeBusyStatus / Categories in a calendar view. */
+    var noCalExtras = false
+
+    /** A message for the reading view: HTML body (BodyType HTML), attachments with their content ids, IsDraft. */
+    fun getFull(id: String, cancel: Cancel? = null): MailFull {
+        val props = listOf("message:ToRecipients", "message:CcRecipients", "item:Attachments", "item:DateTimeReceived", "item:DateTimeSent", "message:IsRead", "message:From", "item:Importance", "item:Body") + (if (noIsDraft) emptyList() else listOf("item:IsDraft"))
+        val doc = try {
+            call("<m:GetItem><m:ItemShape><t:BaseShape>Default</t:BaseShape><t:BodyType>HTML</t:BodyType><t:AdditionalProperties>${props.joinToString("") { "<t:FieldURI FieldURI=\"$it\"/>" }}</t:AdditionalProperties></m:ItemShape><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:GetItem>", cancel = cancel)
+        } catch (e: MailException) {
+            if (!noIsDraft && Regex("IsDraft|property|schema", RegexOption.IGNORE_CASE).containsMatchIn(e.message ?: "")) { noIsDraft = true; return getFull(id, cancel) }
+            throw e
+        }
+        val it = Xml.kids(doc, "Items").firstOrNull()?.let { Xml.children(it).firstOrNull() } ?: throw MailException("message not found", "ErrorItemNotFound")
+        val h = header(it)
+        val kind = kindOf(it)
+        var invite: JSONObject? = null
+        if (kind.contains("MeetingRequest") || kind.contains("MeetingCancellation")) {
+            invite = inviteOf(it)
+            if (invite.optString("start").isEmpty()) try { invite = inviteDetails(id, cancel) } catch (_: Exception) {}
+        }
+        val bodyEl = Xml.children(it).firstOrNull { x -> x.localName == "Body" }
+        val raw = bodyEl?.textContent ?: ""
+        val isHtml = bodyEl?.getAttribute("BodyType")?.equals("HTML", true) == true || Regex("^\\s*<(!doctype|html|div|p|table|body|meta|head|span|font|style)", RegexOption.IGNORE_CASE).containsMatchIn(raw)
+        val text = (if (isHtml) Html.toText(raw) else raw).replace("\r\n", "\n").replace(Regex("\\n{3,}"), "\n\n").trim()
+        val to = boxes(it, "ToRecipients").ifEmpty { names(own(it, "DisplayTo")) }
+        val cc = boxes(it, "CcRecipients").ifEmpty { names(own(it, "DisplayCc")) }
+        return MailFull(MailMessage(h, kind, to, cc, text, filesOf(it), invite), if (isHtml) raw else "", isHtml, own(it, "IsDraft") == "true", own(it, "DateTimeSent"))
+    }
+
+    /** Edits a saved draft in place: recipients, subject and body (HTML). Empty recipient lists are cleared. Returns the (possibly new) id. */
+    fun updateDraftFull(id: String, to: List<String>, cc: List<String>, subject: String, html: String, cancel: Cancel? = null): String {
+        fun set(uri: String, inner: String) = "<t:SetItemField><t:FieldURI FieldURI=\"$uri\"/><t:Message>$inner</t:Message></t:SetItemField>"
+        fun del(uri: String) = "<t:DeleteItemField><t:FieldURI FieldURI=\"$uri\"/></t:DeleteItemField>"
+        val clean = { l: List<String> -> l.map { it.trim() }.filter { it.isNotEmpty() } }
+        val t = clean(to); val c = clean(cc)
+        val ups = set("item:Subject", "<t:Subject>${Xml.esc(subject)}</t:Subject>") + set("item:Body", "<t:Body BodyType=\"HTML\">${Xml.esc(html)}</t:Body>") +
+            (if (t.isNotEmpty()) set("message:ToRecipients", "<t:ToRecipients>${mbx(t)}</t:ToRecipients>") else del("message:ToRecipients")) +
+            (if (c.isNotEmpty()) set("message:CcRecipients", "<t:CcRecipients>${mbx(c)}</t:CcRecipients>") else del("message:CcRecipients"))
+        val doc = call("<m:UpdateItem MessageDisposition=\"SaveOnly\" ConflictResolution=\"AlwaysOverwrite\"><m:ItemChanges><t:ItemChange><t:ItemId Id=\"${Xml.esc(id)}\"/><t:Updates>$ups</t:Updates></t:ItemChange></m:ItemChanges></m:UpdateItem>", cancel = cancel)
+        return idOf(doc)?.first?.ifEmpty { null } ?: id
+    }
+
+    private fun attendeesJson(it: Element, name: String): JSONArray {
+        val c = Xml.kids(it, name).firstOrNull() ?: return JSONArray()
+        return JSONArray(Xml.kids(c, "Attendee").map { a -> val b = box(a); JSONObject().put("name", b?.name ?: "").put("email", b?.email ?: "").put("response", Xml.txt(a, "ResponseType")) })
+    }
+
+    /** One calendar item with its attendees and HTML description (the event details view). Times are epoch ms. */
+    fun getEvent(id: String, cancel: Cancel? = null): JSONObject {
+        val props = listOf("item:Subject", "item:Body", "calendar:Start", "calendar:End", "calendar:Location", "calendar:Organizer", "calendar:IsAllDayEvent", "calendar:MyResponseType", "calendar:IsCancelled", "calendar:IsMeeting", "calendar:IsRecurring", "calendar:RequiredAttendees", "calendar:OptionalAttendees", "calendar:LegacyFreeBusyStatus", "item:Categories")
+        val doc = call("<m:GetItem><m:ItemShape><t:BaseShape>Default</t:BaseShape><t:BodyType>HTML</t:BodyType><t:AdditionalProperties>${props.joinToString("") { "<t:FieldURI FieldURI=\"$it\"/>" }}</t:AdditionalProperties></m:ItemShape><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:GetItem>", cancel = cancel)
+        val it = Xml.kids(doc, "Items").firstOrNull()?.let { Xml.children(it).firstOrNull() } ?: throw MailException("event not found", "ErrorItemNotFound")
+        val org = box(Xml.kids(it, "Organizer").firstOrNull())
+        val bodyEl = Xml.children(it).firstOrNull { x -> x.localName == "Body" }
+        val raw = bodyEl?.textContent ?: ""
+        val isHtml = bodyEl?.getAttribute("BodyType")?.equals("HTML", true) == true || Regex("^\\s*<", RegexOption.IGNORE_CASE).containsMatchIn(raw)
+        return JSONObject().put("id", idOf(it)?.first?.ifEmpty { null } ?: id).put("subject", own(it, "Subject").ifEmpty { "(no title)" })
+            .put("start", parseTime(own(it, "Start"))).put("end", parseTime(own(it, "End"))).put("location", own(it, "Location"))
+            .put("organizer", org?.let { JSONObject().put("name", it.name).put("email", it.email) } ?: JSONObject.NULL)
+            .put("allDay", own(it, "IsAllDayEvent") == "true").put("response", own(it, "MyResponseType")).put("cancelled", own(it, "IsCancelled") == "true")
+            .put("meeting", own(it, "IsMeeting") == "true").put("recurring", own(it, "IsRecurring") == "true").put("freeBusy", own(it, "LegacyFreeBusyStatus"))
+            .put("categories", JSONArray(Xml.kids(it, "Categories").firstOrNull()?.let { c -> Xml.children(c).map { s -> s.textContent } } ?: emptyList<String>()))
+            .put("required", attendeesJson(it, "RequiredAttendees")).put("optional", attendeesJson(it, "OptionalAttendees"))
+            .put("html", if (isHtml) raw else "").put("text", (if (isHtml) Html.toText(raw) else raw).trim())
+    }
+
+    /** Calendar items overlapping [start, end) with recurrence, free/busy and categories (old servers: without them). */
+    fun eventsFull(start: Long, end: Long, cancel: Cancel? = null): List<CalEvent> {
+        val base = listOf("item:Subject", "calendar:Start", "calendar:End", "calendar:Location", "calendar:Organizer", "calendar:IsAllDayEvent", "calendar:MyResponseType", "calendar:IsCancelled", "calendar:IsMeeting")
+        val props = if (noCalExtras) base else base + listOf("calendar:IsRecurring", "calendar:LegacyFreeBusyStatus", "item:Categories")
+        val doc = try {
+            call("<m:FindItem Traversal=\"Shallow\"><m:ItemShape><t:BaseShape>IdOnly</t:BaseShape><t:AdditionalProperties>${props.joinToString("") { "<t:FieldURI FieldURI=\"$it\"/>" }}</t:AdditionalProperties></m:ItemShape><m:CalendarView MaxEntriesReturned=\"500\" StartDate=\"${iso(start)}\" EndDate=\"${iso(end)}\"/><m:ParentFolderIds><t:DistinguishedFolderId Id=\"calendar\"/></m:ParentFolderIds></m:FindItem>", cancel = cancel)
+        } catch (e: MailException) {
+            if (!noCalExtras && Regex("property|schema|Categories|FreeBusy|Recurring", RegexOption.IGNORE_CASE).containsMatchIn(e.message ?: "")) { noCalExtras = true; return eventsFull(start, end, cancel) }
+            throw e
+        }
+        val items = Xml.kids(doc, "Items").firstOrNull() ?: return emptyList()
+        return Xml.children(items).map { c ->
+            CalEvent(idOf(c)?.first ?: "", own(c, "Subject").ifEmpty { "(no title)" }, own(c, "Start"), own(c, "End"), own(c, "Location"),
+                box(Xml.kids(c, "Organizer").firstOrNull()), own(c, "IsAllDayEvent") == "true", own(c, "MyResponseType"), own(c, "IsCancelled") == "true", own(c, "IsMeeting") == "true", "",
+                own(c, "IsRecurring") == "true", own(c, "LegacyFreeBusyStatus").ifEmpty { "Busy" }, Xml.kids(c, "Categories").firstOrNull()?.let { k -> Xml.children(k).map { s -> s.textContent } } ?: emptyList())
+        }.sortedBy { parseTime(it.start) }
+    }
+
+    private fun attendeeXml(tag: String, list: List<String>) = if (list.isEmpty()) "" else "<t:$tag>${list.joinToString("") { "<t:Attendee>${mbx(listOf(it))}</t:Attendee>" }}</t:$tag>"
+
+    /** New calendar item (all-day, required and optional attendees, HTML description); invitations go out when there are attendees. */
+    fun createEventFull(subject: String, start: Long, end: Long, allDay: Boolean, location: String, html: String, attendees: List<String>, optional: List<String>, cancel: Cancel? = null): String {
+        val inv = attendees.isNotEmpty() || optional.isNotEmpty()
+        val doc = call("<m:CreateItem SendMeetingInvitations=\"${if (inv) "SendToAllAndSaveCopy" else "SendToNone"}\"><m:SavedItemFolderId><t:DistinguishedFolderId Id=\"calendar\"/></m:SavedItemFolderId><m:Items><t:CalendarItem><t:Subject>${Xml.esc(subject)}</t:Subject>" +
+            (if (html.isNotEmpty()) "<t:Body BodyType=\"HTML\">${Xml.esc(html)}</t:Body>" else "") +
+            "<t:Start>${iso(start)}</t:Start><t:End>${iso(end)}</t:End>" + (if (allDay) "<t:IsAllDayEvent>true</t:IsAllDayEvent>" else "") +
+            (if (location.isNotEmpty()) "<t:Location>${Xml.esc(location)}</t:Location>" else "") +
+            attendeeXml("RequiredAttendees", attendees) + attendeeXml("OptionalAttendees", optional) +
+            "</t:CalendarItem></m:Items></m:CreateItem>", cancel = cancel)
+        return idOf(doc)?.first ?: ""
+    }
+
+    /**
+     * Edits a calendar item: subject, time, all-day, location, description and attendees. A meeting's attendees get the
+     * update ([notify]); for an appointment without attendees nothing is sent. Returns the (possibly new) id.
+     */
+    fun updateEvent(id: String, subject: String, start: Long, end: Long, allDay: Boolean, location: String, html: String, attendees: List<String>, optional: List<String>, notify: Boolean, cancel: Cancel? = null): String {
+        fun set(uri: String, inner: String) = "<t:SetItemField><t:FieldURI FieldURI=\"$uri\"/><t:CalendarItem>$inner</t:CalendarItem></t:SetItemField>"
+        fun del(uri: String) = "<t:DeleteItemField><t:FieldURI FieldURI=\"$uri\"/></t:DeleteItemField>"
+        val ups = set("item:Subject", "<t:Subject>${Xml.esc(subject)}</t:Subject>") +
+            set("item:Body", "<t:Body BodyType=\"HTML\">${Xml.esc(html)}</t:Body>") +
+            set("calendar:Start", "<t:Start>${iso(start)}</t:Start>") + set("calendar:End", "<t:End>${iso(end)}</t:End>") +
+            set("calendar:IsAllDayEvent", "<t:IsAllDayEvent>$allDay</t:IsAllDayEvent>") +
+            (if (location.isNotEmpty()) set("calendar:Location", "<t:Location>${Xml.esc(location)}</t:Location>") else del("calendar:Location")) +
+            (if (attendees.isNotEmpty()) set("calendar:RequiredAttendees", attendeeXml("RequiredAttendees", attendees)) else del("calendar:RequiredAttendees")) +
+            (if (optional.isNotEmpty()) set("calendar:OptionalAttendees", attendeeXml("OptionalAttendees", optional)) else del("calendar:OptionalAttendees"))
+        val send = if (notify) "SendToAllAndSaveCopy" else "SendToNone"
+        val doc = call("<m:UpdateItem ConflictResolution=\"AlwaysOverwrite\" SendMeetingInvitationsOrCancellations=\"$send\"><m:ItemChanges><t:ItemChange><t:ItemId Id=\"${Xml.esc(id)}\"/><t:Updates>$ups</t:Updates></t:ItemChange></m:ItemChanges></m:UpdateItem>", cancel = cancel)
+        return idOf(doc)?.first?.ifEmpty { null } ?: id
+    }
+
+    /** Removes an appointment (or a meeting someone else organised) from the calendar without sending anything. */
+    fun deleteEvent(id: String, cancel: Cancel? = null) {
+        call("<m:DeleteItem DeleteType=\"MoveToDeletedItems\" SendMeetingCancellations=\"SendToNone\"><m:ItemIds><t:ItemId Id=\"${Xml.esc(id)}\"/></m:ItemIds></m:DeleteItem>", cancel = cancel)
     }
 
     class Person(val name: String, val email: String, val title: String, val dept: String)

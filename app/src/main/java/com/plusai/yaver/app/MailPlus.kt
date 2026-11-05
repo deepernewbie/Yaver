@@ -29,9 +29,14 @@ object MailPlusCfg {
     var taskSort: String get() = Prefs.get("mailx.taskSort", "manual"); set(v) = Prefs.put("mailx.taskSort", v)
     /** Approval cards for task, calendar and mail changes even when "ask before risky actions" is off. */
     var workConfirm: Boolean get() = Prefs.on("mailx.workConfirm", true); set(v) = Prefs.set("mailx.workConfirm", v)
+    /** Always show pictures from the internet in e-mails (otherwise blocked until "Show pictures"). */
+    var images: Boolean get() = Prefs.on("mailx.images", false); set(v) = Prefs.set("mailx.images", v)
+    /** Calendar view: agenda | day | workweek | week | month. */
+    var calView: String get() = Prefs.get("mailx.calView", "agenda"); set(v) = Prefs.put("mailx.calView", v)
 
     fun toJson(): JSONObject = JSONObject().put("triage", triage).put("vision", vision).put("indexMax", indexMax).put("briefAt", briefAt)
         .put("outlookSync", outlookSync).put("taskSort", taskSort).put("workConfirm", workConfirm)
+        .put("images", images).put("calView", calView)
 
     fun set(k: String, v: Any?) {
         when (k) {
@@ -42,6 +47,8 @@ object MailPlusCfg {
             "outlookSync" -> outlookSync = v?.toString()?.takeIf { it in setOf("ask", "on", "off") } ?: "ask"
             "taskSort" -> taskSort = v?.toString() ?: "manual"
             "workConfirm" -> workConfirm = v == true || v == "1" || v == "true"
+            "images" -> images = v == true || v == "1" || v == "true"
+            "calView" -> calView = v?.toString()?.takeIf { it in setOf("agenda", "day", "workweek", "week", "month") } ?: "agenda"
             else -> throw IllegalArgumentException("unknown setting $k")
         }
     }

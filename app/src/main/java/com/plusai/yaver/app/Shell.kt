@@ -146,7 +146,11 @@ class Shell private constructor() {
             val r = ch.redir
             if (stdin != null) {
                 if (r != null && r.path == "/dev/null") { /* discarded */ }
-                else if (r?.path != null) { val p = R(r.path); if (r.mode == ">>") VPath.append(p, stdin) else VPath.write(p, stdin) }
+                else if (r?.path != null) {
+                    val p = R(r.path)
+                    try { if (r.mode == ">>") VPath.append(p, stdin) else VPath.write(p, stdin) }
+                    catch (e: IllegalArgumentException) { out.add("sh: ${e.message}"); status = 1 }
+                }
                 else if (stdin != "") out.add(stdin.removeSuffix("\n"))
             }
             ci++
@@ -185,44 +189,53 @@ class Shell private constructor() {
         return core(cmd, args0, stdin)
     }
 
-    private fun mkdirs(vp: String) { val f = VPath.file(vp); if (f.isFile) throw ShErr("cannot create directory $vp: a file exists"); f.mkdirs() }
+    private fun wr(vp: String): File = try { VPath.fileW(vp) } catch (e: IllegalArgumentException) { throw ShErr(e.message ?: "read-only: $vp") }
+
+    private fun mkdirs(vp: String) { val f = wr(vp); if (f.isFile) throw ShErr("cannot create directory $vp: a file exists"); f.mkdirs() }
 
     private fun rm(vp: String, recursive: Boolean): Int {
-        if (vp == "/" || vp == VPath.WS) throw ShErr("refusing to remove $vp")
-        val f = VPath.file(vp)
-        if (f.isFile) { f.delete(); return 1 }
+        if (vp in VPath.PROTECTED) throw ShErr("refusing to remove $vp (a fixed folder of the disk)")
+        val f = wr(vp)
+        if (f.isFile) { f.delete(); VPath.commit(vp); return 1 }
         if (!f.isDirectory) throw ShErr("ENOENT: $vp")
         val n = f.walkTopDown().count { it.isFile }
         if (!recursive && (f.list()?.isNotEmpty() == true)) throw ShErr("$vp is a directory (use -r)")
         f.deleteRecursively()
+        VPath.commit(vp)
         return n
     }
 
+    /** dest as a path: into [b] when it is a folder. */
+    private fun into(s: String, b: String) = if (VPath.isDir(b)) VPath.join(b, VPath.base(s)) else b
+
     private fun mv(a: String, b: String) {
-        val s = VPath.file(a); if (!s.exists()) throw ShErr("ENOENT: $a")
-        var d = VPath.file(b); if (d.isDirectory) d = File(d, s.name)
+        if (a in VPath.PROTECTED) throw ShErr("cannot move $a (a fixed folder of the disk)")
+        val s = wr(a); if (!s.exists()) throw ShErr("ENOENT: $a")
+        val to = into(a, b); val d = wr(to)
         if (s.isDirectory && d.canonicalPath.startsWith(s.canonicalPath + File.separator)) throw ShErr("cannot move $a into itself")
         d.parentFile?.mkdirs()
         if (!s.renameTo(d)) { s.copyRecursively(d, true); s.deleteRecursively() }
+        VPath.commit(a); VPath.commit(to)
     }
 
     private fun cp(a: String, b: String) {
         val s = VPath.file(a); if (!s.exists()) throw ShErr("ENOENT: $a")
-        var d = VPath.file(b); if (d.isDirectory && s.isFile) d = File(d, s.name) else if (d.isDirectory && s.isDirectory) d = File(d, s.name)
+        val to = into(a, b); val d = wr(to)
         d.parentFile?.mkdirs()
         if (s.isDirectory) s.copyRecursively(d, true) else s.copyTo(d, true)
+        VPath.commit(to)
     }
 
     private fun core(cmd: String, args: List<String>, stdin: String?): String {
         val (f, a) = flags(args)
         when (cmd) {
             "pwd" -> return cwd + "\n"
-            "cd" -> { val p = R(a.getOrNull(0) ?: VPath.WS); if (!VPath.isDir(p)) throw ShErr("no such directory $p"); cwd = p; return "" }
+            "cd" -> { val p = R(a.getOrNull(0) ?: VPath.WS); if (!VPath.isDir(p)) throw ShErr("no such directory $p" + FileTools.hint(p)); cwd = p; return "" }
             "ls" -> {
                 val p = R(a.getOrNull(0) ?: ".")
                 if (VPath.isFile(p)) { val st = VPath.file(p); return if ('l' in f) "- ${st.length().toString().padStart(9)} ${iso16(st.lastModified())} $p  (${fmtB(st.length())})\n" else p + "\n" }
-                if (!VPath.isDir(p)) throw ShErr("ENOENT: $p")
-                return VPath.list(p).filter { 'a' in f || !it.name.startsWith(".") }.joinToString("\n") { e ->
+                if (!VPath.isDir(p)) throw ShErr("ENOENT: $p" + FileTools.hint(p))
+                return VPath.list(p).filter { 'a' in f || p == "/" || !it.name.startsWith(".") }.joinToString("\n") { e ->
                     if ('l' in f) "${if (e.dir) "d" else "-"} ${(if (e.dir) "-" else e.size.toString()).padStart(9)} ${if (e.dir) "" else iso16(e.m)} ${e.name}${if (e.dir) "/" else ""}" else e.name + if (e.dir) "/" else ""
                 } + "\n"
             }
@@ -274,6 +287,7 @@ class Shell private constructor() {
             }
             "find" -> {
                 val root = R(args.firstOrNull()?.takeIf { !it.startsWith("-") } ?: ".")
+                if (!VPath.exists(root)) throw ShErr("ENOENT: $root" + FileTools.hint(root))
                 val ni = args.indexOf("-name"); val ti = args.indexOf("-type")
                 val g = if (ni >= 0) args.getOrNull(ni + 1) else null; val type = if (ti >= 0) args.getOrNull(ti + 1) else null
                 val re = g?.let { VPath.globRe(it) }
@@ -653,7 +667,7 @@ class Shell private constructor() {
             "stat" -> return join(args.map { p -> val q = R(p); if (!VPath.exists(q)) throw ShErr("no such file $q"); val st = VPath.file(q); "  File: $q\n  Size: ${if (st.isFile) st.length() else 0}\tType: ${if (st.isDirectory) "directory" else "regular file"}\nModify: ${isoFull(st.lastModified())}" })
             "file" -> return join(args.map { p -> val q = R(p); if (VPath.isDir(q)) "$p: directory" else if (!VPath.isFile(q)) "$p: cannot open" else "$p: ${if (VPath.isText(q)) "text" else "data"} (${Workspace.mime(q)})" })
             "env", "printenv" -> {
-                val env = linkedMapOf("HOME" to "/", "PWD" to cwd, "SHELL" to "/bin/yaver-sh", "USER" to "yaver"); env.putAll(vars)
+                val env = linkedMapOf("HOME" to VPath.HOME, "PWD" to cwd, "SHELL" to "/bin/yaver-sh", "USER" to "yaver"); env.putAll(vars)
                 return if (args.isNotEmpty()) join(args.map { env[it] ?: "" }) else join(env.map { "${it.key}=${it.value}" })
             }
             "which", "type", "command" -> {
@@ -669,7 +683,10 @@ class Shell private constructor() {
             "uname" -> return (if (args.contains("-a")) "yaver-sh android-workspace 1.0" else "yaver-sh") + "\n"
             "hostname" -> return "phone\n"
             "id" -> return "uid=1000(yaver) gid=1000(yaver)\n"
-            "df" -> { val used = VPath.walk(VPath.WS).sumOf { VPath.file(it).length() }; return "Filesystem  Used\nworkspace   ${fmtB(used)}\n" }
+            "df" -> {
+                fun used(p: String) = try { VPath.walk(p).sumOf { VPath.file(it).length() } } catch (e: Exception) { 0L }
+                return "Area              Used        Mode\n/workspace        ${fmtB(used(VPath.WS)).padEnd(12)}rw\n/.yaver/skills    ${fmtB(used(VPath.SKILLS)).padEnd(12)}rw\n/.yaver/memories  ${fmtB(used(VPath.MEMORIES)).padEnd(12)}ro\n/.yaver/sessions  ${fmtB(used(VPath.SESSIONS)).padEnd(12)}ro\n/tmp              ${fmtB(used(VPath.TMP)).padEnd(12)}rw\n"
+            }
             "less", "more", "most" -> return src(args.filter { !it.startsWith("-") }, stdin)
             "clear", "reset" -> return ""
             "history" -> return "(no history in this shell)\n"
@@ -824,15 +841,35 @@ class Shell private constructor() {
         return v.toLong()
     }
 
-    /** Words for `for … in` and unquoted globs: matched against the workspace. */
+    /** Words for `for … in` and unquoted globs (wildcards in any part of the path, e.g. skills/STAR/scripts/STAR.js), matched against the disk. */
     private fun glob(w: String): List<String> {
         if (!w.contains('*') && !w.contains('?')) return listOf(w)
         val abs = w.startsWith("/")
-        val dir = if (w.contains('/')) w.substring(0, w.lastIndexOf('/')).ifEmpty { "/" } else "."
-        val re = VPath.globRe(w.substring(w.lastIndexOf('/') + 1))
-        val d = VPath.norm(dir, cwd)
-        if (!VPath.isDir(d)) return listOf(w)
-        val hits = VPath.list(d).filter { re.matches(it.name) && !it.name.startsWith(".") }.map { if (dir == ".") it.name else if (abs) it.path else dir + "/" + it.name }.sorted()
+        val parts = w.split('/').filter { it.isNotEmpty() }
+        // (shown form, virtual path) pairs, one segment at a time
+        var cur = listOf(Pair(if (abs) "" else "", if (abs) "/" else cwd))
+        for ((i, seg) in parts.withIndex()) {
+            val last = i == parts.size - 1
+            val next = ArrayList<Pair<String, String>>()
+            for ((shown, vp) in cur) {
+                fun show(n: String) = if (abs) (if (shown.isEmpty()) "/$n" else "$shown/$n") else (if (shown.isEmpty()) n else "$shown/$n")
+                if (!seg.contains('*') && !seg.contains('?')) {
+                    val p = VPath.norm(seg, vp)
+                    if (if (last) VPath.exists(p) else VPath.isDir(p)) next.add(Pair(show(seg), p))
+                    continue
+                }
+                if (!VPath.isDir(vp)) continue
+                val re = VPath.globRe(seg)
+                for (e in try { VPath.list(vp) } catch (_: Exception) { emptyList() }) {
+                    if (!re.matches(e.name) || (e.name.startsWith(".") && !seg.startsWith("."))) continue
+                    if (!last && !e.dir) continue
+                    next.add(Pair(show(e.name), e.path))
+                }
+            }
+            cur = next
+            if (cur.isEmpty()) break
+        }
+        val hits = cur.map { it.first }.filter { it.isNotEmpty() }.sorted()
         return hits.ifEmpty { listOf(w) }
     }
 
@@ -965,17 +1002,17 @@ class Shell private constructor() {
         private val shells = ConcurrentHashMap<String, Shell>()
         fun of(convoId: String): Shell = shells.getOrPut(convoId) { Shell() }
 
-        const val HELP = "Virtual shell over yaver's workspace on the phone (no real OS).\nFiles: pwd cd ls[-la] tree cat head tail wc touch mkdir rm[-rf] rmdir mv cp[-r] ln stat file find[-name -type] du df realpath tee\nText: echo printf grep[-inrvlc] sort[-nru] uniq cut tr sed awk jq diff rev tac nl paste column fold shuf xargs base64 sha256sum sha1sum md5sum\nScripting: VAR=value  \$VAR \${VAR} \$? \$(cmd) `cmd` \$((1+2))  for x in a b *.csv; do …; done  while/until COND; do …; done  if COND; then …; elif …; else …; fi  test / [ ]  true false seq expr basename dirname sleep export break continue exit\nOperators: | ; && || > >> 2>/dev/null\nSystem: date whoami uname hostname id env printenv which clear\nNet & archives: curl/wget[-o] unzip [-d] tar -x|-t|-c [-C] gunzip zip\nCode: python -c|FILE (CPython/Pyodide) pip install|list|uninstall node -e|FILE\n"
+        const val HELP = "Virtual shell over yaver's disk on the phone (no real OS).\nDisk: /workspace (your files, cwd) · /.yaver = ~ (PERSONA.md, skills/<name>/ with scripts and templates, memories/ read-only, sessions/ read-only) · /tmp\nFiles: pwd cd ls[-la] tree cat head tail wc touch mkdir rm[-rf] rmdir mv cp[-r] ln stat file find[-name -type] du df realpath tee\nText: echo printf grep[-inrvlc] sort[-nru] uniq cut tr sed awk jq diff rev tac nl paste column fold shuf xargs base64 sha256sum sha1sum md5sum\nScripting: VAR=value  \$VAR \${VAR} \$? \$(cmd) `cmd` \$((1+2))  for x in a b *.csv; do …; done  while/until COND; do …; done  if COND; then …; elif …; else …; fi  test / [ ]  true false seq expr basename dirname sleep export break continue exit\nOperators: | ; && || > >> 2>/dev/null\nSystem: date whoami uname hostname id env printenv which clear\nNet & archives: curl/wget[-o] unzip [-d] tar -x|-t|-c [-C] gunzip zip [-r]\nCode: python -c|FILE (CPython/Pyodide; sees the same disk) pip install|list|uninstall node -e|FILE (JavaScript)\n"
 
         fun register() {
             Tools.add(Tool(
                 "terminal",
-                "Run a command in the virtual shell over the workspace (no real OS; run 'help' for commands). Supports pipes, ;, &&, ||, > and >>, variables, \$(…), for/while/if loops and test, plus sed, awk, cut, tr, xargs, jq, diff and more (run help).",
+                "Run a command in the virtual shell over yaver's disk (no real OS; run 'help' for commands): /workspace (cwd), /.yaver (= ~: skills/<name>/scripts…, memories/, PERSONA.md), /tmp. Supports pipes, ;, &&, ||, > and >>, variables, \$(…), for/while/if loops and test, plus sed, awk, cut, tr, xargs, jq, diff, zip/unzip/tar, python, node and more (run help).",
                 P.props("command" to P.s("Shell command line")), listOf("command")
             ) { a, ctx ->
                 val command = a.optString("command", "")
-                if (Regex("\\brm\\s+-[a-z]*r[a-z]*\\s+(/|~|/workspace)/?\\s*($|[;&|])").containsMatchIn(command))
-                    return@Tool "Refused: recursive delete of / or the whole workspace."
+                if (Regex("\\brm\\s+-[a-z]*r[a-z]*\\s+(/|~|/workspace|/\\.yaver|/\\.yaver/skills)/?\\s*($|[;&|])").containsMatchIn(command))
+                    return@Tool "Refused: recursive delete of /, the whole workspace or yaver's own folder."
                 val risky = if (Regex("(^|[;&|]\\s*)(rm|mv)\\s").containsMatchIn(command)) "deletes or moves files" else if (Regex("\\b(curl|wget)\\b.*-[oO]").containsMatchIn(command)) "downloads to disk" else null
                 if (risky != null && !ctx.approve(Y.t("Terminal", "Terminal") + ": " + risky, listOf(Y.t("Command", "Komut") to command.take(500)))) return@Tool ctx.denied(command.take(80))
                 val sh = of(ctx.convo.id)
@@ -1021,7 +1058,8 @@ object CodeEngine {
         @JavascriptInterface fun index(): String {
             val a = JSONArray()
             try {
-                Workspace.root.canonicalFile.walkTopDown().forEach { f -> if (f.isFile) a.put(JSONArray().put(VPath.of(f)).put(f.lastModified()).put(f.length()).put(Workspace.isText(f))) }
+                // the workspace and yaver's own folder (skills with their scripts and templates, memory views, persona); not saved conversations
+                for (vp in VPath.walk(VPath.WS) + VPath.walk(VPath.HOME)) { val f = VPath.file(vp); if (f.isFile) a.put(JSONArray().put(vp).put(f.lastModified()).put(f.length()).put(Workspace.isText(f))) }
             } catch (_: Throwable) {}
             return a.toString()
         }
@@ -1032,13 +1070,14 @@ object CodeEngine {
             else JSONObject().put("t", f.readText()).toString()
         } catch (e: Throwable) { JSONObject().put("e", e.message ?: e.toString()).toString() }
         @JavascriptInterface fun write(p: String, data: String, b64: Boolean): String = try {
-            val f = VPath.file(p)
+            val f = VPath.fileW(p)
             if (f.isDirectory) throw IllegalArgumentException("EISDIR $p")
             f.parentFile?.mkdirs()
             if (b64) f.writeBytes(android.util.Base64.decode(data, android.util.Base64.DEFAULT)) else f.writeText(data)
+            VPath.commit(p)
             ""
         } catch (e: Throwable) { e.message ?: e.toString() }
-        @JavascriptInterface fun remove(p: String) { try { val f = VPath.file(p); if (f.isFile) f.delete() } catch (_: Throwable) {} }
+        @JavascriptInterface fun remove(p: String) { try { val f = VPath.fileW(p); if (f.isFile) { f.delete(); VPath.commit(p) } } catch (_: Throwable) {} }
         @JavascriptInterface fun stat(p: String): String = try { val f = VPath.file(p); if (f.isFile) "${f.lastModified()}|${f.length()}" else "" } catch (e: Throwable) { "" }
 
         @JavascriptInterface fun call(rid: Int, cid: Int, name: String, args: String) {
@@ -1171,8 +1210,8 @@ object CodeEngine {
     }
 
     /** JavaScript in a worker; persist=true keeps top-level variables for the conversation (REPL). ctx enables tools.*, llm(), spawn(). */
-    fun js(code: String, sid: String?, persist: Boolean, timeoutSec: Int, reset: Boolean, ctx: ToolCtx?, cancel: Cancel?): Pair<Boolean, String> {
-        val p = JSONObject().put("code", code).put("sid", sid ?: JSONObject.NULL).put("persist", persist).put("timeout", timeoutSec * 1000L).put("reset", reset).put("ctx", ctx != null)
+    fun js(code: String, sid: String?, persist: Boolean, timeoutSec: Int, reset: Boolean, ctx: ToolCtx?, cancel: Cancel?, cwd: String = VPath.WS): Pair<Boolean, String> {
+        val p = JSONObject().put("code", code).put("sid", sid ?: JSONObject.NULL).put("persist", persist).put("timeout", timeoutSec * 1000L).put("reset", reset).put("ctx", ctx != null).put("cwd", cwd)
         val r = request("__js", p.toString(), maxOf(900L, timeoutSec + 600L) + 60, ctx, ctx?.let { c -> { s: String -> c.progress(s) } }, cancel)
         return Pair(r.optBoolean("ok"), r.optString("text"))
     }
@@ -1181,6 +1220,24 @@ object CodeEngine {
         val r = request("__awk", JSONObject().put("args", args).put("files", files).put("stdin", stdin).toString(), 40, null, null, cancel)
         if (!r.optBoolean("ok")) throw ShErr(r.optString("text"))
         return r.optString("text")
+    }
+
+    /**
+     * run_code (the older tool, kept for compatibility) on this engine — the same Python and JavaScript as execute_code.
+     * [files] are made available by name: the code starts in their folder (when they share one; else /workspace).
+     * Without a conversation ([sid] null) Python runs in whatever session is open. Returns (ok, text).
+     */
+    fun runCode(language: String, code: String, files: List<String>, timeoutSec: Int, sid: String?, ctx: ToolCtx?, cancel: Cancel?, progress: ((String) -> Unit)? = null): Pair<Boolean, String> {
+        val vps = files.map { VPath.normTool(it) }
+        for (p in vps) if (!VPath.exists(p)) throw IllegalArgumentException("file not found: $p" + FileTools.hint(p))
+        val dirs = vps.map { if (VPath.isDir(it)) it else VPath.parent(it) }.distinct()
+        val cwd = if (dirs.size == 1 && VPath.writable(dirs[0])) dirs[0] else VPath.WS
+        val lang = language.lowercase()
+        val t = timeoutSec.coerceIn(5, 1800)
+        val r = if (lang.isEmpty() || lang.startsWith("py")) python(code, sid, cwd, null, null, maxOf(10, t), false, cancel, progress).let { Pair(it.first, codeHint(it.second, "python")) }
+            else js(code, sid, ctx != null && sid != null, t, false, ctx, cancel, cwd).let { Pair(it.first, codeHint(it.second, "javascript")) }
+        val note = if (cwd != VPath.WS) "[ran in $cwd]\n" else ""
+        return Pair(r.first, note + r.second)
     }
 
     /** Short, actionable hints when code hits a limit of the runtimes (saves the model many blind retries). */
@@ -1211,7 +1268,7 @@ object CodeEngine {
                 !Regex("(?m)(^\\s*(const|let|var|function)\\s|=>|;\\s*$|await import\\(|console\\.log)").containsMatchIn(code0)
             val py = lang == "python" || lang == "py" || (lang.isEmpty() && looksPy)
             val risky = if (py) (if (Regex("\\b(os\\.(remove|unlink|rmdir|removedirs)|shutil\\.(rmtree|move)|Path\\([^)]*\\)\\.unlink|\\.unlink\\(|pyfetch)").containsMatchIn(code)) "deletes files or makes network requests" else null)
-                else if (Regex("fs\\.writeFile|fetch\\(").containsMatchIn(code)) "writes files or makes network requests" else null
+                else if (Regex("\\bfetch\\(\\s*['\"`]https?:").containsMatchIn(code)) "makes network requests" else null  // writing workspace files is the point of running code: no approval for that
             if (risky != null && !ctx.approve(Y.t("Run code", "Kod çalıştır") + ": " + risky, listOf(Y.t("Code", "Kod") to clip(code, 600)))) return@Tool ctx.denied("execute_code ($risky)")
             val t = if (a.has("timeout") && !a.isNull("timeout")) a.optDouble("timeout", 0.0).toInt() else 0
             if (py) {
@@ -1306,7 +1363,7 @@ function pyWorkerMain() {
   function collect() {
     const FS = py.FS, writes = [], seen = new Set();
     const walk = d => { let names = []; try { names = FS.readdir(d); } catch { return; } for (const n of names) { if (n === "." || n === ".." || n === "__pycache__") continue; const p = d + "/" + n; let st; try { st = FS.stat(p); } catch { continue; } if (FS.isDir(st.mode)) walk(p); else if (FS.isFile(st.mode)) { seen.add(p); const sig = `¤{st.mtime.getTime ? st.mtime.getTime() : st.mtime}|¤{st.size}`; if (known.get(p) !== sig) { known.set(p, sig); if (st.size <= 200 * 1024 * 1024) writes.push([p, FS.readFile(p)]); } } } };
-    walk("/workspace");
+    walk("/workspace"); walk("/.yaver");
     const deletes = [...known.keys()].filter(p => !seen.has(p)); for (const p of deletes) known.delete(p);
     return { writes, deletes };
   }
@@ -1364,7 +1421,7 @@ const PY = {
   reset() { if (this.w) this.w.terminate(); this.w = null; this.ready = null; this.sid = null; this.sent.clear(); for (const [, w] of this.waits) w.reject(new Error("Python was restarted")); this.waits.clear(); },
   call(msg, transfer) { const rid = ++this.rid; return new Promise((resolve, reject) => { this.waits.set(rid, { resolve, reject }); this.w.postMessage({ ...msg, rid }, transfer || []); }); },
   start(sid) {
-    if (this.w && this.sid === sid) return this.ready;
+    if (this.w && (this.sid === sid || sid == null)) return this.ready;  /* null: any session (checks and gates run in the current one) */
     this.reset();
     try { this.w = new Worker(blobUrl(PY_WORKER_SRC)); } catch (e) { this.w = null; return (this.ready = Promise.reject(new Error(`Python could not start: the web engine refused to create a worker (¤{e.message || e}).`))); }
     this.sid = sid;
@@ -1490,7 +1547,7 @@ const bridge = (rid, name, args) => new Promise((resolve, reject) => { const cid
 window.__reply = (cid, value, error) => { const c = pendingCalls.get(cid); if (!c) return; pendingCalls.delete(cid); error ? c.reject(new Error(error)) : c.resolve(value); };
 /* runJS: code runs in a worker; tools.<name>(args) calls are executed by the app (same approvals);
    llm()/llm_batch() are model calls and spawn() runs a helper agent. */
-async function runJS(code, { rid, timeout = 120000, ctx = false, sid = null, persist = false } = {}) {
+async function runJS(code, { rid, timeout = 120000, ctx = false, sid = null, persist = false, cwd = CWD } = {}) {
   const progress = line => { try { R.progress(rid, String(line)); } catch (e) {} };
   const files = {}; let budget = 8_000_000, binBudget = 24_000_000;
   const idx = host.index(); const meta = new Map(idx.map(x => [x[0], x]));
@@ -1531,7 +1588,7 @@ async function runJS(code, { rid, timeout = 120000, ctx = false, sid = null, per
       try { w.postMessage({ type: "result", id: m.id, value, error }); } catch {}
     };
     w.onerror = e => finish({ ok: false, out: [], writes: {}, error: e.message }, true);
-    w.postMessage({ type: "run", code, files, index, cwd: CWD, persist });
+    w.postMessage({ type: "run", code, files, index, cwd, persist });
   });
   aborts.delete(rid);
   if (persist) REPL.vars = res.vars || REPL.vars;
@@ -1540,7 +1597,7 @@ async function runJS(code, { rid, timeout = 120000, ctx = false, sid = null, per
   const text = [(res.out || []).join("\n"), res.error ? "Error: " + res.error : "", written.length ? "Files written: " + written.join(", ") : "", failed.length ? "Could not write: " + failed.join(", ") : "", calls ? `(¤{calls} call¤{calls > 1 ? "s" : ""} made from code¤{llmCalls ? `, ¤{llmCalls} to llm()` : ""})` : "", persist && REPL.vars.length ? `[REPL variables: ¤{clip(REPL.vars.join(", "), 400)}]` : ""].filter(Boolean).join("\n") || "(no output — use console.log or return a value)";
   return { ok: res.ok, text: clip(text, 30000) };
 }
-window.__js = (rid, o) => { if (o.reset) REPL.reset(); runJS(o.code, { rid, timeout: o.timeout, ctx: !!o.ctx, sid: o.sid, persist: !!o.persist }).then(r => finishJob(rid, r), e => finishJob(rid, { ok: false, text: "Error: " + (e.message || e) })); };
+window.__js = (rid, o) => { if (o.reset) REPL.reset(); runJS(o.code, { rid, timeout: o.timeout, ctx: !!o.ctx, sid: o.sid, persist: !!o.persist, cwd: o.cwd || CWD }).then(r => finishJob(rid, r), e => finishJob(rid, { ok: false, text: "Error: " + (e.message || e) })); };
 /* awk for the terminal: the original compiles awk programs to JavaScript, so it runs here, in a worker with a time limit */
 const AWK_SRC = `(¤{awkWorkerMain.toString()})();`;
 window.__awk = (rid, o) => {

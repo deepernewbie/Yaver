@@ -48,9 +48,9 @@ object Compactor {
 
     /** Tools always kept by [slimTools] (the original's core toolsets files/memory/planning, plus native equivalents). */
     val CORE_TOOLS = setOf("read_file", "write_file", "patch", "search_files", "list_files", "delete_file", "read_document", "search_documents",
-        "unpack_archive", "pack_archive", "present_files", "search_all", "export_file", "memory", "session_search",
+        "unpack_archive", "pack_archive", "present_files", "search_all", "export_file", "write_document", "memory", "session_search",
         "todo", "clarify", "delegate_task", "goal", "present_plan", "harness", "heartbeat", "subagents")
-    private val LAST_RESORT_TOOLS = Regex("^(read_file|write_file|patch|search_files|terminal|memory|todo|clarify|list_files|run_code)$")
+    private val LAST_RESORT_TOOLS = Regex("^(read_file|write_file|patch|search_files|terminal|memory|todo|clarify|list_files|run_code|execute_code)$")
     private val SUPERSEDABLE = Regex("read_file|browser_snapshot|web_extract|skill_view|read_document|search_files|mail|calendar|task_board|read_page|list_files|people")
 
     private fun fmt(n: Int) = String.format(Locale.US, "%,d", n)

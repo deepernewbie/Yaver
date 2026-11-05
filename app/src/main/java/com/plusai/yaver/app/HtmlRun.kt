@@ -277,3 +277,27 @@ S("start",{})})();</script>""".replace("\n", "")
         })
     }
 }
+
+/**
+ * "Open in a new tab" for the Files page (the original's FileOpen for html/svg): a disk file shown in yaver's own browser
+ * (BrowserActivity, a WebView with no bridge to the app), with its local CSS/JS/images served read-only from the virtual disk.
+ */
+object LocalView {
+    const val HOST = "view.yaver.invalid"
+    private const val BASE = "https://$HOST"
+    fun urlOf(vp: String) = BASE + vp.split('/').joinToString("/") { Uri.encode(it) }
+    fun serve(req: WebResourceRequest?): WebResourceResponse? {
+        val u = req?.url ?: return null
+        if (u.host != HOST) return null
+        val vp = VPath.norm(Uri.decode(u.encodedPath ?: "/"))
+        return try {
+            val f = VPath.file(vp)
+            if (!f.isFile) WebResourceResponse("text/plain", "utf-8", 404, "Not Found", mapOf(), ByteArrayInputStream(ByteArray(0)))
+            else {
+                val mime = when (f.extension.lowercase()) { "mjs", "js" -> "text/javascript"; "css" -> "text/css"; "wasm" -> "application/wasm"; "json" -> "application/json"; "svg" -> "image/svg+xml"; "htm", "html" -> "text/html"; else -> Workspace.mime(f.name) }
+                WebResourceResponse(mime, if (mime.startsWith("text/") || mime.contains("json") || mime.contains("javascript") || mime.contains("svg")) "utf-8" else null, 200, "OK", mapOf("Cache-Control" to "no-store"), f.inputStream())
+            }
+        } catch (e: Exception) { WebResourceResponse("text/plain", "utf-8", 404, "Not Found", mapOf(), ByteArrayInputStream(ByteArray(0))) }
+    }
+}
+

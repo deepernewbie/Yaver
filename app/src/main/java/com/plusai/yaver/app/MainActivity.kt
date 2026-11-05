@@ -41,6 +41,8 @@ class MainActivity : Activity() {
     var web: WebView? = null
     @Volatile var resumedNow = false
     private val pending = HashMap<Int, Int>() // request code → bridge call id
+    private var zipPreview = false
+    private var pickDir = "" // where files.pick puts the picked files ("" = /workspace/uploads)
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -159,6 +161,7 @@ class MainActivity : Activity() {
             when (m) {
                 "files.pick" -> {
                     pending[REQ_FILES] = id
+                    pickDir = a.str("dir")  // a folder of the disk to upload into (the Files screen); default /workspace/uploads
                     startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(a.str("type").ifEmpty { "*/*" }).putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true), REQ_FILES)
                 }
                 "voice.listen" -> {
@@ -170,11 +173,20 @@ class MainActivity : Activity() {
                 }
                 "folder.connect" -> { pending[Folders.REQ_PICK] = id; startActivityForResult(Folders.pickIntent(), Folders.REQ_PICK) }
                 "mail.login" -> { pending[REQ_LOGIN] = id; startActivityForResult(Intent(this, MailLoginActivity::class.java), REQ_LOGIN) }
-                "import.zip" -> { pending[REQ_ZIP] = id; startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), REQ_ZIP) }
+                "import.zip" -> { pending[REQ_ZIP] = id; zipPreview = a.optBoolean("preview"); startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), REQ_ZIP) }
                 "open.link" -> { openLink(a.str("url")); Bridge.ret(id, true, true) }
-                "open.file" -> { Workspace.open(this, Workspace.resolve(a.str("path"))); Bridge.ret(id, true, true) }
+                "open.file" -> {
+                    val f = Workspace.resolve(a.str("path"))
+                    if (!f.isFile) { Bridge.ret(id, false, Y.t("File not found: ", "Dosya bulunamadı: ") + VPath.normTool(a.str("path"))); return }
+                    try { Workspace.open(this, f); Bridge.ret(id, true, true) }
+                    catch (e: android.content.ActivityNotFoundException) { Bridge.ret(id, false, Y.t("No app on this phone opens ", "Bu telefonda şunu açan uygulama yok: ") + f.name) }
+                }
                 "share.text" -> { startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, a.optString("text")), null)); Bridge.ret(id, true, true) }
-                "share.file" -> { Workspace.share(this, Workspace.resolve(a.str("path"))); Bridge.ret(id, true, true) }
+                "share.file" -> {
+                    val f = Workspace.resolve(a.str("path"))
+                    if (!f.isFile) { Bridge.ret(id, false, Y.t("File not found: ", "Dosya bulunamadı: ") + VPath.normTool(a.str("path"))); return }
+                    Workspace.share(this, f); Bridge.ret(id, true, true)
+                }
                 "system.open" -> {
                     val what = a.str("what")
                     if (what == "calendar") { requestPermissions(arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR), 45); Bridge.ret(id, true, true); return }
@@ -203,7 +215,7 @@ class MainActivity : Activity() {
                 Y.bg {
                     val out = JSONArray()
                     for (u in uris) try {
-                        val p = Workspace.importUri(this, u)
+                        val p = Workspace.importUri(this, u, pickDir.ifEmpty { "uploads" })
                         val f = Workspace.resolve(p)
                         out.put(JSONObject().put("path", p).put("name", f.name).put("image", Workspace.isImage(p)).put("size", f.length()))
                     } catch (e: Throwable) { U.toast(this, e.message ?: "") }
@@ -220,6 +232,8 @@ class MainActivity : Activity() {
             REQ_ZIP -> {
                 val u = data?.data
                 if (resultCode != RESULT_OK || u == null) { Bridge.ret(id, true, ""); return }
+                // preview: the zip is staged and the screen asks Merge / Replace (StateIO); else the older direct import
+                if (zipPreview) { Y.bg { try { Bridge.ret(id, true, StateIO.stage(u)) } catch (e: Throwable) { Bridge.ret(id, false, e.message ?: "") } }; return }
                 Y.bg { try { Bridge.ret(id, true, Migration.importZip(u).also { Workspace.changed(null) }.ifEmpty { Y.t("Nothing new to import.", "İçe alınacak yeni bir şey yok.") }) } catch (e: Throwable) { Bridge.ret(id, false, e.message ?: "") } }
             }
         }

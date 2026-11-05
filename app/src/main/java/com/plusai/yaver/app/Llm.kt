@@ -33,7 +33,7 @@ object Llm {
     /** Test seam: when set, [chat] returns this instead of calling the service (JVM tests of the agent and the learning path). */
     @Volatile var fake: ((messages: JSONArray, tools: JSONArray?, model: String, maxTokens: Int) -> LlmResult)? = null
 
-    private fun headers(): Map<String, String> {
+    fun headers(): Map<String, String> {
         val h = HashMap<String, String>()
         h["Content-Type"] = "application/json"
         h["Accept"] = "text/event-stream, application/json"
@@ -43,6 +43,8 @@ object Llm {
             h["HTTP-Referer"] = "https://plusai.yaver.app"
             h["X-Title"] = "yaver"
         }
+        // Settings → Model → Extra headers (JSON object), for gateways that want their own headers
+        try { for ((k, v) in LlmX.extraHeaders()) h[k] = v } catch (_: Throwable) {}
         return h
     }
 
@@ -65,6 +67,23 @@ object Llm {
         onThink: ((String) -> Unit)? = null, cancel: Cancel? = null, maxTokens: Int = 0, temperature: Double? = null, stream: Boolean = Cfg.stream,
         /** "low" for side calls (reviews, follow-ups, summaries): reasoning models otherwise spend the whole budget thinking. */
         effort: String? = null
+    ): LlmResult {
+        // every call is recorded for the debug dump (per conversation) and the per-purpose counters (Trace.kt)
+        val t0 = System.currentTimeMillis()
+        val m0 = (model ?: "").ifEmpty { Cfg.model }
+        try {
+            val r = chat0(messages, tools, model, onDelta, onThink, cancel, maxTokens, temperature, stream, effort)
+            try { Trace.llm(m0, messages, tools, r, null, System.currentTimeMillis() - t0, effort) } catch (_: Throwable) {}
+            return r
+        } catch (e: Throwable) {
+            try { Trace.llm(m0, messages, tools, null, if (e is CancelledException) "aborted by user" else (e.message ?: e.toString()), System.currentTimeMillis() - t0, effort) } catch (_: Throwable) {}
+            throw e
+        }
+    }
+
+    private fun chat0(
+        messages: JSONArray, tools: JSONArray?, model: String?, onDelta: ((String) -> Unit)?,
+        onThink: ((String) -> Unit)?, cancel: Cancel?, maxTokens: Int, temperature: Double?, stream: Boolean, effort: String?
     ): LlmResult {
         val m = (model ?: "").ifEmpty { Cfg.model }
         fake?.let { return it(messages, tools, m, maxTokens) }

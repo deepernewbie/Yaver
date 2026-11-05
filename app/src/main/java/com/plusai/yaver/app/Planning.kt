@@ -104,6 +104,8 @@ object Planning {
     val tokensUsed = AtomicLong(0)
     fun countTokens(n: Int) { if (n > 0) tokensUsed.addAndGet(n.toLong()) }
 
+    /** A deliverable card for files a tool made (write_document): the same card as present_files. */
+    fun presentFiles(convoId: String, files: JSONArray) { if (files.length() > 0) emit(convoId, "files", JSONObject().put("files", files)) }
     private fun emit(id: String, type: String, data: JSONObject) { try { onEvent?.invoke(id, type, data) } catch (e: Throwable) { Diag.e("planning", "event", e) } }
     private fun note(id: String, text: String) = emit(id, "note", JSONObject().put("text", text))
     private fun changed(id: String) = emit(id, "state", state(id))
@@ -142,7 +144,9 @@ object Planning {
 
     private val SIDE_EFFECT_TOOLS = setOf("write_file", "delete_file", "export_file", "skill_manage", "phone_notify", "phone_open", "schedule_task", "goal_noop")
 
+    /** The original uses one hasSideEffect for plan mode and the permission presets: the same test here (plus the older native list). */
     fun hasSideEffect(name: String, a: JSONObject): Boolean {
+        if (name != "present_plan" && name != "goal" && Permissions.hasSideEffect(name, a)) return true
         val act = a.optString("action")
         if (name in SIDE_EFFECT_TOOLS) return name != "schedule_task" || act != "list"
         return when (name) {

@@ -115,6 +115,7 @@ object Bridge {
             .put("running", JSONArray(runs.keys.toList()))
             .put("current", Prefs.get("currentConvo", ""))
             .put("dark", Y.dark(c))
+            .put("perm", Permissions.mode).put("llmx", Parity.llmJson())
     }
 
     fun mailState(): JSONObject = JSONObject()
@@ -141,7 +142,7 @@ object Bridge {
             "searxng" -> Cfg.searxng = s; "braveKey" -> Cfg.braveKey = s; "tavilyKey" -> Cfg.tavilyKey = s
             "alwaysOn" -> { Prefs.set("alwaysOn", b); if (b) AgentService.start(Y.app) else AgentService.stop(Y.app) }
             "notifyReplies", "voiceOnAssist", "speakVoice", "tileVoice", "runReminders" -> Prefs.set(k, b)
-            else -> throw IllegalArgumentException("unknown setting $k")
+            else -> if (!Parity.setCfg(k, v)) throw IllegalArgumentException("unknown setting $k")
         }
     }
 
@@ -246,7 +247,21 @@ object Bridge {
         "memory.set" -> { MemoryX.save(if (a.str("target") == "user") "user" else "memory", a.list("list")); true }
         "schedule.list" -> Schedule.all()
         "schedule.cancel" -> { Schedule.remove(a.optInt("id")); true }
-        "workspace.list" -> Workspace.list(Workspace.root).ifEmpty { "" }
+        "workspace.list" -> CoreTools.tree(VPath.WS).ifEmpty { "" }
+        // the Files screen (FilesUi): the virtual disk, as the agent sees it
+        "files.list" -> FilesUi.list(a)
+        "files.read" -> FilesUi.read(a)
+        "files.extract" -> FilesUi.extract(a)
+        "files.pdf" -> FilesUi.pdfPage(a)
+        "files.write" -> FilesUi.write(a)
+        "files.new" -> FilesUi.newFile(a)
+        "files.rename" -> FilesUi.rename(a)
+        "files.move" -> FilesUi.move(a)
+        "files.copy" -> FilesUi.copy(a)
+        "files.delete" -> FilesUi.delete(a)
+        "files.mkdir" -> FilesUi.mkdir(a)
+        "files.download" -> FilesUi.download(a)
+        "files.folders" -> FilesUi.folders()
         "convo.export" -> {
             val c = Convos.load(a.str("id")) ?: throw IllegalArgumentException(Y.t("Conversation not found", "Sohbet bulunamadı"))
             val md = StringBuilder("# ${c.title}\n\n")
@@ -292,8 +307,9 @@ object Bridge {
                 .put("files", JSONArray(msg.files.filter { !(it.inline && it.type.startsWith("image/")) }.map { JSONObject().put("id", it.id).put("name", it.name).put("type", it.type).put("size", it.size).put("item", it.item) }))
         }
         "mail.markRead" -> { Mail.use { it.markRead(a.str("id"), a.optBoolean("read", true)) }; try { MailIndex.markRead(a.str("id"), a.optBoolean("read", true)) } catch (_: Throwable) {}; true }
-        "mail.remove" -> { Mail.use { it.remove(a.str("id"), false) }; try { MailIndex.forget(a.str("id")) } catch (_: Throwable) {}; true }
-        "mail.move" -> { Mail.use { it.move(a.str("id"), a.str("folder")) }; try { MailIndex.forget(a.str("id")) } catch (_: Throwable) {}; true }
+        // mail.remove / mail.move answer {id}: the item's new id in the folder it went to (Undo moves it back); permanent=true deletes for good
+        "mail.remove" -> { val nid = Mail.use { it.remove(a.str("id"), a.optBoolean("permanent")) }; try { MailIndex.forget(a.str("id")) } catch (_: Throwable) {}; JSONObject().put("id", nid ?: JSONObject.NULL) }
+        "mail.move" -> { val nid = Mail.use { it.move(a.str("id"), a.str("folder")) }; try { MailIndex.forget(a.str("id")) } catch (_: Throwable) {}; JSONObject().put("id", nid) }
         "mail.compose" -> Mail.use { it.compose(a.str("kind").ifEmpty { "new" }, a.str("ref"), a.list("to"), a.list("cc"), a.str("subject"), a.optString("body"), a.optBoolean("send")) }
         "mail.attachment" -> {
             val att = Mail.use { it.attachment(a.str("attId")) }
@@ -310,7 +326,7 @@ object Bridge {
                 .put("organizer", e.organizer?.short ?: "").put("allDay", e.allDay).put("response", e.response).put("cancelled", e.cancelled).put("meeting", e.meeting) })
         }
         "mail.respond" -> { Mail.use { it.respond(a.str("id"), a.str("response"), a.str("message")) }; true }
-        else -> if (MailPlus.handles(m)) MailPlus.dispatch(m, a) else harness(m, a)
+        else -> if (MailUi.handles(m)) MailUi.dispatch(m, a) else if (MailPlus.handles(m)) MailPlus.dispatch(m, a) else if (Parity.handles(m)) Parity.dispatch(m, a) else harness(m, a)
     }
 
     // ---------------------------------------------------------------- harness methods (planning, learning, memory, context…)
@@ -439,6 +455,7 @@ object Bridge {
         if (runs.containsKey(convoId)) return Y.t("Stop the running task first", "Önce çalışan işi durdurun")
         val c = Convos.load(convoId) ?: return Y.t("Conversation not found", "Sohbet bulunamadı")
         if (c.messages.length() == 0 || c.summaryUpTo >= c.messages.length()) return Y.t("The context is already empty", "Bağlam zaten boş")
+        try { Parity.rememberClear(c) } catch (_: Throwable) {}   // for "Undo" (ctx.restore)
         c.messages.put(JSONObject().put("role", "assistant").put("content", "").put("local", true).put("divider", true).put("ts", System.currentTimeMillis()))
         c.summary = ""; c.summaryUpTo = c.messages.length()
         try { Compactor.forget(c.id) } catch (_: Throwable) {}
@@ -492,15 +509,14 @@ object Bridge {
             "btw" -> SideQuestion.command(convoId, rest)?.let { out.put("note", it) }
             "today" -> out.put("send", MailPlus.dailyPlanPrompt())
             "clear" -> out.put("note", clearContext(convoId))
-            else -> out.put("send", text)
+            else -> Parity.command(convoId, cmd, rest, out) ?: out.put("send", text)
         }
         if (cmd in setOf("plan", "goal", "autonomous") && convoId.isNotEmpty()) try { out.put("planning", Planning.state(convoId)) } catch (_: Throwable) {}
         return out
     }
 
     private fun boxJson(b: MailBox) = JSONObject().put("name", b.name).put("email", b.email)
-    private fun headerJson(h: MailHeader) = JSONObject().put("id", h.id).put("subject", h.subject).put("from", h.from?.let { boxJson(it) } ?: JSONObject.NULL)
-        .put("received", Exchange.parseTime(h.received)).put("read", h.read).put("attachments", h.attachments).put("importance", h.importance).put("preview", h.preview).put("displayTo", h.displayTo)
+    private fun headerJson(h: MailHeader) = MailUi.headerJson(h)
 
     /** Methods that need the screen (pickers, voice, system pages) — run on the main thread by the host. */
     val UI_METHODS = setOf("folder.connect", "files.pick", "voice.listen", "mail.login", "import.zip", "open.link", "open.file", "share.text", "share.file", "system.open")

@@ -12,11 +12,11 @@ import org.json.JSONObject
 
 /** System-1 settings (original CFG.s1 defaults). */
 object S1Cfg {
-    val BACKENDS = listOf(
-        "off" to "None — LLM-only (the LLM makes every decision)",
+    val BACKENDS: List<Pair<String, String>> get() = listOf(
+        "off" to Y.t("None — LLM-only (the LLM makes every decision)", "Yok — yalnızca LLM (her kararı LLM verir)"),
         "jev" to "TypeSafe Jev API (/v1/systemone)",
-        "laya" to "Laya / any Jev-compatible endpoint",
-        "llm" to "Emulated with the LLM (for testing gates; costs LLM calls)"
+        "laya" to Y.t("Laya / any Jev-compatible endpoint", "Laya / Jev uyumlu herhangi bir uç nokta"),
+        "llm" to Y.t("Emulated with the LLM (for testing gates; costs LLM calls)", "LLM ile taklit (kapıları denemek için; LLM çağrısı harcar)")
     )
     val DEFAULT_GATES = listOf("router", "toolsets", "skills", "recall", "approval", "loop", "stop", "review", "compress", "find", "research", "rag")
 

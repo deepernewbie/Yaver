@@ -147,19 +147,24 @@
     box.querySelectorAll("table").forEach(function (t) { var w = h("div", { class: "tw" }); t.parentNode.insertBefore(w, t); w.appendChild(t); });
     box.querySelectorAll("img").forEach(function (im) {
       var src = im.getAttribute("src") || "";
-      if (!/^(https?:|data:)/.test(src)) im.setAttribute("src", "/ws/" + src.replace(/^\/?(ws\/|workspace\/|file:)?/, ""));
-      im.addEventListener("click", function () { call("open.file", { path: src.replace(/^\/?(ws\/|workspace\/|file:)?/, "") }); });
+      if (/^(https?:|data:|blob:)/.test(src)) return;
+      /* a picture on the disk: ![](/workspace/plots/a.png), ![](plots/a.png), ![](~/skills/x/a.png) */
+      im.setAttribute("src", wsUrl(src));
+      im.addEventListener("click", function (e) { e.stopPropagation(); previewFile(src); });
     });
     box.querySelectorAll("pre").forEach(function (p) {
       p.appendChild(h("button", { class: "cp", "aria-label": T("Copy", "Kopyala"), onclick: function (e) { e.stopPropagation(); call("copy", { text: p.innerText }); toast(T("Copied", "Kopyalandı")); } }, icon("copy", "xs")));
     });
     mailChips(box);
+    filePaths(box);
+    box.querySelectorAll("a[href]").forEach(function (a) { if (isFileHref(a.getAttribute("href")) && !a.classList.contains("mlink")) a.classList.add("flink"); });
     box.addEventListener("click", function (e) {
       var a = e.target.closest("a"); if (!a) return;
       e.preventDefault();
       var href = a.getAttribute("href") || "";
       if (/^#?mail:/.test(href)) openMail(decodeURIComponent(href.replace(/^#?mail:/, "")));
       else if (/^task:/.test(href)) taskSheet(href.slice(5));
+      else if (isFileHref(href)) previewFile(href);   /* a file on the disk: [rapor](/workspace/rapor.docx), [x](outputs/x.md) */
       else if (href) call("open.link", { url: href });
     });
     return box;
@@ -223,7 +228,9 @@
     heartbeat: ["heart-pulse", "Heartbeat", "Periyodik görev", "action"],
     task_board: ["square-kanban", "Task board", "Görev panosu", "action"],
     search_all: ["search", "Searched everywhere", "Her yerde arandı", "query"],
-    session_search: ["history", "Searched past chats", "Eski sohbetlerde arandı", "query"]
+    session_search: ["history", "Searched past chats", "Eski sohbetlerde arandı", "query"],
+    write_document: ["file-type", "Made a document", "Belge oluşturuldu", "path"],
+    vision_analyze: ["image", "Looked at a picture", "Resme bakıldı", "path"]
   };
   var BROWSER_STEPS = { navigate: ["open", "aç"], snapshot: ["look", "incele"], click: ["click", "tıkla"], type: ["type", "yaz"], back: ["back", "geri"], find: ["find", "bul"], download: ["download", "indir"], scroll: ["scroll", "kaydır"], press: ["key", "tuş"], select: ["choose", "seç"], wait: ["wait", "bekle"], screenshot: ["screenshot", "ekran görüntüsü"], close: ["close", "kapat"] };
   var ACTIONS = { list: ["list", "listele"], search: ["search", "ara"], read: ["read", "oku"], get_attachment: ["attachment", "ek"], draft: ["draft", "taslak"], send: ["send", "gönder"], send_now: ["send", "gönder"], mark_read: ["mark read", "okundu"], delete: ["delete", "sil"], move: ["move", "taşı"], archive: ["archive", "arşivle"], free: ["free time", "boş zaman"], create: ["create", "oluştur"], respond: ["respond", "yanıtla"], cancel: ["cancel", "iptal"], add: ["add", "ekle"], replace: ["update", "güncelle"], remove: ["remove", "kaldır"], calendars: ["calendars", "takvimler"], alarm: ["alarm", "alarm"], timer: ["timer", "zamanlayıcı"],
@@ -242,13 +249,21 @@
     if (name === "read_page" && !target && args && args.link) target = "#" + args.link;
     return { icon: d[0], label: label, target: String(target).slice(0, 90) };
   }
-  function stepEl(name, args, state, result) {
+  function stepEl(name, args, state, result, ms, prog) {
     var inf = stepInfo(name, args);
+    prog = prog || [];
+    var live = state === "run";
     var el = h("div", { class: "step " + state },
       icon(inf.icon, "s si"),
       h("div", { class: "st" }, h("b", null, inf.label), inf.target ? h("span", { class: "tg" }, inf.target) : null,
-        result ? h("div", { class: "res" }, String(result).slice(0, 2500)) : null));
+        ms != null && !live ? h("span", { class: "tms" }, ms >= 1000 ? (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + " s" : ms + " ms") : null,
+        live && prog.length ? h("span", { class: "tg plast" }, prog[prog.length - 1]) : null,
+        (result || live) && args && Object.keys(args).length ? h("details", { class: "targs", onclick: function (e) { e.stopPropagation(); } }, h("summary", null, T("Arguments", "Argümanlar")), h("pre", null, JSON.stringify(args, null, 2).slice(0, 4000))) : null,
+        prog.length ? h("details", { class: "targs tplog", open: live ? true : null, onclick: function (e) { e.stopPropagation(); } }, h("summary", null, T("Progress", "İlerleme") + " (" + prog.length + ")"), h("pre", { class: "plog" }, prog.join("\n"))) : null,
+        result ? h("div", { class: "res" }, String(result).slice(0, 6000)) : null));
     if (result) el.addEventListener("click", function () { el.classList.toggle("open"); });
+    if (result && window.YVP && YVP.stepExtras) YVP.stepExtras(el, result, state === "ok");
+    if (live) requestAnimationFrame(function () { var pl = el.querySelector(".plog"); if (pl) pl.scrollTop = pl.scrollHeight; });
     return el;
   }
 
@@ -259,9 +274,9 @@
     if (!$("#thread")) return;
     var scroll = $("#scroll"), th = clear($("#thread"));
     var msgs = (S.convo && S.convo.messages) || [];
-    renderPlanBar(); renderCtx();
+    renderPlanBar(); renderCtx(); if (window.YVP) YVP.shell();
     if (!msgs.length && !S.running[S.convoId] && !(S.side[S.convoId || "_new"] || []).length) { th.appendChild(helloView()); updateTitle(); return; }
-    var calls = {}, trace = null, turn = null, lastText = null;
+    var calls = {}, trace = null, turn = null, lastText = null; S1SEEN = "";
     var running = !!S.running[S.convoId];
     function ensureTurn() { if (!turn) { turn = h("div", { class: "turn" }, h("div", { class: "who" }, h("div", { class: "mark" }, "y"), "yaver")); th.appendChild(turn); } return turn; }
     // which assistant texts end their turn (they get 👍/👎)
@@ -285,6 +300,7 @@
       if (m.divider) {
         trace = null; turn = null;
         th.appendChild(h("div", { class: "ctxdiv" }, h("span", null, T("Context cleared", "Bağlam temizlendi") + (m.ts ? " · " + timeOf(m.ts) : ""))));
+        if (window.YVP) YVP.dividerExtras(th.lastChild, idx, msgs);
         return;
       }
       if (m.role === "user") {
@@ -295,12 +311,14 @@
         th.appendChild(h("div", { class: "u" }, h("div", null,
           h("div", { class: "bubble" }, m.display != null && m.display !== "" ? m.display : (m.content || "")),
           m.queued ? h("div", { class: "qcap" }, icon("clock", "xs"), T("Queued — yaver reads it at its next step", "Sırada — yaver bir sonraki adımında okuyacak")) : null,
+          m.steer && !m.queued ? h("div", { class: "qcap done" }, icon(S.delivered && S.delivered[m.ts] ? "check-check" : "check", "xs"), S.delivered && S.delivered[m.ts] ? T("Delivered mid-run", "Çalışırken iletildi") : T("Sent mid-run", "Çalışırken gönderildi")) : null,
           files.length ? h("div", { class: "files" }, files.map(function (f) {
-            return /\.(png|jpe?g|gif|webp|bmp)$/i.test(f) ? h("img", { class: "thumb", src: "/ws/" + f, onclick: function () { call("open.file", { path: f }); } })
-              : h("div", { class: "chipfile", onclick: function () { call("open.file", { path: f }); } }, icon("file-text", "xs"), h("span", null, f.split("/").pop()));
+            return /\.(png|jpe?g|gif|webp|bmp)$/i.test(f) ? h("img", { class: "thumb", src: wsUrl(f), onclick: function () { previewFile(f); } })
+              : h("button", { class: "chipfile", onclick: function () { previewFile(f); } }, icon((FK[kindOf(f)] || FK.other)[0], "xs"), h("span", null, f.split("/").pop()));
           })) : null)));
+        if (m.s1 && m.s1.length && window.YVP && YVP.s1Strip) { var s1el = YVP.s1Strip(m.s1); if (s1el) { ensureTurn().appendChild(s1el); S1SEEN = YVP.s1Key(m.s1); } }
       } else if (m.role === "assistant") {
-        if (m.error) { ensureTurn().appendChild(h("div", { class: "err" }, icon("triangle-alert", "s"), h("div", null, String(m.content || "").replace(/^⚠️\s*/, "")))); trace = null; return; }
+        if (m.error) { ensureTurn().appendChild(h("div", { class: "err" }, icon("triangle-alert", "s"), h("div", null, String(m.content || "").replace(/^⚠️\s*/, "")))); trace = null; if (m.changes && window.YVP) ensureTurn().appendChild(YVP.changesCard(m.changes)); return; }
         if (m.content && String(m.content).trim()) {
           trace = null;
           var box = md(m.content);
@@ -311,22 +329,26 @@
             h("button", { class: "ib", "aria-label": T("Share", "Paylaş"), onclick: function () { call("share.text", { text: text }); } }, icon("share-2", "s")),
             finals[idx] ? fbButtons(m, idx) : null));
           ensureTurn().appendChild(lastText);
+          if (window.YVP) YVP.answerExtras(lastText, box, m, idx, msgs, finals[idx]);
           if (finals[idx] && S.fbAsk && S.fbAsk.convoId === S.convoId && S.fbAsk.idx === idx) lastText.appendChild(fbNoteBox(idx));
         }
         (m.tool_calls || []).forEach(function (tc) { calls[tc.id] = { name: (tc["function"] || {}).name, args: parseArgs((tc["function"] || {}).arguments) }; });
+        if (m.changes && window.YVP) { trace = null; ensureTurn().appendChild(YVP.changesCard(m.changes)); }
       } else if (m.role === "tool") {
         var c = calls[m.tool_call_id] || { name: m.name, args: {} };
         if (!trace) { trace = h("div", { class: "trace" }); ensureTurn().appendChild(trace); }
-        trace.appendChild(stepEl(c.name, c.args, m.ok === false ? "bad" : "ok", m.content));
+        trace.appendChild(stepEl(c.name, c.args, m.ok === false ? "bad" : "ok", m.content, m.ms, m.progress));
       }
     });
     flushSide(null);
     if (!running) { var fu = followupsEl(); if (fu) (turn || th).appendChild(fu); }
+    document.body.classList.toggle("agent-busy", !!S.running[S.convoId]);
     if (S.running[S.convoId]) {
       var t = ensureTurn();
+      var mk = t.querySelector(".who .mark"); if (mk) mk.classList.add("busy");
       if (S.liveTool) {
         if (!trace) { trace = h("div", { class: "trace" }); t.appendChild(trace); }
-        trace.appendChild(stepEl(S.liveTool.name, S.liveTool.args, "run"));
+        trace.appendChild(stepEl(S.liveTool.name, S.liveTool.args, "run", null, null, S.liveTool.prog));
       }
       var live = h("div", { id: "live" });
       if (S.live) live.appendChild(md(S.live));
@@ -336,6 +358,7 @@
     // collapse long traces
     var divs = th.querySelectorAll(".ctxdiv");
     if (divs.length) { var dv = divs[divs.length - 1], el = dv.previousElementSibling; while (el) { el.classList.add("forgotten"); el = el.previousElementSibling; } }
+    if (divs.length && window.YVP) YVP.foldForgotten(th, divs[divs.length - 1]);
     th.querySelectorAll(".trace").forEach(function (tr) {
       var steps = tr.querySelectorAll(".step:not(.run)");
       if (steps.length > 4) {
@@ -348,6 +371,7 @@
     requestAnimationFrame(function () { scroll.scrollTop = scroll.scrollHeight; });
   }
 
+  var S1SEEN = "";
   var liveT = 0;
   function renderLive() {
     if (liveT) return;
@@ -372,6 +396,7 @@
       ["search", T("Brief me on today's news in my field", "Bugün alanımdaki önemli haberleri özetle")],
       ["alarm-clock", T("Remind me tomorrow at 9 to call the supplier", "Yarın 9'da tedarikçiyi aramamı hatırlat")]
     ];
+    if (window.YVP) ideas = YVP.shortcutIdeas(ideas);
     var pills = h("div", { class: "pills" },
       h("button", { class: "pill", onclick: function () { openSettings(); } }, h("span", { class: "dot " + ((st.llm || {}).ready ? "ok" : "bad") }), (st.llm || {}).model ? (st.llm.model.split("/").pop()) : T("No model", "Model yok")),
       h("button", { class: "pill", onclick: function () { openMailPage(); } }, h("span", { class: "dot " + (mail.connected ? "ok" : mail.needsSignIn ? "warn" : "") }), mail.connected ? T("Mail connected", "Posta bağlı") : mail.needsSignIn ? T("Mail: sign in", "Posta: oturum aç") : mail.configured ? T("Mail", "Posta") : T("Mail not set up", "Posta kurulmadı")));
@@ -380,8 +405,9 @@
       h("h1", null, greeting() + "."),
       h("p", null, T("Ask anything — I can search the web, read your mail and calendar, work with files and set reminders.", "İstediğini sor — web'de arayabilir, postanı ve takvimini okuyabilir, dosyalarla çalışabilir, hatırlatma kurabilirim.")),
       h("div", { class: "ideas" }, ideas.map(function (it) {
-        return h("button", { class: "idea", onclick: function () { if (it[2] === "plan") planDay(); else send(it[1]); } }, icon(it[0], "s"), h("span", null, it[1]));
+        return h("button", { class: "idea", onclick: function () { if (it[2] === "plan") planDay(); else if (it[4] && window.YVP) YVP.openTarget(it[4]); else send(it[3] || it[1]); } }, icon(it[0], "s"), h("span", null, it[1]));
       })),
+      window.YVP ? YVP.helloExtras(pills) : null,
       pills);
   }
 
@@ -389,6 +415,12 @@
     var t = $("#ctitle"); if (!t) return;
     var msgs = (S.convo && S.convo.messages) || [];
     t.textContent = msgs.length ? (S.convo.title || "yaver") : "yaver";
+    /* the original's header line: N turns · N tool calls (the context meter is the button next to it) */
+    if (msgs.length) {
+      var turns = msgs.filter(function (m) { return m.role === "user" && !m.harness && !m.divider && !isInternalUser(m) && !m.label && !m.internal && !m.queued && !m.steer; }).length;
+      var tools = msgs.filter(function (m) { return m.role === "tool"; }).length;
+      t.appendChild(h("small", { class: "cmeta" }, T(turns + (turns === 1 ? " turn" : " turns"), turns + " tur") + " · " + T(tools + (tools === 1 ? " tool call" : " tool calls"), tools + " araç çağrısı")));
+    }
   }
 
   /* ------------------------------------------------------------ chat actions */
@@ -400,6 +432,8 @@
       var q = S.queued[c.id];
       if (q) {
         var users = (c.messages || []).filter(function (m) { return m.role === "user"; }).map(function (m) { return String(m.display || "") + "\n" + String(m.content || ""); });
+        S.delivered = S.delivered || {};
+        (c.messages || []).forEach(function (m) { if (m.steer && m.ts && q.some(function (t) { return String(m.display || m.content || "").indexOf(t) >= 0; })) S.delivered[m.ts] = 1; });
         q = q.filter(function (t) { return !users.some(function (u) { return u.indexOf(t) >= 0; }); });
         if (q.length && (c.running || Date.now() - (S.doneAt[c.id] || 0) < 4000)) { S.queued[c.id] = q; c.messages = (c.messages || []).concat(q.map(function (t) { return { role: "user", content: t, display: t, queued: true }; })); }
         else delete S.queued[c.id];
@@ -518,6 +552,7 @@
       if (r.convoId && (!S.convoId || S.convoId === "_new") && !S.running["_new"]) { moveSide("_new", r.convoId); S.convoId = r.convoId; if (!S.convo) S.convo = { id: r.convoId, title: "", messages: [] }; else S.convo.id = r.convoId; refreshConvos(); }
       if (r.planning && r.convoId) { S.plan[r.convoId] = r.planning; renderPlanBar(); }
       if (r.note) addSide(r.convoId || S.convoId, "note", { text: r.note });
+      if (window.YVP) YVP.onCommand(r, text);
       if (r.started) { var sc = r.convoId || S.convoId; if (sc && sc !== "_new") { S.running[sc] = true; loadConvo(sc); refreshConvos(); } }
       else if (r.send) send(r.send, { label: r.label, internal: r.internal });
       if (/^\/(compact|clear)\b/.test(text)) { refreshCtx(S.convoId); if (/^\/clear\b/.test(text) && S.convoId && S.convoId !== "_new") { if (S.fu) delete S.fu[S.convoId]; loadConvo(S.convoId); } }
@@ -555,14 +590,14 @@
   }
 
   function pick() {
-    call("files.pick").then(function (list) { (list || []).forEach(function (f) { S.atts.push(f); }); renderAtts(); syncSend(); }).catch(function (e) { toast(e.message); });
+    call("files.pick").then(function (list) { (list || []).forEach(function (f) { S.atts.push(f); }); renderAtts(); syncSend(); if (window.YVP) YVP.afterAttach(list || []); }).catch(function (e) { toast(e.message); });
   }
 
   function renderAtts() {
     var box = $("#atts"); if (!box) return; clear(box);
     box.classList.toggle("hidden", !S.atts.length);
     S.atts.forEach(function (a, i) {
-      box.appendChild(h("div", { class: "att" }, a.image ? h("img", { src: "/ws/" + a.path }) : icon("file-text", "s"), h("span", null, a.name || a.path.split("/").pop()),
+      box.appendChild(h("div", { class: "att" }, a.image ? h("img", { src: wsUrl(a.path) }) : icon((FK[kindOf(a.path)] || FK.other)[0], "s"), h("span", null, a.name || a.path.split("/").pop()),
         h("button", { class: "x", "aria-label": T("Remove", "Kaldır"), onclick: function () { S.atts.splice(i, 1); renderAtts(); syncSend(); } }, icon("x", "xs"))));
     });
   }
@@ -618,9 +653,19 @@
       if (d.phase === "think") { if (!S.wait) S.wait = { t0: Date.now(), info: null }; S.wait.info = d; waitTick(); return; }
       if (d.phase === "delta") { S.live += d.text; S.liveStatus = ""; renderLive(); }
       else if (d.phase === "step") { S.live = ""; loadConvo(id); }
-      else if (d.phase === "tool") { S.liveTool = { name: d.name, args: d.args || {} }; S.liveStatus = ""; renderThread(); }
+      else if (d.phase === "tool") { S.liveTool = { name: d.name, args: d.args || {}, prog: [] }; S.liveStatus = ""; renderThread(); }
       else if (d.phase === "toolEnd") { S.liveTool = null; loadConvo(id); }
-      else if (d.phase === "progress") { S.liveStatus = d.text; var st = $("#lstatus span"); if (st) st.textContent = d.text; }
+      else if (d.phase === "progress") {
+        S.liveStatus = d.text; var st = $("#lstatus span"); if (st) st.textContent = d.text;
+        /* the running tool card's Progress log (the original's toolProgress) */
+        if (S.liveTool && d.text) {
+          var pl = S.liveTool.prog || (S.liveTool.prog = []); var line = String(d.text).replace(/\s+/g, " ").trim().slice(0, 240);
+          if (line && pl[pl.length - 1] !== line && pl.length < 200) pl.push(line);
+          var rs = document.querySelector("#thread .step.run");
+          if (rs && rs.querySelector(".plog")) { rs.querySelector(".plog").textContent = pl.join("\n"); rs.querySelector(".tplog summary").textContent = T("Progress", "İlerleme") + " (" + pl.length + ")"; var lst = rs.querySelector(".plast"); if (lst) lst.textContent = line; rs.querySelector(".plog").scrollTop = 1e9; }
+          else renderThread();
+        }
+      }
     } else if (type === "approve") approveSheet(d);
     else if (type === "launch") onLaunch(d);
     else if (type === "toast") toast(d.text);
@@ -659,7 +704,7 @@
     else if (type === "osync") { if (topPage() === "tasks") loadOsync(); }
     else if (type === "memory.changed") kbChanged();
     else if (type === "s1") { /* System-1 stats changed; the log sheet loads fresh when opened */ }
-    else if (type === "mail.triage" || type === "mail.index" || type === "mail.draft") { /* mail page refreshes on demand */ }
+    else if (type === "mail.triage" || type === "mail.index" || type === "mail.draft") onMailEvent(type, d);
   }
 
   /* ------------------------------------------------------------ chat extras: side items */
@@ -670,7 +715,8 @@
     var d = it.d || {};
     switch (it.k) {
       case "cmd": return h("div", { class: "u cmd" }, h("div", null, h("div", { class: "bubble mono" }, d.text)));
-      case "note": return h("div", { class: "chiprow" }, h("span", { class: "nchip" + (d.bad ? " bad" : "") }, icon(noteIcon(d.text), "xs"), h("span", null, stripEmoji(d.text))));
+      case "note": if (window.YVP && YVP.noteStrip) { var ns = YVP.noteStrip(d.text, S1SEEN); if (ns !== undefined) return ns; }
+        return h("div", { class: "chiprow" }, h("span", { class: "nchip" + (d.bad ? " bad" : "") }, icon(noteIcon(d.text), "xs"), h("span", null, stripEmoji(d.text))));
       case "memory": return h("div", { class: "chiprow" }, h("button", { class: "nchip act", onclick: function () {
         sheet({ title: d.label, body: h("div", { class: "res", style: "display:block;white-space:pre-wrap" }, d.tip || ""), actions: [[T("Close", "Kapat")], [d.open === "lessons" ? T("Open lessons", "Dersleri aç") : T("Open memory", "Hafızayı aç"), "p", function () { openKnowledge(d.open === "lessons" ? "lessons" : "memory"); }]] });
       } }, icon("brain", "xs"), h("span", null, d.label)));
@@ -761,9 +807,9 @@
     return h("div", { class: "deliv" }, files.map(function (f) {
       var img = f.image || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.path || "");
       return h("div", { class: "dcard" },
-        img ? h("img", { class: "dthumb", src: "/ws/" + f.path, alt: "", onclick: function () { call("open.file", { path: f.path }); } }) : h("div", { class: "di" }, icon(/\.(zip|tar|gz|7z)$/i.test(f.path || "") ? "file-archive" : "file-text", "s")),
-        h("div", { class: "dt", onclick: function () { call("open.file", { path: f.path }); } }, h("b", null, f.name || String(f.path || "").split("/").pop()), h("small", null, f.description || ((f.size != null ? bytes(f.size) + " · " : "") + f.path))),
-        h("button", { class: "ib", "aria-label": T("Open", "Aç"), onclick: function () { call("open.file", { path: f.path }).catch(function (e) { toast(e.message); }); } }, icon("eye", "s")),
+        img ? h("img", { class: "dthumb", src: wsUrl(f.path), alt: "", onclick: function () { previewFile(f.path); } }) : h("div", { class: "di" }, icon((FK[kindOf(f.path)] || FK.other)[0], "s")),
+        h("div", { class: "dt", onclick: function () { previewFile(f.path); } }, h("b", null, f.name || String(f.path || "").split("/").pop()), h("small", null, f.description || ((f.size != null ? bytes(f.size) + " · " : "") + vpOf(f.path)))),
+        h("button", { class: "ib", "aria-label": T("Preview", "Önizle"), onclick: function () { previewFile(f.path); } }, icon("eye", "s")),
         h("button", { class: "ib", "aria-label": T("Share", "Paylaş"), onclick: function () { call("share.file", { path: f.path }).catch(function (e) { toast(e.message); }); } }, icon("share-2", "s")));
     }));
   }
@@ -1068,7 +1114,8 @@
           if (S.running[c.id]) call("chat.stop", { convoId: c.id }).catch(function () {});
           call("convos.delete", { id: c.id }).then(function () { if (c.id === S.convoId) newChat(); refreshConvos(); toast(T("Chat deleted", "Sohbet silindi")); }).catch(function (e) { toast(e.message); });
         }]] });
-      } }, icon("trash-2", "s"), T("Delete", "Sil"))) });
+      } }, icon("trash-2", "s"), T("Delete", "Sil")),
+      window.YVP ? YVP.convoMenuItems(c, function () { s.close(); }) : null) });
   }
 
   /* ------------------------------------------------------------ pages */
@@ -1103,39 +1150,514 @@
     return false;
   }
 
-  /* ------------------------------------------------------------ mail */
-  var FOLDERS = [["inbox", "Inbox", "Gelen Kutusu", "inbox"], ["sentitems", "Sent", "Gönderilenler", "send"], ["drafts", "Drafts", "Taslaklar", "file-pen"], ["archive", "Archive", "Arşiv", "archive"], ["junkemail", "Junk", "Gereksiz", "ban"], ["deleteditems", "Deleted", "Silinmiş", "trash-2"]];
-  function folderName(f) { var x = FOLDERS.filter(function (q) { return q[0] === f; })[0]; return x ? T(x[1], x[2]) : f; }
+  /* ------------------------------------------------------------ files: yaver's virtual disk
+     /workspace (the user's files), /.yaver (yaver's own: PERSONA.md, skills/, memories/ read-only, sessions/ read-only), /tmp.
+     The same paths the agent's tools print; answers that mention them open them here. */
+  var FK = { folder: ["folder", "fo"], image: ["file-image", "im"], pdf: ["file-text", "pd"], doc: ["file-type", "dc"], sheet: ["file-spreadsheet", "sh"], csv: ["file-spreadsheet", "sh"],
+    slides: ["presentation", "sl"], md: ["file-pen-line", "tx"], text: ["file-text", "tx"], data: ["file-json", "cd"], code: ["file-code", "cd"], html: ["file-code", "cd"],
+    archive: ["file-archive", "ar"], audio: ["file-audio", "md"], video: ["file-video", "md"], other: ["file-text", "ot"] };
+  function kindOf(name, dir) {
+    if (dir) return "folder";
+    var e = String(name || "").split("/").pop().toLowerCase(); e = e.indexOf(".") >= 0 ? e.split(".").pop() : "";
+    if (/^(png|jpe?g|gif|webp|bmp|svg|heic)$/.test(e)) return "image";
+    if (e === "pdf") return "pdf";
+    if (/^(docx?|docm|dotx|odt|rtf)$/.test(e)) return "doc";
+    if (/^(xlsx?|xlsm|ods)$/.test(e)) return "sheet";
+    if (/^(csv|tsv)$/.test(e)) return "csv";
+    if (/^(pptx?|odp)$/.test(e)) return "slides";
+    if (/^(md|markdown)$/.test(e)) return "md";
+    if (/^(txt|log|ini|cfg|conf|env)$/.test(e)) return "text";
+    if (/^(json|ya?ml|xml|toml)$/.test(e)) return "data";
+    if (/^(m?js|ts|py|kt|java|c|cpp|h|css|sh|sql|go|rs|rb|php)$/.test(e)) return "code";
+    if (/^html?$/.test(e)) return "html";
+    if (/^(zip|tar|gz|tgz|7z|rar)$/.test(e)) return "archive";
+    if (/^(mp3|wav|m4a|ogg|flac|aac)$/.test(e)) return "audio";
+    if (/^(mp4|mov|webm|mkv|3gp)$/.test(e)) return "video";
+    return "other";
+  }
+  function ftile(kind, path) {
+    var k = FK[kind] || FK.other;
+    var t = h("div", { class: "ftile k-" + k[1] }, icon(k[0], "s"));
+    if (kind === "image" && path) { var im = h("img", { src: wsUrl(path), alt: "", loading: "lazy" }); im.addEventListener("error", function () { im.remove(); }); t.appendChild(im); }
+    return t;
+  }
+  /* any path as the agent or the UI writes it → "/workspace/…" / "/.yaver/…" (mirrors VPath.normTool) */
+  function vpOf(p) {
+    p = String(p || "").trim().replace(/\\/g, "/");
+    try { if (/%[0-9a-f]{2}/i.test(p)) p = decodeURIComponent(p); } catch (e) {}
+    p = p.replace(/^file:\/\//i, "").replace(/^\/?ws\//, "/").replace(/[?#].*$/, "");
+    if (/^~(\/|$)/.test(p)) p = "/.yaver" + p.slice(1);
+    if (/^(workspace|\.yaver)(\/|$)/.test(p)) p = "/" + p;
+    if (p.charAt(0) !== "/") p = "/workspace/" + p;
+    var out = []; p.split("/").forEach(function (s) { if (!s || s === ".") return; if (s === "..") out.pop(); else out.push(s); });
+    p = "/" + out.join("/");
+    if (p !== "/" && !/^\/(workspace|\.yaver|tmp)(\/|$)/.test(p)) p = "/workspace" + p;
+    return p;
+  }
+  /* the address the screen loads a disk file from (MainActivity serves /ws/…) */
+  function wsUrl(p) { return "/ws" + vpOf(p).split("/").map(function (s) { return encodeURIComponent(s); }).join("/"); }
+  /* a link in an answer that points at a file on the disk (not a web page, mail or task) */
+  function isFileHref(href) {
+    href = String(href || "").trim();
+    if (!href || href.charAt(0) === "#") return false;
+    if (/^file:/i.test(href)) return true;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return false;
+    if (/^\/\//.test(href)) return false;
+    return true;
+  }
+  var FPATH_RX = /(^|[\s(\[“"'«])((?:\/workspace|\/\.yaver|~)\/[^\s<>"'`)\]]*[^\s<>"'`)\].,;:!?…”»])/g;
+  /* plain-text paths in an answer (/workspace/report.md, `~/skills/x/SKILL.md`) become taps that open the file */
+  function filePaths(root) {
+    root.querySelectorAll("code").forEach(function (c) {
+      if (c.closest("pre,a")) return;
+      var t = c.textContent.trim();
+      if (/^(\/workspace|\/\.yaver|~)\/\S+$/.test(t) && !/[<>]/.test(t)) { c.classList.add("fpath"); c.setAttribute("role", "link"); c.addEventListener("click", function (e) { e.stopPropagation(); previewFile(t); }); }
+    });
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [], n;
+    while ((n = walker.nextNode())) { FPATH_RX.lastIndex = 0; if (FPATH_RX.test(n.nodeValue) && !n.parentNode.closest("a,pre,code")) nodes.push(n); }
+    nodes.forEach(function (tn) {
+      var txt = tn.nodeValue, frag = document.createDocumentFragment(), last = 0, m;
+      FPATH_RX.lastIndex = 0;
+      while ((m = FPATH_RX.exec(txt))) {
+        var st = m.index + m[1].length;
+        frag.appendChild(document.createTextNode(txt.slice(last, st)));
+        frag.appendChild(h("a", { class: "flink", href: m[2] }, m[2]));
+        last = st + m[2].length;
+      }
+      frag.appendChild(document.createTextNode(txt.slice(last)));
+      tn.parentNode.replaceChild(frag, tn);
+    });
+  }
 
-  function openMailPage() {
+  function fsub(e) {
+    if (e.dir) return e.count != null ? (e.count === 0 ? T("Empty", "Boş") : e.count + T(e.count === 1 ? " item" : " items", " öğe")) : "";
+    return bytes(e.size || 0) + (e.m ? " · " + shortWhen(e.m) : "");
+  }
+  var AREA = [["/workspace", "My files", "Dosyalarım", "folder"], ["/.yaver", "yaver's own", "yaver'in alanı", "brain"]];
+  function areaOf(p) { return /^\/\.yaver(\/|$)/.test(p) ? "/.yaver" : "/workspace"; }
+  function filesPage() { return S.pages.filter(function (x) { return x.name === "files"; })[0]; }
+
+  function openFiles(path) {
     closeDrawer();
-    if (topPage() === "mail") return;
-    var refresh = h("button", { class: "ib", "aria-label": T("Refresh", "Yenile"), onclick: function () { loadMail(true); } }, icon("refresh-cw", "s"));
-    var compose = h("button", { class: "ib", "aria-label": T("New e-mail", "Yeni e-posta"), onclick: function () { composeSheet("new", null); } }, icon("square-pen", "s"));
+    S.fx = S.fx || { sort: "name", q: "", path: "/workspace" };
+    var target = vpOf(path || S.fx.path || "/workspace");
+    if (filesPage()) { while (topPage() !== "files") popPage(); filesGo(target); return; }
+    var up = h("button", { class: "ib", id: "fx-up", "aria-label": T("Upload from the phone", "Telefondan yükle"), onclick: function () { filesUpload(); } }, icon("upload", "s"));
+    var nf = h("button", { class: "ib", id: "fx-new", "aria-label": T("New", "Yeni"), onclick: function () { filesNew(); } }, icon("folder-plus", "s"));
+    pushPage("files", T("Files", "Dosyalar"), function (body) {
+      body.appendChild(h("div", { class: "seg", role: "tablist", id: "fx-seg" }, AREA.map(function (a) {
+        return h("button", { role: "tab", "data-area": a[0], onclick: function () { S.fx.q = ""; filesGo(a[0]); } }, icon(a[3], "xs"), T(a[1], a[2]));
+      })));
+      body.appendChild(h("nav", { class: "fcrumbs", id: "fx-crumbs", "aria-label": T("Folder path", "Klasör yolu") }));
+      var q = h("input", { type: "search", id: "fx-q", placeholder: T("Filter this folder", "Bu klasörde süz"), "aria-label": T("Filter this folder", "Bu klasörde süz") });
+      q.addEventListener("input", function () { S.fx.q = q.value; renderFiles(); });
+      body.appendChild(h("div", { class: "toolbar" }, h("label", { class: "search" }, icon("search", "xs"), q),
+        h("button", { class: "select", id: "fx-sort", onclick: filesSortMenu }, icon("arrow-up-down", "xs"), h("span", null, ""))));
+      body.appendChild(h("div", { id: "fx-note" }));
+      body.appendChild(h("div", { class: "flist", id: "fx-list", role: "list" }));
+      body.appendChild(h("div", { class: "meta fmeta", id: "fx-meta" }));
+      filesGo(target);
+    }, { actions: [up, nf] });
+  }
+
+  function filesGo(path) {
+    var p = filesPage(); if (!p) return;
+    return call("files.list", { path: path }).then(function (r) {
+      var changed = !S.fx.data || S.fx.data.path !== r.path;
+      S.fx.data = r; S.fx.path = r.path; if (changed) { S.fx.q = ""; var q = $("#fx-q", p.body); if (q) q.value = ""; }
+      renderFiles(); if (changed) p.body.scrollTop = 0;
+    }).catch(function (e) { toast(e.message); if (path !== "/workspace" && (!S.fx.data)) filesGo("/workspace"); });
+  }
+  function filesRefresh() { if (S.fx && S.fx.data) filesGo(S.fx.data.path); }
+
+  var FSORT = [["name", "Name", "Ad"], ["date", "Newest first", "En yeni"], ["size", "Largest first", "En büyük"], ["type", "Type", "Tür"]];
+  function filesSortMenu() {
+    optionsSheet(T("Sort by", "Sırala"), FSORT.map(function (s) { return [s[0], T(s[1], s[2])]; }), S.fx.sort, function (v) { S.fx.sort = v; renderFiles(); });
+  }
+  function sorted(list) {
+    var coll = new Intl.Collator(loc(), { numeric: true, sensitivity: "base" }), by = S.fx.sort;
+    return list.slice().sort(function (a, b) {
+      if (a.dir !== b.dir) return a.dir ? -1 : 1;
+      if (by === "date") return (b.m || 0) - (a.m || 0) || coll.compare(a.name, b.name);
+      if (by === "size") return (b.size || 0) - (a.size || 0) || coll.compare(a.name, b.name);
+      if (by === "type") return coll.compare(a.kind || "", b.kind || "") || coll.compare(a.name, b.name);
+      return coll.compare(a.name, b.name);
+    });
+  }
+
+  function renderFiles() {
+    var p = filesPage(); if (!p || !S.fx.data) return;
+    var r = S.fx.data, path = r.path, area = areaOf(path);
+    p.body.querySelectorAll("#fx-seg button").forEach(function (b) { var on = b.getAttribute("data-area") === area && path !== "/"; b.classList.toggle("on", on); b.setAttribute("aria-selected", on ? "true" : "false"); });
+    var canAdd = !r.readOnly && path !== "/" && path !== "/.yaver";
+    ["#fx-up", "#fx-new"].forEach(function (s) { var b = $(s, p.el); if (b) b.classList.toggle("hidden", !canAdd); });
+    var sb = $("#fx-sort span", p.body); if (sb) sb.textContent = T.apply(null, FSORT.filter(function (s) { return s[0] === S.fx.sort; })[0].slice(1));
+    // breadcrumbs: / › workspace › uploads
+    var cr = clear($("#fx-crumbs", p.body));
+    (r.crumbs || []).forEach(function (c, i) {
+      if (i) cr.appendChild(icon("chevron-right", "xs sep"));
+      var last = i === r.crumbs.length - 1;
+      cr.appendChild(h("button", { class: "crumb" + (last ? " cur" : ""), "aria-current": last ? "page" : null, onclick: last ? null : function () { filesGo(c.path); } },
+        c.path === "/" ? icon("hard-drive", "xs") : null, c.path === "/" ? h("span", { class: "vh" }, T("Disk", "Disk")) : c.name));
+    });
+    setTimeout(function () { cr.scrollLeft = cr.scrollWidth; }, 0);
+    // what this folder is
+    var note = clear($("#fx-note", p.body)), nt = null;
+    if (path === "/.yaver/memories") nt = [icon("lock", "s"), h("div", null, h("b", null, T("Read-only view of yaver's memory", "yaver'in hafızasının salt okunur görünümü")), h("span", null, T("MEMORY.md and USER.md are generated from memory. Change entries on the Memory screen.", "MEMORY.md ve USER.md hafızadan üretilir. Kayıtları Hafıza ekranında değiştirin."))), h("button", { class: "btn sm", onclick: function () { openKnowledge(); } }, T("Memory", "Hafıza"))];
+    else if (path === "/.yaver/sessions" || /^\/\.yaver\/sessions\//.test(path)) nt = [icon("lock", "s"), h("div", null, h("b", null, T("Saved conversations", "Kaydedilen sohbetler")), h("span", null, T("Read-only: yaver writes these itself.", "Salt okunur: bunları yaver kendisi yazar.")))];
+    else if (path === "/.yaver/skills") nt = [icon("graduation-cap", "s"), h("div", null, h("b", null, T("Skills", "Yetenekler")), h("span", null, T("Each folder is a skill: SKILL.md with the steps, plus scripts and templates yaver runs by these paths.", "Her klasör bir yetenektir: adımları anlatan SKILL.md ile yaver'in bu yollardan çalıştırdığı betikler ve şablonlar.")))];
+    else if (path === "/.yaver") nt = [icon("brain", "s"), h("div", null, h("b", null, T("yaver's own folder", "yaver'in kendi klasörü")), h("span", null, T("Its persona, skills and a view of its memory — the same paths yaver uses.", "Kişiliği, yetenekleri ve hafızasının görünümü — yaver'in kullandığı yollarla aynı.")))];
+    else if (r.readOnly && path !== "/") nt = [icon("lock", "s"), h("div", null, h("b", null, T("Read-only", "Salt okunur")), h("span", null, r.why || ""))];
+    if (nt) note.appendChild(h("div", { class: "fnote" }, nt));
+    // the list
+    var box = clear($("#fx-list", p.body));
+    var q = String(S.fx.q || "").trim().toLocaleLowerCase(loc());
+    var list = sorted((r.entries || []).filter(function (e) { return !q || e.name.toLocaleLowerCase(loc()).indexOf(q) >= 0; }));
+    if (!list.length) {
+      if (q) box.appendChild(h("div", { class: "fempty sm" }, T("Nothing here matches “" + S.fx.q + "”", "“" + S.fx.q + "” ile eşleşen bir şey yok")));
+      else box.appendChild(h("div", { class: "empty fempty" }, h("div", { class: "ei" }, icon("folder-open")),
+        h("h3", null, path === "/workspace" ? T("No files yet", "Henüz dosya yok") : T("This folder is empty", "Bu klasör boş")),
+        h("p", null, path === "/workspace" ? T("Files you send yaver, mail attachments it saves and documents it makes appear here.", "yaver'e gönderdiğiniz dosyalar, kaydettiği e-posta ekleri ve hazırladığı belgeler burada görünür.") : T("Upload a file from the phone or ask yaver to put something here.", "Telefondan dosya yükleyin ya da yaver'den buraya bir şey koymasını isteyin.")),
+        canAdd ? h("div", { class: "btnstack" }, h("button", { class: "btn p", onclick: function () { filesUpload(); } }, icon("upload", "s"), T("Upload from the phone", "Telefondan yükle"))) : null));
+    }
+    list.forEach(function (e) {
+      var pressT = 0, long = false;
+      var row = h("div", { class: "frow", role: "listitem", tabindex: "0", "data-path": e.path },
+        ftile(e.kind, e.kind === "image" ? e.path : null),
+        h("div", { class: "ft" }, h("b", null, e.name), h("span", null, fsub(e), e.ro && !/^\/(\.yaver)?$/.test(path) ? h("i", { class: "fro" }, icon("lock", "xs")) : null)),
+        h("button", { class: "ib fmore", "aria-label": T("More for ", "Diğer: ") + e.name, onclick: function (ev) { ev.stopPropagation(); fileMenu(e); } }, icon("ellipsis-vertical", "s")));
+      function open() { if (long) return; if (e.dir) filesGo(e.path); else previewFile(e.path); }
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", function (ev) { if (ev.key === "Enter") open(); });
+      row.addEventListener("touchstart", function () { long = false; pressT = setTimeout(function () { long = true; fileMenu(e); }, 520); }, { passive: true });
+      row.addEventListener("touchend", function () { clearTimeout(pressT); });
+      row.addEventListener("touchmove", function () { clearTimeout(pressT); }, { passive: true });
+      row.addEventListener("contextmenu", function (ev) { ev.preventDefault(); fileMenu(e); });
+      box.appendChild(row);
+    });
+    var nd = (r.entries || []).filter(function (e) { return e.dir; }).length, nfl = (r.entries || []).length - nd;
+    var sz = (r.entries || []).reduce(function (s, e) { return s + (e.dir ? 0 : (e.size || 0)); }, 0);
+    clear($("#fx-meta", p.body)).appendChild(document.createTextNode(
+      (nd ? nd + T(nd === 1 ? " folder" : " folders", " klasör") : "") + (nd && nfl ? " · " : "") + (nfl ? nfl + T(nfl === 1 ? " file" : " files", " dosya") + " · " + bytes(sz) : "") + (r.readOnly && path !== "/" && path !== "/.yaver" ? " · " + T("read-only", "salt okunur") : "")));
+    filesDisk(p);
+  }
+  /* the original's disk meter and document-index line */
+  function filesDisk(p) {
+    var el = $("#fx-disk", p.body) || p.body.appendChild(h("div", { class: "meta fdisk", id: "fx-disk" }));
+    if (S.fx.disk && Date.now() - S.fx.diskAt < 15000) return drawDisk(el, S.fx.disk);
+    call("files.stats").then(function (d) { S.fx.disk = d; S.fx.diskAt = Date.now(); drawDisk(el, d); }).catch(function () {});
+  }
+  function drawDisk(el, d) {
+    clear(el);
+    var used = d.appBytes || 0, tot = used + (d.free || 0), pct = tot ? Math.max(1, Math.round(used / tot * 100)) : 0;
+    el.appendChild(h("div", { class: "fdbar", role: "meter", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(pct), "aria-label": T("Storage used by yaver", "yaver'in kullandığı alan") }, h("i", { style: "width:" + pct + "%" })));
+    el.appendChild(h("div", null, T("My files: ", "Dosyalarım: ") + (d.workspaceFiles || 0) + T(" files · ", " dosya · ") + bytes(d.workspaceBytes || 0) + " · " + T("yaver in all: ", "yaver toplam: ") + bytes(used) + " · " + bytes(d.free || 0) + T(" free on the phone", " telefonda boş")));
+    el.appendChild(h("div", null, T("Document index: ", "Belge dizini: ") + (d.ragDocs || 0) + T(" files · ", " dosya · ") + (d.ragSections || 0) + T(" sections", " bölüm")));
+  }
+
+  function filesUpload() {
+    var dir = S.fx && S.fx.data ? S.fx.data.path : "/workspace";
+    call("files.pick", { dir: dir }).then(function (list) {
+      list = list || []; if (!list.length) return;
+      toast(list.length === 1 ? T("Uploaded ", "Yüklendi: ") + list[0].name : T(list.length + " files uploaded", list.length + " dosya yüklendi"));
+      filesRefresh();
+    }).catch(function (e) { toast(e.message); });
+  }
+  function filesNew() {
+    var dir = S.fx.data.path;
+    optionsSheet(T("New", "Yeni"), [["folder", T("Folder", "Klasör"), "folder-plus"], ["note", T("Text note (.md)", "Metin notu (.md)"), "file-pen-line"], ["upload", T("Upload from the phone", "Telefondan yükle"), "upload"]], null, function (v) {
+      if (v === "upload") return filesUpload();
+      if (v === "folder") editSheet({ title: T("New folder", "Yeni klasör"), placeholder: T("Folder name", "Klasör adı"), ok: T("Create", "Oluştur"), save: function (n) {
+        if (!n.trim()) { toast(T("Give it a name", "Bir ad verin")); return false; }
+        call("files.mkdir", { path: dir, name: n.trim() }).then(function () { filesRefresh(); }).catch(function (e) { toast(e.message); });
+      } });
+      if (v === "note") editSheet({ title: T("New note", "Yeni not"), value: T("note.md", "not.md"), ok: T("Create", "Oluştur"), save: function (n) {
+        n = n.trim(); if (!n) { toast(T("Give it a name", "Bir ad verin")); return false; }
+        if (!/\.[a-z0-9]{1,6}$/i.test(n)) n += ".md";
+        call("files.new", { path: dir, name: n, text: "" }).then(function (r) { filesRefresh(); editFile({ path: r.path, name: n, text: "" }); }).catch(function (e) { toast(e.message); });
+      } });
+    });
+  }
+
+  /* "ask yaver about this file": the file goes into the composer as an attachment, the question is the user's */
+  function askAboutFile(e) {
+    closeAllPages(); closeSheets();
+    if (e.dir) { $("#input").value = T("Look at the folder " + e.path + ": ", e.path + " klasörüne bak: "); }
+    else { S.atts.push({ path: e.path, name: e.name || e.path.split("/").pop(), image: (e.kind || kindOf(e.path)) === "image", size: e.size }); renderAtts(); $("#input").value = T("About this file: ", "Bu dosya hakkında: "); }
+    autosize(); syncSend(); setTimeout(function () { var i = $("#input"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }, 120);
+  }
+  /* "read with yaver": a new chat that reads the file and summarizes it */
+  function readWithYaver(e) {
+    closeSheets(); newChat();
+    var k = e.kind || kindOf(e.path);
+    send(T("Read " + e.path + (k === "image" ? " (look at the picture)" : "") + " and summarize it for me: what it is, the key points, numbers and anything I need to act on.",
+      e.path + (k === "image" ? " resmine bak" : " dosyasını oku") + " ve benim için özetle: ne olduğu, ana noktalar, rakamlar ve harekete geçmem gereken bir şey varsa."),
+      { display: T("Read and summarize ", "Oku ve özetle: ") + (e.name || e.path.split("/").pop()) });
+  }
+  function closeSheets() { while (sheets.length) sheets[sheets.length - 1].close(); }
+
+  function fileDownload(e) {
+    toast(e.dir ? T("Packing the folder…", "Klasör paketleniyor…") : T("Saving…", "Kaydediliyor…"));
+    call("files.download", { path: e.path }).then(function (r) { toast(T("Saved to ", "Kaydedildi: ") + (r && r.saved || "Download/yaver")); }).catch(function (x) { toast(x.message); });
+  }
+  function fileViewPage(e) { call("files.view", { path: e.path }).catch(function (x) { toast(x.message); }); }
+  /* the original's checkHtmlUI: run_html on the page and show its report */
+  function fileRunHtml(e) {
+    var box = h("div", null, h("div", { class: "status" }, h("div", { class: "spin" }), T("Running the page…", "Sayfa çalıştırılıyor…")));
+    var s = sheet({ title: T("Run & check", "Çalıştır ve denetle") + " · " + (e.name || e.path.split("/").pop()), body: box, actions: [[T("Close", "Kapat")], [T("Ask yaver to fix it", "yaver'e düzelttir"), "p", function () {
+      closeAllPages(); send(T("Run " + e.path + " with run_html and fix every problem it reports, then run it again until it is clean. Check it at width 390 too.", e.path + " dosyasını run_html ile çalıştır, bildirdiği her sorunu düzelt ve temiz çıkana kadar yeniden çalıştır. 390 genişlikte de denetle."), { display: T("Fix ", "Düzelt: ") + (e.name || e.path) });
+    }]] });
+    s.el.classList.add("tall");
+    call("files.runHtml", { path: e.path, width: 390 }).then(function (r) { clear(box).appendChild(h("pre", { class: "fcode" }, r.report || "")); }).catch(function (x) { clear(box).appendChild(h("div", { class: "err" }, icon("triangle-alert", "s"), h("div", null, x.message))); });
+  }
+  function fileOpenApp(e) { call("open.file", { path: e.path }).catch(function (x) { toast(x.message); }); }
+  function fileShare(e) { call("share.file", { path: e.path }).catch(function (x) { toast(x.message); }); }
+  function fileRename(e) {
+    editSheet({ title: T("Rename", "Yeniden adlandır"), value: e.name, ok: T("Rename", "Adlandır"), save: function (v) {
+      v = v.trim(); if (!v) { toast(T("Give it a name", "Bir ad verin")); return false; }
+      call("files.rename", { path: e.path, name: v }).then(function () { filesRefresh(); toast(T("Renamed", "Yeniden adlandırıldı")); }).catch(function (x) { toast(x.message); });
+    } });
+  }
+  function filePickFolder(title, e, fn) {
+    call("files.folders").then(function (list) {
+      list = (list || []).filter(function (d) { return d !== e.path && d.indexOf(e.path + "/") !== 0; });
+      var s = sheet({ title: title, text: e.name, body: h("div", { class: "fdest" }, list.map(function (d) {
+        var depth = d.split("/").length - 2, here = S.fx && S.fx.data && S.fx.data.path === d;
+        return h("button", { class: "opt", style: "padding-left:" + (4 + Math.min(depth, 6) * 14) + "px", onclick: function () { s.close(); fn(d); } },
+          icon(d === "/.yaver/skills" ? "graduation-cap" : d === "/tmp" ? "clock" : "folder", "s"), h("div", null, d === "/workspace" ? T("My files", "Dosyalarım") : d.split("/").pop(), h("small", null, d)), here ? icon("check", "s c") : null);
+      })), actions: [[T("Cancel", "İptal")]] });
+    }).catch(function (x) { toast(x.message); });
+  }
+  function fileMove(e) { filePickFolder(T("Move to", "Şuraya taşı"), e, function (d) { call("files.move", { path: e.path, to: d }).then(function (r) { filesRefresh(); toast(T("Moved to ", "Taşındı: ") + d); }).catch(function (x) { toast(x.message); }); }); }
+  function fileCopy(e) { filePickFolder(T("Copy to", "Şuraya kopyala"), e, function (d) { call("files.copy", { path: e.path, to: d }).then(function (r) { filesRefresh(); toast(T("Copied to ", "Kopyalandı: ") + d); }).catch(function (x) { toast(x.message); }); }); }
+  function fileDelete(e) {
+    sheet({ title: e.dir ? T("Delete this folder?", "Bu klasör silinsin mi?") : T("Delete this file?", "Bu dosya silinsin mi?"), text: e.path + (e.dir && e.count ? T(" — with everything in it", " — içindekilerle birlikte") : ""),
+      body: h("div", { class: "danger-note" }, icon("triangle-alert", "s"), T("This cannot be undone.", "Bu işlem geri alınamaz.")),
+      actions: [[T("Cancel", "İptal")], [T("Delete", "Sil"), "danger", function () {
+        call("files.delete", { path: e.path }).then(function () { closeSheets(); filesRefresh(); toast(T("Deleted", "Silindi")); }).catch(function (x) { toast(x.message); });
+      }]] });
+  }
+  var READABLE = { pdf: 1, doc: 1, sheet: 1, csv: 1, slides: 1, md: 1, text: 1, html: 1, image: 1, data: 1 };
+  function fileMenu(e) {
+    var k = e.kind || kindOf(e.name, e.dir), fixed = !!e.fixed, ro = !!e.ro;
+    var opts = [];
+    function o(ic, label, sub, fn, cls) { opts.push(h("button", { class: "opt" + (cls ? " " + cls : ""), onclick: function () { s.close(); fn(e); } }, icon(ic, "s"), h("div", null, label, sub ? h("small", null, sub) : null))); }
+    if (e.dir) o("folder-open", T("Open", "Aç"), null, function () { filesGo(e.path); });
+    else o("eye", T("Preview", "Önizle"), null, function () { previewFile(e.path); });
+    if (!e.dir && (k === "html" || /\.svg$/i.test(e.name))) o("app-window", T("Open the page", "Sayfayı aç"), T("In yaver's browser, scripts run", "yaver'in tarayıcısında, betikler çalışır"), fileViewPage);
+    if (!e.dir && k === "html" && /^\/workspace\//.test(e.path)) o("play", T("Run & check", "Çalıştır ve denetle"), T("Errors, missing files and overflow at phone width", "Hatalar, eksik dosyalar ve telefon genişliğinde taşma"), fileRunHtml);
+    if (!e.dir) o("external-link", T("Open with another app", "Başka uygulamayla aç"), k === "doc" || k === "sheet" || k === "slides" ? T("Word, Excel, PowerPoint…", "Word, Excel, PowerPoint…") : null, fileOpenApp);
+    o("message-square-text", T("Ask yaver about it", "yaver'e sor"), T("Adds it to your message", "Mesajınıza ekler"), askAboutFile);
+    if (!e.dir && READABLE[k]) o("sparkles", T("Read and summarize", "Oku ve özetle"), T("yaver reads it in a new chat", "yaver yeni bir sohbette okur"), readWithYaver);
+    if (!e.dir) o("share-2", T("Share", "Paylaş"), null, fileShare);
+    o("download", T("Save to the phone", "Telefona kaydet"), e.dir ? T("As a .zip in Download/yaver", "Download/yaver içine .zip olarak") : "Download/yaver", fileDownload);
+    if (!fixed && !ro) { o("pencil", T("Rename", "Yeniden adlandır"), null, fileRename); o("folder-input", T("Move to…", "Taşı…"), null, fileMove); }
+    if (e.path !== "/" && e.path !== "/.yaver") o("copy", T("Copy to…", "Kopyala…"), null, fileCopy);
+    if (!fixed && !ro) o("trash-2", T("Delete", "Sil"), null, fileDelete, "bad");
+    var s = sheet({ body: h("div", null, h("div", { class: "fmhead" }, ftile(k, k === "image" ? e.path : null), h("div", { class: "ft" }, h("b", null, e.name), h("span", null, e.path))), opts) });
+  }
+
+  /* ---------------- preview */
+  function previewFile(path) {
+    var vp = vpOf(path);
+    call("files.read", { path: vp }).then(showPreview).catch(function (err) {
+      call("files.list", { path: vp }).then(function () { openFiles(vp); }).catch(function () { toast(err.message); });
+    });
+  }
+  function csvTable(text, kind) {
+    var sep = kind === "tsv" || /\t/.test(text.split("\n")[0]) ? "\t" : (text.split("\n")[0].split(";").length > text.split("\n")[0].split(",").length ? ";" : ",");
+    var rows = [], row = [], cur = "", q = false;
+    for (var i = 0; i < text.length && rows.length < 301; i++) {
+      var c = text[i];
+      if (q) { if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; continue; }
+      if (c === '"') q = true; else if (c === sep) { row.push(cur); cur = ""; } else if (c === "\n") { row.push(cur.replace(/\r$/, "")); rows.push(row); row = []; cur = ""; } else cur += c;
+    }
+    if (cur || row.length) { row.push(cur); rows.push(row); }
+    var head = rows.shift() || [];
+    return h("div", { class: "tw" }, h("table", null, h("thead", null, h("tr", null, head.map(function (x) { return h("th", null, x); }))),
+      h("tbody", null, rows.slice(0, 300).map(function (r) { return h("tr", null, r.map(function (x) { return h("td", null, x); })); }))));
+  }
+  function showPreview(f) {
+    var k = f.kind || kindOf(f.name), view = h("div", { class: "fview" }), text = f.text;
+    var s;
+    function textView(raw) {
+      clear(view);
+      if (k === "md" && !raw) view.appendChild(md(text));
+      else if (k === "csv" && !raw) view.appendChild(csvTable(text, f.name.split(".").pop().toLowerCase()));
+      else {
+        var shown = text;
+        if (k === "data" && /\.json$/i.test(f.name)) { try { shown = JSON.stringify(JSON.parse(text), null, 2); } catch (x) {} }
+        var lines = shown.replace(/\n$/, "").split("\n"), pre = h("pre", { class: "fcode" + (k === "code" || k === "data" || k === "html" ? " num" : "") });
+        if (/ num$/.test(pre.className) && lines.length < 4000) lines.forEach(function (l) { pre.appendChild(h("span", { class: "ln" }, l)); pre.appendChild(document.createTextNode("\n")); });
+        else pre.textContent = shown;   // text only: nothing in a file is ever run or parsed as HTML
+        view.appendChild(pre);
+      }
+      if (f.truncated) view.appendChild(h("div", { class: "fnote sm" }, icon("info", "s"), h("span", null, T("Showing the first " + bytes(text.length) + " — open it in another app for the rest.", "İlk " + bytes(text.length) + " gösteriliyor — tamamı için başka uygulamada açın."))));
+    }
+    var toggle = null;
+    if (!f.binary) {
+      if (k === "md" || k === "csv") {
+        var raw = /^\/\.yaver\/memories\//.test(f.path);   /* memory views read best as they are (entries split by §) */
+        toggle = h("button", { class: "chip", onclick: function () { raw = !raw; toggle.textContent = raw ? T("Formatted", "Biçimli") : T("Source", "Kaynak"); textView(raw); } }, raw ? T("Formatted", "Biçimli") : T("Source", "Kaynak"));
+      }
+      textView(raw);
+    } else if (k === "image") {
+      var im = h("img", { class: "fimg", src: wsUrl(f.path), alt: f.name });
+      im.addEventListener("click", function () { fileOpenApp(f); });
+      view.appendChild(im);
+    } else if (k === "pdf") {
+      var pg = 0, pages = 0, img = h("img", { class: "fpdf", alt: f.name }), nav = h("div", { class: "fpnav" }), wait = h("div", { class: "fwait" }, h("i", { class: "spin" }), T("Rendering…", "Hazırlanıyor…"));
+      view.appendChild(wait); view.appendChild(img); view.appendChild(nav);
+      var w = Math.min(1600, Math.round((window.innerWidth || 360) * (window.devicePixelRatio || 2)));
+      var showPage = function (n) {
+        wait.classList.remove("hidden");
+        call("files.pdf", { path: f.path, page: n, width: w }).then(function (r) {
+          wait.classList.add("hidden"); pg = r.page; pages = r.pages; img.src = r.data;
+          clear(nav);
+          if (pages > 1) nav.appendChild(h("div", { class: "fpn" },
+            h("button", { class: "ib", "aria-label": T("Previous page", "Önceki sayfa"), disabled: pg <= 0 || null, onclick: function () { showPage(pg - 1); } }, icon("chevron-left", "s")),
+            h("span", null, T("Page ", "Sayfa ") + (pg + 1) + " / " + pages),
+            h("button", { class: "ib", "aria-label": T("Next page", "Sonraki sayfa"), disabled: pg >= pages - 1 || null, onclick: function () { showPage(pg + 1); } }, icon("chevron-right", "s"))));
+        }).catch(function (x) { wait.classList.add("hidden"); view.appendChild(h("div", { class: "fnote sm" }, icon("info", "s"), h("span", null, x.message))); });
+      };
+      showPage(0);
+      toggle = docTextToggle();
+    } else if (k === "doc" || k === "sheet" || k === "slides") {
+      view.appendChild(h("div", { class: "fdoc" }, ftile(k), h("div", null, h("b", null, { doc: T("Word document", "Word belgesi"), sheet: T("Spreadsheet", "Elektronik tablo"), slides: T("Presentation", "Sunum") }[k]),
+        h("span", null, T("Open it in Word, Excel or PowerPoint — or see its text here.", "Word, Excel veya PowerPoint ile açın — ya da metnini burada görün.")))));
+      toggle = docTextToggle(true);
+    } else {
+      view.appendChild(h("div", { class: "fdoc" }, ftile(k), h("div", null, h("b", null, T("No preview for this file", "Bu dosya için önizleme yok")), h("span", null, f.mime || ""))));
+    }
+    function docTextToggle(auto) {
+      var t = h("button", { class: "chip", onclick: function () {
+        t.disabled = true; t.textContent = T("Reading…", "Okunuyor…");
+        call("files.extract", { path: f.path }).then(function (r) {
+          t.remove(); var pre = h("pre", { class: "fcode" }); pre.textContent = r.text || T("(no text found)", "(metin bulunamadı)"); view.appendChild(pre);
+        }).catch(function (x) { t.disabled = false; t.textContent = T("Show text", "Metni göster"); toast(x.message); });
+      } }, T("Show text", "Metni göster"));
+      return t;
+    }
+    var e = { path: f.path, name: f.name, kind: k, size: f.size, dir: false };
+    var acts = h("div", { class: "fpacts" },
+      (k === "html" || /\.svg$/i.test(f.name) ? [["app-window", T("Page", "Sayfa"), fileViewPage]] : []).concat(k === "html" && /^\/workspace\//.test(f.path) ? [["play", T("Check", "Denetle"), fileRunHtml]] : [])
+        .concat([["external-link", T("Open", "Aç"), fileOpenApp], ["message-square-text", T("Ask", "Sor"), askAboutFile], ["share-2", T("Share", "Paylaş"), fileShare], ["download", T("Save", "Kaydet"), fileDownload]])
+        .concat(!f.binary && !f.readOnly ? [["pencil", T("Edit", "Düzenle"), function () { s.close(); editFile(f); }]] : [])
+        .concat([["ellipsis-vertical", T("More", "Daha"), function () { fileMenu(Object.assign({}, e, { ro: f.readOnly, fixed: f.readOnly || f.path === "/.yaver/PERSONA.md" })); }]])
+        .map(function (a) { return h("button", { onclick: function () { a[2](e); } }, icon(a[0], "s"), h("span", null, a[1])); }));
+    s = sheet({ body: h("div", { class: "fprev" },
+      h("div", { class: "fmhead" }, ftile(k, null), h("div", { class: "ft" }, h("b", null, f.name), h("span", null, bytes(f.size || 0) + (f.m ? " · " + shortWhen(f.m) : "") + (f.readOnly ? " · " + T("read-only", "salt okunur") : ""))), toggle),
+      h("div", { class: "fpathl" }, f.path), acts, view) });
+    s.el.classList.add("tall");
+  }
+
+  /* edit a text file (notes, skills, PERSONA.md) */
+  function editFile(f) {
+    var ta = h("textarea", { class: "fedit", spellcheck: "false", autocapitalize: "off", "aria-label": f.name });
+    ta.value = f.text || "";
+    var s = sheet({ title: f.name, text: f.path + (f.truncated ? T(" — only the first part was loaded; saving would cut the file", " — yalnızca ilk kısım yüklendi; kaydetmek dosyayı keser") : ""), body: ta,
+      actions: [[T("Cancel", "İptal")], [T("Save", "Kaydet"), "p", function () {
+        if (f.truncated) { toast(T("Too large to edit here", "Burada düzenlemek için çok büyük")); return false; }
+        call("files.write", { path: f.path, text: ta.value }).then(function () { toast(T("Saved", "Kaydedildi")); filesRefresh(); if (f.path === "/.yaver/PERSONA.md") refreshState(); }).catch(function (x) { toast(x.message); });
+      }]] });
+    s.el.classList.add("tall");
+    setTimeout(function () { ta.focus(); }, 260);
+  }
+
+  /* ------------------------------------------------------------ mail */
+  /* Mail, the reading view and the calendar views, ported from the original's full Outlook-style view (Office, OF):
+     server folders with counts, AI triage in the list, local index search with filters and AI search, the HTML body in a
+     sandboxed frame (remote pictures blocked until "Show pictures", cid: pictures inline), move / archive / unread /
+     permanent delete / empty folder with Undo, drafts edited and sent in place, Draft with AI, tasks from e-mail,
+     and Agenda / Day / Work week / Week / Month with event details, new / edit / delete. */
+  var FOLDERS = [["inbox", "Inbox", "Gelen Kutusu", "inbox"], ["sentitems", "Sent", "Gönderilenler", "send"], ["drafts", "Drafts", "Taslaklar", "file-pen"], ["archive", "Archive", "Arşiv", "archive"], ["junkemail", "Junk", "Gereksiz", "ban"], ["deleteditems", "Deleted", "Silinmiş", "trash-2"]];
+  S.mail.pivot = "all"; S.mail.folders = {}; S.mail.total = 0; S.mail.results = null; S.mail.resHow = ""; S.mail.showFilters = false; S.mail.idx = null; S.mail.images = false;
+  S.mail.sf = { when: "", from: "", to: "", has_attachments: null, attachment: "", folder: "all" };
+  S.mail.cal = { view: "", day: null, events: [], key: "", busy: false, scrollKey: "" };
+  var mailSeq = 0;
+  /* the server's own folder name (it is localised) when known, else ours */
+  function folderName(f) { var srv = S.mail.folders[f]; if (srv && srv.name && srv.name !== f) return srv.name; var x = FOLDERS.filter(function (q) { return q[0] === f; })[0]; return x ? T(x[1], x[2]) : f; }
+  function folderIcon(f) { var x = FOLDERS.filter(function (q) { return q[0] === f; })[0]; return x ? x[3] : "folder"; }
+  function mailPageRec() { return S.pages.filter(function (x) { return x.name === "mail"; })[0]; }
+  function mailWho(b) { return b ? (typeof b === "string" ? b : (b.name || b.email || "?")) : "?"; }
+  function errText(e) { return String((e && e.message) || e || "").replace(/^SIGNIN:\s*/, ""); }
+
+  function openMailPage(tab) {
+    closeDrawer();
+    if (typeof tab === "string") S.mail.tab = tab;
+    if (topPage() === "mail") { renderMailShell(); loadMail(); return; }
+    var refresh = h("button", { class: "ib", "aria-label": T("Refresh", "Yenile"), onclick: function () { loadMail(true); loadFolders(); } }, icon("refresh-cw", "s"));
+    var plus = h("button", { class: "ib", id: "mailplus", "aria-label": T("New e-mail", "Yeni e-posta"), onclick: function () { if (S.mail.tab === "cal") eventEditSheet(null); else composeSheet("new", null); } }, icon("square-pen", "s"));
     pushPage("mail", T("Mail", "Posta"), function (body) {
       body.appendChild(h("div", { class: "seg", role: "tablist" },
         h("button", { class: S.mail.tab === "mail" ? "on" : "", onclick: function () { S.mail.tab = "mail"; renderMailShell(); loadMail(); } }, icon("inbox", "xs"), T("Mail", "Posta")),
         h("button", { class: S.mail.tab === "cal" ? "on" : "", onclick: function () { S.mail.tab = "cal"; renderMailShell(); loadMail(); } }, icon("calendar", "xs"), T("Calendar", "Takvim"))));
       body.appendChild(h("div", { id: "mailbox" }));
       renderMailShell(); loadMail();
-    }, { actions: [refresh, compose] });
+    }, { actions: [refresh, plus] });
+    call("mailx.settings").then(function (x) {
+      S.mail.images = !!(x && x.images);
+      if (!S.mail.cal.view) { S.mail.cal.view = (x && x.calView) || "agenda"; if (S.mail.tab === "cal" && topPage() === "mail") { renderMailShell(); loadMail(); } }
+    }).catch(function () {});
+    loadFolders(); loadIndexState();
   }
 
   function renderMailShell() {
-    var p = S.pages.filter(function (x) { return x.name === "mail"; })[0]; if (!p) return;
+    var p = mailPageRec(); if (!p) return;
     p.body.querySelectorAll(".seg button").forEach(function (b, i) { b.classList.toggle("on", (i === 0) === (S.mail.tab === "mail")); });
+    var plus = $("#mailplus", p.el);
+    if (plus) { clear(plus).appendChild(icon(S.mail.tab === "cal" ? "plus" : "square-pen", "s")); plus.setAttribute("aria-label", S.mail.tab === "cal" ? T("New event", "Yeni etkinlik") : T("New e-mail", "Yeni e-posta")); }
     var box = clear($("#mailbox", p.body));
     if (S.mail.tab === "mail") {
-      var q = h("input", { type: "search", placeholder: T("Search mail", "Postalarda ara"), value: S.mail.query });
-      q.addEventListener("keydown", function (e) { if (e.key === "Enter") { S.mail.query = q.value.trim(); loadMail(true); q.blur(); } });
+      var q = h("input", { type: "search", placeholder: T("Search mail", "Postada ara"), value: S.mail.query, enterkeyhint: "search" });
+      q.addEventListener("keydown", function (e) { if (e.key === "Enter") { S.mail.query = q.value.trim(); q.blur(); runMailSearch(false); } });
       /* clearing the box (its ×, or deleting the text) shows the folder again */
-      q.addEventListener("input", function () { if (!q.value.trim() && S.mail.query) { S.mail.query = ""; loadMail(true); } });
-      box.appendChild(h("div", { class: "toolbar" },
-        h("button", { class: "select", onclick: function () { optionsSheet(T("Folder", "Klasör"), FOLDERS.map(function (f) { return [f[0], T(f[1], f[2]), f[3]]; }), S.mail.folder, function (v) { S.mail.folder = v; S.mail.query = ""; renderMailShell(); loadMail(); }); } }, folderName(S.mail.folder), icon("chevron-down", "xs")),
-        h("label", { class: "search" }, icon("search", "xs"), q)));
+      q.addEventListener("input", function () { if (!q.value.trim() && (S.mail.query || S.mail.results)) { S.mail.query = ""; if (hasMailFilters()) runMailSearch(false); else { S.mail.results = null; renderMailShell(); loadMail(true); } } });
+      var fbtn = h("button", { class: "sbtn" + (S.mail.showFilters || hasMailFilters() ? " on" : ""), "aria-label": T("Filters: date, sender, recipient, attachments, folder", "Filtreler: tarih, gönderen, alıcı, ekler, klasör"), onclick: function (e) { e.preventDefault(); S.mail.showFilters = !S.mail.showFilters; renderMailShell(); renderMailList(); } }, icon("filter", "xs"));
+      var aibtn = h("button", { class: "sbtn ai", "aria-label": T("AI search: describe the e-mail in your own words", "Yapay zekâ ile ara: e-postayı kendi cümlelerinizle anlatın"), onclick: function (e) { e.preventDefault(); S.mail.query = q.value.trim(); if (!S.mail.query) { toast(T("Type what you are looking for", "Ne aradığınızı yazın")); q.focus(); return; } q.blur(); runMailSearch(true); } }, icon("sparkles", "xs"));
+      var fsel = h("button", { class: "select", id: "mfolder", onclick: pickFolder });
+      paintFolderButton(fsel);
+      box.appendChild(h("div", { class: "toolbar" }, fsel, h("label", { class: "search msearch" }, icon("search", "xs"), q, fbtn, aibtn)));
+      if (S.mail.showFilters || hasMailFilters()) box.appendChild(mailFilterBar());
+      if (!S.mail.results && !S.mail.query) {
+        var piv = [["all", T("All", "Tümü")], ["unread", T("Unread", "Okunmamış")]].concat(S.mail.folder === "inbox" ? [["reply", T("Needs reply", "Yanıt bekleyen")]] : []);
+        if (S.mail.pivot === "reply" && S.mail.folder !== "inbox") S.mail.pivot = "all";
+        var emptyBtn = (S.mail.folder === "deleteditems" || S.mail.folder === "junkemail") ? h("button", { class: "btn xs dline", onclick: emptyMailFolder }, icon("trash-2", "xs"), T("Empty folder", "Klasörü boşalt")) : null;
+        box.appendChild(h("div", { class: "frow mpiv" }, filterChips(piv, S.mail.pivot, function (k) {
+          var re = (S.mail.pivot === "unread") !== (k === "unread"); S.mail.pivot = k; renderMailShell(); if (re) loadMail(true); else renderMailList();
+        }), emptyBtn));
+      }
+    } else {
+      var v = calView();
+      box.appendChild(h("div", { class: "calbar" },
+        h("button", { class: "select sm", onclick: pickCalView }, icon("calendar", "xs"), calViewName(v), icon("chevron-down", "xs")),
+        h("button", { class: "btn xs", onclick: function () { S.mail.cal.day = calSod(new Date()); loadCal(); } }, T("Today", "Bugün")),
+        h("span", { class: "sp" }),
+        h("button", { class: "ib sm", "aria-label": T("Previous", "Önceki"), onclick: function () { calGo(-1); } }, icon("chevron-left", "s")),
+        h("button", { class: "ib sm", "aria-label": T("Next", "Sonraki"), onclick: function () { calGo(1); } }, icon("chevron-right", "s"))));
+      box.appendChild(h("button", { class: "caltitle", onclick: miniMonthSheet }, h("span", null, calTitle()), icon("chevron-down", "xs")));
     }
     box.appendChild(h("div", { id: "mailmeta", class: "meta" }));
     box.appendChild(h("div", { id: "maillist" }));
+    if (S.mail.tab === "mail") box.appendChild(h("div", { id: "mailidx", class: "idxline" }));
+  }
+
+  function paintFolderButton(b) {
+    b = b || $("#mfolder"); if (!b) return;
+    var f = S.mail.folders[S.mail.folder], n = f ? (S.mail.folder === "drafts" ? f.total : f.unread) : 0;
+    clear(b); b.appendChild(h("span", { class: "fn" }, folderName(S.mail.folder))); if (n) b.appendChild(h("span", { class: "fc" }, n > 999 ? "999+" : String(n))); b.appendChild(icon("chevron-down", "xs"));
+  }
+  function visibleFolders() { var known = Object.keys(S.mail.folders).length > 0; return FOLDERS.filter(function (f) { return f[0] !== "archive" || !known || S.mail.folders.archive; }); }
+  function pickFolder() {
+    optionsSheet(T("Folder", "Klasör"), visibleFolders().map(function (f) {
+      var x = S.mail.folders[f[0]], n = x ? (f[0] === "drafts" ? x.total : x.unread) : 0;
+      return [f[0], folderName(f[0]), f[3], n ? (f[0] === "drafts" ? T(n + " items", n + " öğe") : T(n + " unread", n + " okunmamış")) : null];
+    }), S.mail.folder, function (v) { S.mail.folder = v; S.mail.query = ""; S.mail.results = null; S.mail.pivot = "all"; S.mail.items = []; renderMailShell(); loadMail(true); });
+  }
+  function loadFolders() {
+    return call("mail.folders").then(function (list) {
+      var o = {}; (list || []).forEach(function (f) { o[f.id] = f; }); S.mail.folders = o; paintFolderButton();
+    }).catch(function () {});
   }
 
   function mailBlocked(err) {
@@ -1157,68 +1679,215 @@
   }
 
   function signInMail() {
-    call("mail.login").then(function (st) { if (S.state) S.state.mail = st; if (topPage() === "mail") loadMail(); if (topPage() === "settings") renderSettings(); });
+    call("mail.login").then(function (st) { if (S.state) S.state.mail = st; if (topPage() === "mail") { loadMail(); loadFolders(); } if (topPage() === "settings") renderSettings(); });
   }
 
-  function loadMail(force) {
+  function loadMail(force, more) {
     var list = $("#maillist"); if (!list) return;
-    if (!list.firstChild || force) { clear(list).appendChild(h("div", { class: "status", style: "padding:24px 16px" }, h("div", { class: "spin" }), T("Loading…", "Yükleniyor…"))); }
-    if (S.mail.tab === "cal") {
-      call("mail.events", { days: 14 }).then(renderAgenda).catch(function (e) { mailBlocked(e.message); });
-      return;
-    }
-    call("mail.list", { folder: S.mail.folder, query: S.mail.query, limit: 50 }).then(function (r) {
-      S.mail.items = r.items || [];
-      var unread = S.mail.items.filter(function (m) { return !m.read; }).length;
-      var meta = $("#mailmeta"); if (meta) { clear(meta); meta.appendChild(h("span", { class: "dot ok" })); meta.appendChild(document.createTextNode(S.mail.query ? T(S.mail.items.length + " results", S.mail.items.length + " sonuç") : (unread ? T(unread + " unread · ", unread + " okunmamış · ") : "") + T(r.total + " in " + folderName(S.mail.folder), folderName(S.mail.folder) + " · " + r.total))); }
-      var list2 = clear($("#maillist"));
-      if (!S.mail.items.length) { list2.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon("inbox")), h("h3", null, S.mail.query ? T("Nothing found", "Bir şey bulunamadı") : T("No mail here", "Burada posta yok")))); return; }
-      S.mail.items.forEach(function (m) {
-        /* Sent Items / Drafts: who it went to matters, not me as the sender */
-        var outbox = S.mail.folder === "sentitems" || S.mail.folder === "drafts";
-        var from = outbox ? T("To: ", "Kime: ") + (String(m.displayTo || "").trim() || T("(no recipients)", "(alıcı yok)")) : boxName(m.from) || T("(unknown sender)", "(bilinmeyen gönderen)");
-        list2.appendChild(swipeRow(m, h("button", { class: "mrow" + (m.read ? "" : " unread"), "data-id": m.id, onclick: function (e) { if (this.dataset.swiped) { e.preventDefault(); return; } m.read = true; this.classList.remove("unread"); openMail(m.id, m); } },
-          outbox ? avatar(String(m.displayTo || "?").split(/[;,]/)[0]) : avatar(from, m.from && m.from.email),
-          h("div", { class: "mc" },
-            h("div", { class: "l1" }, h("span", { class: "from" }, from), h("span", { class: "time" }, m.importance === "High" ? icon("octagon-alert", "xs flag") : null, m.attachments ? icon("paperclip", "xs") : null, shortWhen(m.received))),
-            h("div", { class: "subj" }, m.subject || T("(no subject)", "(konu yok)")),
-            m.preview ? h("div", { class: "prev" }, m.preview.replace(/\s+/g, " ")) : null))));
-      });
-    }).catch(function (e) { mailBlocked(e.message); });
+    if (S.mail.tab === "cal") { loadCal(force); return; }
+    if (S.mail.results) { if (force && !S.mail.results.smart) runMailSearch(false); else renderMailList(); return; }
+    if (!more && (!list.firstChild || force)) { clear(list).appendChild(h("div", { class: "status", style: "padding:24px 16px" }, h("div", { class: "spin" }), T("Loading…", "Yükleniyor…"))); }
+    var my = ++mailSeq;
+    call("mail.list", { folder: S.mail.folder, query: S.mail.query, unread: S.mail.pivot === "unread" && !S.mail.query, limit: 50, offset: more ? S.mail.items.length : 0 }).then(function (r) {
+      if (my !== mailSeq || S.mail.tab !== "mail") return;
+      var got = r.items || [];
+      S.mail.items = more ? S.mail.items.concat(got.filter(function (m) { return !S.mail.items.some(function (x) { return x.id === m.id; }); })) : got;
+      S.mail.total = r.total || 0;
+      renderMailList();
+    }).catch(function (e) { if (my === mailSeq) mailBlocked(e.message); });
   }
 
-  function renderAgenda(evs) {
-    var list = clear($("#maillist")); var meta = $("#mailmeta"); if (meta) { clear(meta); meta.appendChild(h("span", { class: "dot ok" })); meta.appendChild(document.createTextNode(T("Next 14 days", "Önümüzdeki 14 gün"))); }
-    evs = (evs || []).filter(function (e) { return !e.cancelled; });
-    if (!evs.length) { list.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon("calendar")), h("h3", null, T("Nothing scheduled", "Planlanmış bir şey yok")), h("p", null, T("Your calendar is clear for the next two weeks.", "Önümüzdeki iki hafta takviminiz boş.")))); return; }
-    var lastDay = "";
-    var now = Date.now();
-    evs.forEach(function (e) {
-      var dk = new Date(e.start).toDateString();
-      if (dk !== lastDay) { lastDay = dk; list.appendChild(h("div", { class: "day" }, dayLabel(e.start), h("small", null, new Date(e.start).toLocaleDateString(loc(), { day: "numeric", month: "long" })))); }
-      var resp = e.response || "";
-      var cls = "ev" + (e.end < now ? " past" : "") + (resp === "Tentative" ? " tent" : "") + (e.meeting && (resp === "NoResponseReceived" || resp === "Unknown") ? " none" : "");
-      list.appendChild(h("button", { class: cls, onclick: function () { eventSheet(e); } },
-        h("div", { class: "tm" }, e.allDay ? h("b", null, T("All day", "Tüm gün")) : [h("b", null, timeOf(e.start)), timeOf(e.end)]),
-        h("div", { class: "eb" }, h("b", null, e.subject), (e.location || e.organizer) ? h("span", null, [e.location, e.organizer].filter(Boolean).join(" — ")) : null,
-          e.meeting && (resp === "NoResponseReceived" || resp === "Unknown") ? h("span", { class: "tag warn" }, T("Not answered", "Yanıtlanmadı")) : resp === "Tentative" ? h("span", { class: "tag warn" }, T("Tentative", "Belki")) : null)));
+  /* the rows of the folder or of the index search, with the triage line and tags */
+  function renderMailList() {
+    var list = $("#maillist"); if (!list || S.mail.tab !== "mail") return;
+    var meta = $("#mailmeta"), res = S.mail.results;
+    var items = res ? res.items : S.mail.items;
+    if (res && S.mail.pivot === "unread") items = items.filter(function (m) { return !m.read; });
+    if (S.mail.pivot === "reply" && !res) items = items.filter(function (m) { return m.triage && m.triage.r; });
+    if (meta) {
+      clear(meta); meta.appendChild(h("span", { class: "dot ok" }));
+      var unread = S.mail.items.filter(function (m) { return !m.read; }).length;
+      meta.appendChild(document.createTextNode(res ? (res.busy ? T("Searching with AI…", "Yapay zekâ ile aranıyor…") : T(items.length + (items.length === 1 ? " result" : " results"), items.length + " sonuç") + (S.mail.resHow ? " · " + S.mail.resHow : ""))
+        : S.mail.query ? T(items.length + " results", items.length + " sonuç") : (unread ? T(unread + " unread · ", unread + " okunmamış · ") : "") + T(S.mail.total + " in " + folderName(S.mail.folder), folderName(S.mail.folder) + " · " + S.mail.total)));
+    }
+    clear(list);
+    if (res && res.busy) { list.appendChild(h("div", { class: "status", style: "padding:24px 16px" }, h("div", { class: "spin" }), T("Searching with AI…", "Yapay zekâ ile aranıyor…"))); renderIndexLine(); return; }
+    if (!items.length) {
+      list.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon(res ? "text-search" : "inbox")),
+        h("h3", null, res ? T("No e-mails found in the search index.", "Arama dizininde e-posta bulunamadı.") : S.mail.query ? T("Nothing found", "Bir şey bulunamadı") : S.mail.pivot !== "all" ? T("Nothing here.", "Burada bir şey yok.") : T("No mail here", "Burada posta yok")),
+        res && S.mail.query ? h("div", { class: "btnstack" }, h("button", { class: "btn", onclick: function () { S.mail.results = null; renderMailShell(); loadMail(true); } }, icon("search", "s"), T("Search the server instead", "Sunucuda ara"))) : null));
+      renderIndexLine(); return;
+    }
+    items.forEach(function (m) { list.appendChild(mailRow(m, !!res)); });
+    if (!res && !S.mail.query && S.mail.items.length < S.mail.total) {
+      var more = h("button", { class: "btn sm mmore", onclick: function () { more.disabled = true; clear(more).appendChild(h("div", { class: "spin xs" })); loadMail(false, true); } }, T("Load more (" + (S.mail.total - S.mail.items.length) + ")", "Daha fazla (" + (S.mail.total - S.mail.items.length) + ")"));
+      list.appendChild(h("div", { class: "mmorew" }, more));
+    }
+    renderIndexLine();
+  }
+  var FSHORT = { inbox: ["Inbox", "Gelen"], sentitems: ["Sent", "Giden"], archive: ["Archive", "Arşiv"] };
+  function mailRow(m, fromIndex) {
+    /* Sent Items / Drafts: who it went to matters, not me as the sender */
+    var outbox = fromIndex ? m.folder === "sentitems" : (S.mail.folder === "sentitems" || S.mail.folder === "drafts");
+    var from = outbox ? T("To: ", "Kime: ") + (String(m.displayTo || "").trim() || T("(no recipients)", "(alıcı yok)")) : boxName(m.from) || T("(unknown sender)", "(bilinmeyen gönderen)");
+    var t = m.triage, fs = fromIndex && FSHORT[m.folder];
+    var btn = h("button", { class: "mrow" + (m.read ? "" : " unread"), "data-id": m.id, onclick: function (e) {
+      if (this.dataset.swiped) { e.preventDefault(); return; }
+      var draft = !fromIndex && S.mail.folder === "drafts";
+      if (!draft) { m.read = true; this.classList.remove("unread"); }
+      openMail(m.id, m, { folder: fromIndex ? m.folder : S.mail.folder, edit: draft });
+    } },
+      outbox ? avatar(String(m.displayTo || "?").split(/[;,]/)[0]) : avatar(from, m.from && m.from.email),
+      h("div", { class: "mc" },
+        h("div", { class: "l1" }, h("span", { class: "from" }, from), h("span", { class: "time" }, m.importance === "High" ? icon("octagon-alert", "xs flag") : null, m.attachments ? icon("paperclip", "xs") : null, shortWhen(m.received))),
+        h("div", { class: "l2" }, h("span", { class: "subj" }, m.subject || T("(no subject)", "(konu yok)")),
+          t && t.p === "high" ? h("span", { class: "mtag hi" }, T("High", "Önemli")) : null, t && t.r ? h("span", { class: "mtag rp" }, T("Reply", "Yanıt")) : null,
+          fs ? h("span", { class: "mtag fl" }, T(fs[0], fs[1])) : null),
+        fromIndex && m.attNames && m.attNames.length ? h("div", { class: "prev attn" }, icon("paperclip", "xs"), " " + m.attNames.join(", ")) : null,
+        t && t.s ? h("div", { class: "prev tri" }, "✦ " + t.s) : m.preview ? h("div", { class: "prev" }, m.preview.replace(/\s+/g, " ")) : null));
+    return swipeRow(m, btn, fromIndex ? m.folder : S.mail.folder);
+  }
+
+  /* ---------- index search (filters, keywords, AI search) */
+  function hasMailFilters() { var f = S.mail.sf; return !!(f.when || f.from || f.to || f.has_attachments != null || f.attachment || (f.folder && f.folder !== "all")); }
+  /* the index search says how it searched (MailIndex: "AI search · from: …", "filters + keywords", "keywords", "filters") */
+  function howText(s) { return String(s || "").replace(/^AI search/, T("AI search", "Yapay zekâ araması")).replace(/^filters \+ keywords/, T("filters + keywords", "filtreler + anahtar kelimeler")).replace(/^keywords/, T("keywords", "anahtar kelimeler")).replace(/^filters/, T("filters", "filtreler")); }
+  function fromIndexEntry(x) {
+    return { id: x.id, subject: x.s, from: x.fr, received: x.received, read: x.r, attachments: !!(x.a && x.a.length), attNames: x.a || [], importance: "Normal", preview: String(x.b || "").slice(0, 220),
+      displayTo: (x.to || []).map(function (p) { return p.name || p.email; }).join("; "), folder: x.f, triage: null };
+  }
+  var filterT = 0;
+  function runMailSearch(smart) {
+    clearTimeout(filterT);
+    var q = S.mail.query; smart = !!(smart && q);
+    if (!q && !hasMailFilters()) { S.mail.results = null; renderMailShell(); loadMail(true); return; }
+    function serverInstead(st) {
+      S.mail.results = null;
+      if (!st || !st.busy) call("mailx.index.sync", {}).then(setIdx).catch(function () {});
+      toast(T("The search index is being built — using the server search meanwhile", "Arama dizini hazırlanıyor — bu sırada sunucuda aranıyor"));
+      renderMailShell(); loadMail(true);
+    }
+    function go(st) {
+      if (!st || !st.count) { serverInstead(st); return; }
+      var my = ++mailSeq, wasRes = !!S.mail.results;
+      S.mail.results = { busy: smart, items: [], smart: smart }; S.mail.resHow = smart ? T("AI search", "Yapay zekâ araması") : "";
+      if (wasRes) refreshFilterChrome(); else renderMailShell();
+      renderMailList();
+      call("mailx.index.search", { q: q, filters: JSON.parse(JSON.stringify(S.mail.sf)), smart: smart }).then(function (r) {
+        if (my !== mailSeq || !S.mail.results) return;
+        if (r && r.building) { serverInstead(null); return; }
+        S.mail.results = { items: ((r && r.items) || []).map(fromIndexEntry), smart: smart };
+        S.mail.resHow = howText((r && r.how) || (q ? "keywords" : "filters"));
+        renderMailList();
+      }).catch(function (e) { if (my !== mailSeq) return; S.mail.results = { items: [], smart: smart }; renderMailList(); toast(e.message); });
+    }
+    if (S.mail.idx && S.mail.idx.count) go(S.mail.idx);
+    else call("mailx.index.state").then(function (st) { setIdx(st); go(st); }).catch(function () { go(null); });
+  }
+  function mailFilterBar() {
+    var f = S.mail.sf;
+    /* later: a change fired by the blur of a field must not rebuild the bar while the browser is still moving focus */
+    /* a tap on the AI button right after typing in a field runs the AI search with the new filter and cancels this one */
+    function set(k, v) { if (f[k] === v) return; f[k] = v; clearTimeout(filterT); filterT = setTimeout(function () { runMailSearch(false); }, 250); }
+    function sel(k, opts, cur, conv) { return h("select", { class: "fsel", "aria-label": opts[0][1], onchange: function (e) { set(k, conv ? conv(e.target.value) : e.target.value); } }, opts.map(function (o) { return h("option", { value: o[0], selected: cur === o[0] }, o[1]); })); }
+    function txt(k, ph) { var i = h("input", { class: "finp", type: "search", placeholder: ph, "aria-label": ph, value: f[k] || "", autocapitalize: "off", spellcheck: "false" }); i.addEventListener("change", function () { set(k, i.value.trim()); }); return i; }
+    return h("div", { class: "mfilters" },
+      sel("when", [["", T("Any time", "Her zaman")], ["today", T("Today", "Bugün")], ["yesterday", T("Yesterday", "Dün")], ["week", T("Last 7 days", "Son 7 gün")], ["month", T("Last 30 days", "Son 30 gün")], ["quarter", T("Last 3 months", "Son 3 ay")], ["year", T("This year", "Bu yıl")]], f.when),
+      sel("folder", [["all", T("All folders", "Tüm klasörler")], ["inbox", T("Inbox", "Gelen Kutusu")], ["sentitems", T("Sent", "Gönderilenler")], ["archive", T("Archive", "Arşiv")]], f.folder || "all"),
+      txt("from", T("From…", "Kimden…")), txt("to", T("To / Cc…", "Kime / Bilgi…")),
+      sel("has_attachments", [["", T("Attachments: any", "Ekler: hepsi")], ["1", T("With attachments", "Ekli")], ["0", T("Without attachments", "Eksiz")]], f.has_attachments == null ? "" : f.has_attachments ? "1" : "0", function (v) { return v === "" ? null : v === "1"; }),
+      txt("attachment", T("File name / .xlsx…", "Dosya adı / .xlsx…")),
+      hasMailFilters() ? h("button", { class: "lnk", onclick: function () { S.mail.sf = { when: "", from: "", to: "", has_attachments: null, attachment: "", folder: "all" }; runMailSearch(false); renderMailShell(); renderMailList(); } }, T("Clear filters", "Filtreleri temizle")) : null);
+  }
+  /* the filter button's state and the "Clear filters" link, without rebuilding the bar the user is typing in */
+  function refreshFilterChrome() {
+    var on = S.mail.showFilters || hasMailFilters(), fb = $(".msearch .sbtn:not(.ai)"); if (fb) fb.classList.toggle("on", on);
+    var bar = $(".mfilters"); if (!bar) return;
+    var lnk = $(".lnk", bar);
+    if (hasMailFilters() && !lnk) bar.appendChild(h("button", { class: "lnk", onclick: function () { S.mail.sf = { when: "", from: "", to: "", has_attachments: null, attachment: "", folder: "all" }; runMailSearch(false); renderMailShell(); renderMailList(); } }, T("Clear filters", "Filtreleri temizle")));
+    else if (!hasMailFilters() && lnk) lnk.remove();
+  }
+  function loadIndexState() { call("mailx.index.state").then(setIdx).catch(function () {}); }
+  function setIdx(st) { if (st) S.mail.idx = st; renderIndexLine(); }
+  function renderIndexLine() {
+    var el = $("#mailidx"); if (!el) return; var st = S.mail.idx; clear(el); if (!st) return;
+    if (st.busy) { el.appendChild(h("div", { class: "spin xs" })); el.appendChild(h("span", null, st.progress || T("Indexing…", "Dizinleniyor…"))); return; }
+    el.appendChild(h("span", null, T("Search index: " + (st.count || 0) + " e-mails", "Arama dizini: " + (st.count || 0) + " e-posta") + (st.synced ? T(" · updated ", " · güncellendi ") + shortWhen(st.synced) : "")));
+    if (st.error) el.appendChild(h("span", { class: "bad" }, " · " + st.error));
+    el.appendChild(h("button", { class: "lnk", onclick: function () { call("mailx.index.sync", {}).then(setIdx).catch(function (e) { toast(e.message); }); } }, T("Update", "Güncelle")));
+    el.appendChild(h("button", { class: "lnk", onclick: function () {
+      confirmSheet(T("Rebuild the search index?", "Arama dizini yeniden oluşturulsun mu?"), T("Rebuild the mail search index from the server? This reads your recent mail again.", "Posta arama dizini sunucudan yeniden oluşturulsun mu? Son postalarınız yeniden okunur."), T("Rebuild", "Yeniden oluştur"), function () { call("mailx.index.sync", { full: true }).then(setIdx).catch(function (e) { toast(e.message); }); }, true);
+    } }, T("Rebuild", "Yeniden oluştur")));
+  }
+
+  /* a yes/no sheet for destructive actions */
+  function confirmSheet(title, text, ok, fn, safe) {
+    sheet({ title: title, text: text, actions: [[T("Cancel", "İptal")], [ok, safe ? "p" : "danger", function () { fn(); }]] });
+  }
+
+  /* ---------- delete, move, archive, unread, empty folder, Undo */
+  function dropMailRow(id) {
+    var row = document.querySelector('.mswipe[data-id="' + CSS.escape(id) + '"]');
+    S.mail.items = S.mail.items.filter(function (x) { return x.id !== id; });
+    if (S.mail.results) S.mail.results.items = S.mail.results.items.filter(function (x) { return x.id !== id; });
+    if (S.mail.total > 0) S.mail.total--;
+    if (row) { row.style.height = row.offsetHeight + "px"; row.classList.add("gone"); requestAnimationFrame(function () { row.style.height = "0px"; }); setTimeout(function () { row.remove(); if (!$("#maillist .mrow")) renderMailList(); }, 260); }
+  }
+  function undoToast(text, newId, back) {
+    if (!newId || !back) { toast(text); return; }
+    toast(text + " — " + T("Undo", "Geri al"), function () {
+      call("mail.move", { id: newId, folder: back }).then(function () { toast(T("Undone", "Geri alındı")); if (topPage() === "mail") loadMail(true); loadFolders(); }).catch(function (e) { toast(e.message); });
+    }, 8000);
+  }
+  function leaveReading(id) { var top = S.pages[S.pages.length - 1]; if (top && top.name === "mailread" && top.mailId === id) popPage(); }
+  /* Outlook behaviour: Delete moves to Deleted Items (with Undo); in Deleted Items, or "Delete permanently", it is gone for good after a confirm */
+  function deleteMsg(m, from, hard) {
+    var perm = hard || from === "deleteditems";
+    function run() {
+      leaveReading(m.id); dropMailRow(m.id);
+      call("mail.remove", { id: m.id, permanent: perm }).then(function (r) {
+        loadFolders();
+        if (perm) toast(T("Deleted permanently", "Kalıcı olarak silindi")); else undoToast(T("Moved to Deleted Items", "Silinmiş Öğeler'e taşındı"), r && r.id, from);
+      }).catch(function (e) { toast(e.message); if (topPage() === "mail") loadMail(true); });
+    }
+    if (perm) confirmSheet(T("Delete permanently?", "Kalıcı olarak silinsin mi?"), T("The selected item will be deleted permanently. This cannot be undone. Continue?", "Seçili öğe kalıcı olarak silinecek. Geri alınamaz. Devam edilsin mi?"), T("Delete permanently", "Kalıcı sil"), run);
+    else run();
+  }
+  function moveMsg(m, to, from) {
+    call("mail.move", { id: m.id, folder: to }).then(function (r) {
+      leaveReading(m.id); dropMailRow(m.id); loadFolders();
+      var nid = r && r.id; undoToast(T("Moved to ", "Taşındı: ") + folderName(to), nid && nid !== m.id ? nid : null, from);
+    }).catch(function (e) {
+      toast(to === "archive" && /folder|not found|ErrorFolderNotFound|archive/i.test(e.message) ? T("This mailbox has no Archive folder: ", "Bu posta kutusunda Arşiv klasörü yok: ") + errText(e) : e.message);
     });
   }
-
-  function eventSheet(e) {
-    var acts = [];
-    if (e.meeting && e.response !== "Organizer") acts = [[T("Decline", "Reddet"), "", function () { respond(e.id, "decline"); }], [T("Maybe", "Belki"), "", function () { respond(e.id, "tentative"); }], [T("Accept", "Kabul"), "p", function () { respond(e.id, "accept"); }]];
-    sheet({ title: e.subject, body: h("dl", { class: "dl" },
-      h("dt", null, T("When", "Zaman")), h("dd", null, e.allDay ? new Date(e.start).toLocaleDateString(loc(), { weekday: "long", day: "numeric", month: "long" }) : longWhen(e.start) + " – " + timeOf(e.end)),
-      e.location ? [h("dt", null, T("Where", "Yer")), h("dd", null, e.location)] : null,
-      e.organizer ? [h("dt", null, T("Organizer", "Düzenleyen")), h("dd", null, e.organizer)] : null),
-      actions: acts.length ? acts : [[T("Close", "Kapat")]] });
+  function moveMenu(m, from) {
+    var opts = [["inbox", "inbox"], ["archive", "archive"], ["junkemail", "ban"], ["deleteditems", "trash-2"]].filter(function (o) { return o[0] !== from && (o[0] !== "archive" || !Object.keys(S.mail.folders).length || S.mail.folders.archive); });
+    optionsSheet(T("Move to", "Şuraya taşı"), opts.map(function (o) { return [o[0], folderName(o[0]), o[1]]; }), "", function (v) { moveMsg(m, v, from); });
+  }
+  function markUnread(m) {
+    call("mail.markRead", { id: m.id, read: false }).then(function () {
+      var row = S.mail.items.filter(function (x) { return x.id === m.id; })[0]; if (row) row.read = false;
+      toast(T("Marked as unread", "Okunmadı olarak işaretlendi")); leaveReading(m.id); loadFolders(); renderMailList();
+    }).catch(function (e) { toast(e.message); });
+  }
+  function emptyMailFolder() {
+    var f = S.mail.folder, name = folderName(f);
+    confirmSheet(T("Empty “" + name + "”?", "“" + name + "” boşaltılsın mı?"), T("Everything in “" + name + "” will be deleted permanently. This cannot be undone. Continue?", "“" + name + "” klasöründeki tüm öğeler kalıcı olarak silinecek. Geri alınamaz. Devam edilsin mi?"), T("Empty folder", "Klasörü boşalt"), function () {
+      toast(T("Emptying the folder…", "Klasör boşaltılıyor…"), null, 20000);
+      call("mail.emptyFolder", { folder: f }).then(function () { S.mail.items = []; S.mail.total = 0; toast(T("“" + name + "” emptied", "“" + name + "” boşaltıldı")); loadMail(true); loadFolders(); }).catch(function (e) { toast(e.message); });
+    });
+  }
+  function mailMoreSheet(m, from) {
+    var draft = isDraftMsg(m, from);
+    var s = sheet({ title: m.subject || T("(no subject)", "(konu yok)"), body: h("div", null,
+      from !== "archive" ? h("button", { class: "opt", onclick: function () { s.close(); moveMsg(m, "archive", from); } }, icon("archive", "s"), h("div", null, T("Archive", "Arşivle"), h("small", null, T("Move to Archive", "Arşive taşı")))) : null,
+      h("button", { class: "opt", onclick: function () { s.close(); moveMenu(m, from); } }, icon("folder-input", "s"), h("div", null, T("Move to…", "Taşı…"), h("small", null, T("Move to another folder", "Başka klasöre taşı")))),
+      draft ? null : h("button", { class: "opt", onclick: function () { s.close(); markUnread(m); } }, icon("mail", "s"), h("div", null, T("Mark as unread", "Okunmadı yap"))),
+      h("button", { class: "opt danger", onclick: function () { s.close(); deleteMsg(m, from, true); } }, icon("trash-2", "s"), h("div", null, T("Delete permanently", "Kalıcı olarak sil"), h("small", null, T("Cannot be undone", "Geri alınamaz"))))) });
   }
 
-  function respond(id, r) {
-    call("mail.respond", { id: id, response: r }).then(function () { toast(T("Response sent", "Yanıt gönderildi")); loadMail(); }).catch(function (e) { toast(e.message); });
-  }
-
+  /* ---------- the reading view */
   /* a mailbox as the UI shows it: the name, else the address ("" when neither is there) */
   function boxName(x) { if (!x) return ""; if (typeof x === "string") return x.trim(); return String(x.name || "").trim() || String(x.email || "").trim(); }
   /* To / Cc of the reading view: names (address on long-press/tooltip), long lists folded; no row at all when empty */
@@ -1242,49 +1911,182 @@
     var a = line(T("To", "Kime"), to), b = line("Cc", cc);
     return a || b ? h("div", { class: "rcpt" }, a, b) : null;
   }
+  function isDraftMsg(m, from) { return !!(m && (m.isDraft || from === "drafts")); }
 
-  function openMail(id, head) {
+  /* opts: {folder: where the row was (Undo, permanent delete, drafts), edit: open the draft editor at once} */
+  function openMail(id, head, opts) {
+    opts = opts || {};
     closeDrawer();
-    var cur = null;
-    var footer = h("div", { class: "actbar" },
-      h("button", { onclick: function () { if (cur) composeSheet("reply", cur); } }, icon("reply", "s"), T("Reply", "Yanıtla")),
-      h("button", { onclick: function () { if (cur) composeSheet("replyall", cur); } }, icon("reply-all", "s"), T("Reply all", "Tümünü")),
-      h("button", { onclick: function () { if (cur) composeSheet("forward", cur); } }, icon("forward", "s"), T("Forward", "İlet")),
-      h("button", { onclick: function () { if (cur) deleteMail(cur); } }, icon("trash-2", "s"), T("Delete", "Sil")),
-      h("button", { class: "prim", onclick: function () { if (cur) askAbout(cur); } }, icon("sparkles", "s"), T("Ask yaver", "yaver'e sor")));
-    pushPage("mailread", head && head.subject ? head.subject : T("E-mail", "E-posta"), function (body, rec) {
+    var cur = null, from = opts.folder || "";
+    var footer = h("div", { class: "actbar" });
+    function bar() {
+      clear(footer);
+      function b(ic, label, fn, cls) { footer.appendChild(h("button", { class: cls || null, onclick: function () { if (cur) fn(cur); } }, icon(ic, "s"), label)); }
+      if (cur && isDraftMsg(cur, from)) {
+        b("pencil", T("Edit", "Düzenle"), function (m) { composeSheet("draft", m); }, "prim");
+        b("send", T("Send", "Gönder"), function (m) { sendDraftNow(m); });
+      } else {
+        b("reply", T("Reply", "Yanıtla"), function (m) { composeSheet("reply", m); });
+        b("reply-all", T("Reply all", "Tümünü"), function (m) { composeSheet("replyall", m); });
+        b("forward", T("Forward", "İlet"), function (m) { composeSheet("forward", m); });
+      }
+      b("trash-2", from === "deleteditems" ? T("Delete for good", "Kalıcı sil") : T("Delete", "Sil"), function (m) { deleteMsg(m, from); });
+      b("ellipsis-vertical", T("More", "Diğer"), function (m) { mailMoreSheet(m, from); });
+    }
+    bar();
+    var rec = pushPage("mailread", head && head.subject ? head.subject : T("E-mail", "E-posta"), function (body, rec) {
+      rec.mailId = id;
       body.appendChild(h("div", { class: "status", style: "padding:24px 16px" }, h("div", { class: "spin" }), T("Opening…", "Açılıyor…")));
-      call("mail.get", { id: id }).then(function (m) {
-        cur = m;
-        clear(body);
-        var from = boxName(m.from) || T("(unknown sender)", "(bilinmeyen gönderen)"), fromMail = m.from && m.from.email ? String(m.from.email).trim() : "";
+      call("mail.full", { id: id }).then(function (m) {
+        cur = m; m.cid = {}; rec.mail = m; rec.mailId = m.id || id;
+        var row = S.mail.items.filter(function (x) { return x.id === id; })[0]; if (row && !m.isDraft) row.read = true;
         if (m.subject) rec.title.firstChild.textContent = m.subject;
-        body.appendChild(h("div", { class: "rhead" },
-          h("h2", null, m.subject || T("(no subject)", "(konu yok)")),
-          h("div", { class: "sender" }, avatar(from, fromMail), h("div", { class: "sn" }, h("b", null, from), h("span", null, (fromMail && fromMail !== from ? fromMail + " — " : "") + (m.received ? longWhen(m.received) : "")))),
-          rcptBlock(m.to, m.cc)));
-        if (m.invite && m.invite.start) {
-          var inv = m.invite, st = Date.parse(inv.start), en = Date.parse(inv.end || ""), cancelled = /Cancellation/.test(m.kind || "");
-          var whenTxt = isNaN(st) ? inv.start : inv.allDay ? new Date(st).toLocaleDateString(loc(), { weekday: "long", day: "numeric", month: "long" }) + " · " + T("All day", "Tüm gün") : longWhen(st) + (!isNaN(en) ? " – " + (sameDay(new Date(st), new Date(en)) ? timeOf(en) : longWhen(en)) : "");
-          var myResp = { Accept: T("You accepted", "Kabul ettiniz"), Tentative: T("You answered maybe", "Belki dediniz"), Decline: T("You declined", "Reddettiniz") }[inv.response];
-          body.appendChild(h("div", { class: "invite" + (cancelled ? " cancelled" : "") },
-            h("div", { class: "when" }, icon(cancelled ? "calendar-x" : "calendar", "s"), h("span", null, whenTxt)),
-            cancelled ? h("div", { class: "where" }, T("This meeting was cancelled.", "Bu toplantı iptal edildi.")) : null,
-            [inv.location, inv.organizer].filter(Boolean).length ? h("div", { class: "where" }, [inv.location, String(inv.organizer || "").replace(/^(.+?)\s*<[^>]*>$/, "$1")].filter(Boolean).join(" — ")) : null,
-            myResp && !cancelled ? h("div", { class: "where" }, icon("check", "xs"), " " + myResp) : null,
-            cancelled ? null : h("div", { class: "btnrow" },
-              h("button", { class: "btn sm", onclick: function () { respond(m.id, "decline"); } }, T("Decline", "Reddet")),
-              h("button", { class: "btn sm", onclick: function () { respond(m.id, "tentative"); } }, T("Maybe", "Belki")),
-              h("button", { class: "btn sm p", onclick: function () { respond(m.id, "accept"); } }, T("Accept", "Kabul")))));
-        }
-        if (m.files && m.files.length) body.appendChild(h("div", { class: "files" }, m.files.map(function (f) {
-          return h("button", { class: "fileb", onclick: function () { toast(T("Opening ", "Açılıyor: ") + f.name); call("mail.attachment", { id: m.id, attId: f.id, name: f.name }).catch(function (e) { toast(e.message); }); } }, icon(f.item || /^message\//.test(f.type || "") ? "mail" : "paperclip", "xs"), h("span", null, f.name || T("attachment", "ek")), f.size > 0 ? h("small", null, bytes(f.size)) : null);
-        })));
-        var bodyEl = h("div", { class: "mbody" });
-        linkify(bodyEl, m.body || "");
-        body.appendChild(bodyEl);
-      }).catch(function (e) { clear(body); body.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon("triangle-alert")), h("p", null, e.message.replace(/^SIGNIN:/, "")), h("button", { class: "btn p", onclick: signInMail }, T("Sign in", "Oturum aç")))); });
+        renderRead(body, m, from);
+        bar();
+        loadInlinePictures(m, function () { if (rec.repaint) rec.repaint(); });
+        if (opts.edit && isDraftMsg(m, from)) composeSheet("draft", m);
+      }).catch(function (e) { clear(body); body.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon("triangle-alert")), h("p", null, errText(e)), /^SIGNIN:/.test(e.message) ? h("button", { class: "btn p", onclick: signInMail }, T("Sign in", "Oturum aç")) : null)); });
     }, { footer: footer, line: true });
+    return rec;
+  }
+
+  function renderRead(body, m, from) {
+    var rec = S.pages.filter(function (p) { return p.body === body; })[0];
+    clear(body);
+    var draft = isDraftMsg(m, from);
+    var fromName = boxName(m.from) || T("(unknown sender)", "(bilinmeyen gönderen)"), fromMail = m.from && m.from.email ? String(m.from.email).trim() : "";
+    var when = m.received || m.sent;
+    var toNames = (m.to || []).map(boxName).filter(Boolean).join("; ");
+    body.appendChild(h("div", { class: "rhead" },
+      h("h2", null, m.subject || T("(no subject)", "(konu yok)")),
+      draft ? h("div", { class: "sender" }, avatar(toNames || T("Draft", "Taslak"), m.to && m.to[0] && m.to[0].email), h("div", { class: "sn" }, h("b", null, h("span", { class: "mtag dr" }, T("Draft", "Taslak")), " ", toNames ? T("To: ", "Kime: ") + toNames : h("span", { class: "muted" }, T("no recipients yet", "henüz alıcı yok"))), h("span", null, T("not sent", "gönderilmedi"))))
+        : h("div", { class: "sender" }, avatar(fromName, fromMail), h("div", { class: "sn" }, h("b", null, fromName), h("span", null, (fromMail && fromMail !== fromName ? fromMail + " — " : "") + (when ? longWhen(when) : "")))),
+      draft ? rcptBlock([], m.cc) : rcptBlock(m.to, m.cc)));
+    if (m.importance === "High") body.appendChild(h("div", { class: "mnote warn" }, icon("octagon-alert", "s"), h("span", null, T("This message was sent with High importance.", "Bu ileti yüksek önemle gönderildi."))));
+    var t = m.triage; if (t && t.s) body.appendChild(h("div", { class: "mnote ai" }, icon("sparkles", "s"), h("span", null, t.s, t.r ? T(" · needs your reply", " · yanıtınızı bekliyor") : "")));
+    if (!draft) body.appendChild(h("div", { class: "fchips aichips" },
+      h("button", { class: "chip sm on", onclick: function () { askAbout(m); } }, icon("sparkles", "xs"), T("Ask yaver", "yaver'e sor")),
+      h("button", { class: "chip sm", onclick: function () { summarizeMail(m); } }, icon("text-search", "xs"), T("Summarize", "Özetle")),
+      h("button", { class: "chip sm", onclick: function () { askYaver(taskFromMailPrompt(m), T("Task from e-mail: “" + (m.subject || "") + "”", "Mailden görev: “" + (m.subject || "") + "”")); } }, icon("list-todo", "xs"), T("Task from e-mail", "Mailden görev")),
+      h("button", { class: "chip sm", onclick: function () { manualTaskFromMail(m); } }, icon("square-check-big", "xs"), T("Manual task", "Elle görev"))));
+    if (m.invite && m.invite.start) body.appendChild(inviteCard(m));
+    var files = (m.files || []).filter(function (a) { return !(a.inline && a.cid && m.html && m.html.indexOf(a.cid) >= 0); });
+    if (files.length) body.appendChild(h("div", { class: "files" }, files.map(function (f) {
+      return h("div", { class: "attw" },
+        h("button", { class: "fileb", onclick: function () { toast(T("Opening ", "Açılıyor: ") + f.name); call("mail.attachment", { id: m.id, attId: f.id, name: f.name }).catch(function (e) { toast(e.message); }); } }, icon(f.item || /^message\//.test(f.type || "") ? "mail" : "paperclip", "xs"), h("span", null, f.name || T("attachment", "ek")), f.size > 0 ? h("small", null, bytes(f.size)) : null),
+        f.item ? null : h("button", { class: "attask", "aria-label": T("Ask yaver about this attachment", "Bu ek hakkında yaver'e sor"), onclick: function () { askAboutAttachment(m, f); } }, icon("sparkles", "xs")));
+    })));
+    var wrap = h("div", { class: "mbodyw" });
+    body.appendChild(wrap);
+    function paint() {
+      clear(wrap);
+      if (m.html) {
+        var allow = S.mail.images || m.showPics;
+        var fr = mailFrame(m.html, { images: allow, cid: m.cid || {} });
+        if (fr._blocked && !allow) wrap.appendChild(h("div", { class: "mnote" }, icon("shield-check", "s"), h("span", { class: "grow" }, T("To protect your privacy, pictures from the internet were blocked.", "Gizliliğinizi korumak için internetteki resimler engellendi."),
+          h("span", { class: "nbtns" }, h("button", { class: "lnk", onclick: function () { m.showPics = true; paint(); } }, T("Show pictures", "Resimleri göster")),
+            h("button", { class: "lnk", onclick: function () { S.mail.images = true; call("mailx.settings.set", { key: "images", value: true }).catch(function () {}); paint(); } }, T("Always show", "Her zaman göster"))))));
+        wrap.appendChild(h("div", { class: "mframew" }, fr));
+      } else { var b = h("div", { class: "mbody" }); linkify(b, m.body || ""); wrap.appendChild(b); }
+    }
+    paint();
+    if (rec) rec.repaint = paint;
+  }
+
+  function inviteCard(m) {
+    var inv = m.invite, st = Date.parse(inv.start), en = Date.parse(inv.end || ""), cancelled = /Cancellation/.test(m.kind || "");
+    var whenTxt = isNaN(st) ? inv.start : inv.allDay ? new Date(st).toLocaleDateString(loc(), { weekday: "long", day: "numeric", month: "long" }) + " · " + T("All day", "Tüm gün") : longWhen(st) + (!isNaN(en) ? " – " + (sameDay(new Date(st), new Date(en)) ? timeOf(en) : longWhen(en)) : "");
+    var myResp = { Accept: T("You accepted", "Kabul ettiniz"), Tentative: T("You answered maybe", "Belki dediniz"), Decline: T("You declined", "Reddettiniz") }[inv.response];
+    var join = joinLink(inv.location || "", m.html || m.body || "");
+    return h("div", { class: "invite" + (cancelled ? " cancelled" : "") },
+      h("div", { class: "when" }, icon(cancelled ? "calendar-x" : "calendar", "s"), h("span", null, whenTxt)),
+      cancelled ? h("div", { class: "where" }, T("This meeting was cancelled.", "Bu toplantı iptal edildi.")) : null,
+      [inv.location, inv.organizer].filter(Boolean).length ? h("div", { class: "where" }, [inv.location, String(inv.organizer || "").replace(/^(.+?)\s*<[^>]*>$/, "$1")].filter(Boolean).join(" — ")) : null,
+      myResp && !cancelled ? h("div", { class: "where" }, icon("check", "xs"), " " + myResp) : null,
+      cancelled ? null : h("div", { class: "btnrow" },
+        h("button", { class: "btn sm", onclick: function () { respond(m.id, "decline"); } }, T("Decline", "Reddet")),
+        h("button", { class: "btn sm", onclick: function () { respond(m.id, "tentative"); } }, T("Maybe", "Belki")),
+        h("button", { class: "btn sm p", onclick: function () { respond(m.id, "accept"); } }, T("Accept", "Kabul"))),
+      h("div", { class: "btnrow inv2" },
+        join && !cancelled ? h("button", { class: "btn sm ghost", onclick: function () { call("open.link", { url: join }); } }, icon("video", "xs"), T("Join meeting", "Toplantıya katıl")) : null,
+        isNaN(st) || cancelled ? null : h("button", { class: "btn sm ghost", onclick: function () { showInCalendar(st); } }, icon("calendar", "xs"), T("Show in calendar", "Takvimde göster"))));
+  }
+  function showInCalendar(ms) {
+    S.mail.tab = "cal"; S.mail.cal.day = calSod(new Date(ms)); S.mail.cal.view = "day";
+    while (S.pages.length && topPage() !== "mail") popPage();
+    if (topPage() === "mail") { renderMailShell(); loadMail(); } else openMailPage("cal");
+  }
+  /* Teams / Zoom / Webex / Meet link in a location or description */
+  function joinLink() {
+    var all = Array.prototype.join.call(arguments, " ");
+    var m = all.match(/https:\/\/(?:teams\.microsoft\.com\/l\/meetup-join|teams\.live\.com\/meet|[\w.-]*zoom\.us\/[jw]\/|[\w.-]*webex\.com\/[\w.\/-]*(?:j\.php|meet)|meet\.google\.com\/)[^\s"'<>)]*/i);
+    return m ? m[0].replace(/&amp;/g, "&") : null;
+  }
+
+  /* safe e-mail document for a sandboxed iframe (original OF.mailDoc): scripts, forms and handlers removed; remote content optional */
+  function mailDoc(html, o) {
+    o = o || {}; var images = !!o.images, cid = o.cid || {};
+    var doc = new DOMParser().parseFromString(String(html || ""), "text/html"), blocked = 0;
+    doc.querySelectorAll("script,iframe,frame,frameset,object,embed,applet,form,meta,base,link[rel]:not([rel~=stylesheet]),noscript,svg script").forEach(function (n) { n.remove(); });
+    doc.querySelectorAll("*").forEach(function (el) {
+      Array.prototype.slice.call(el.attributes).forEach(function (at) { var n = at.name.toLowerCase(), v = at.value; if (n.indexOf("on") === 0 || n === "srcdoc" || n === "formaction" || ((n === "href" || n === "src" || n === "action" || n === "xlink:href") && /^\s*(javascript|vbscript|data:text\/html)/i.test(v))) el.removeAttribute(at.name); });
+      if (el.tagName === "IMG" || el.tagName === "IMAGE") {
+        var s = el.getAttribute("src") || "";
+        if (/^cid:/i.test(s)) { var k = s.slice(4).replace(/^<|>$/g, ""); if (cid[k]) el.setAttribute("src", cid[k]); else { el.setAttribute("alt", el.getAttribute("alt") || ""); el.removeAttribute("src"); } }
+        else if (/^https?:/i.test(s) && !images) { el.removeAttribute("src"); el.removeAttribute("srcset"); blocked++; }
+      }
+      if (!images) {
+        if (el.hasAttribute("background") && /^https?:/i.test(el.getAttribute("background"))) { el.removeAttribute("background"); blocked++; }
+        var st = el.getAttribute("style"); if (st && /url\(\s*['"]?https?:/i.test(st)) { el.setAttribute("style", st.replace(/url\(\s*['"]?https?:[^)]*\)/gi, "none")); blocked++; }
+      }
+      if (el.tagName === "A") { el.setAttribute("target", "_blank"); el.setAttribute("rel", "noopener noreferrer"); }
+    });
+    if (!images) {
+      doc.querySelectorAll("link[rel~=stylesheet]").forEach(function (n) { n.remove(); blocked++; });
+      doc.querySelectorAll("style").forEach(function (st) { if (/url\(\s*['"]?https?:|@import/i.test(st.textContent)) { st.textContent = st.textContent.replace(/@import[^;]+;/gi, "").replace(/url\(\s*['"]?https?:[^)]*\)/gi, "none"); blocked++; } });
+    }
+    var styles = Array.prototype.map.call(doc.querySelectorAll("head style"), function (s) { return s.outerHTML; }).join("");
+    var csp = "default-src 'none'; img-src data: blob:" + (images ? " https: http:" : "") + "; style-src 'unsafe-inline'" + (images ? " https: http:" : "") + "; font-src data:" + (images ? " https: http:" : "");
+    return { blocked: blocked, html: '<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + csp + '"><base target="_blank"><style>html{color-scheme:light}body{margin:0;padding:14px 16px;font:15px/1.5 system-ui,Roboto,"Segoe UI",Arial,sans-serif;color:#242424;background:#fff;overflow-wrap:anywhere;overflow-x:auto}img{max-width:100%;height:auto}blockquote{margin:0 0 0 .8ex;border-left:2px solid #c8c6c4;padding-left:1ex}pre{white-space:pre-wrap}a{color:#0f6cbd}</style>' + styles + "</head><body>" + (doc.body ? doc.body.innerHTML : "") + "</body></html>" };
+  }
+  /* the frame: no scripts (sandbox without allow-scripts), sized to its content, wide mails zoomed to the screen, links open outside */
+  function mailFrame(html, o) {
+    var r = mailDoc(html, o);
+    var f = h("iframe", { class: "mframe", sandbox: "allow-same-origin", referrerpolicy: "no-referrer", title: T("Message body", "İleti gövdesi") });
+    function fit() {
+      try {
+        var d = f.contentDocument; if (!d || !d.documentElement || !d.body) return;
+        var w = f.clientWidth, sw = Math.max(d.documentElement.scrollWidth, d.body.scrollWidth);
+        if (w && sw > w + 4 && !d.body.dataset.zoomed) { var z = Math.max(0.5, w / sw); if (z > 0.55) { d.body.style.zoom = z.toFixed(3); d.body.dataset.zoomed = "1"; } }
+        var hh = Math.max(d.documentElement.scrollHeight, d.body.scrollHeight);
+        f.style.height = Math.min(Math.max(hh + 2, 60), 20000) + "px";
+      } catch (e) { f.style.height = "70vh"; }
+    }
+    f.addEventListener("load", function () {
+      fit();
+      try {
+        var d = f.contentDocument;
+        d.addEventListener("click", function (e) {
+          var a = e.target && e.target.closest ? e.target.closest("a[href]") : null; if (!a) return;
+          var u = a.getAttribute("href") || ""; e.preventDefault();
+          if (/^(https?:|mailto:|tel:)/i.test(u)) call("open.link", { url: u });
+        });
+        Array.prototype.forEach.call(d.images, function (img) { if (!img.complete) img.addEventListener("load", fit); });
+        if (window.ResizeObserver) new ResizeObserver(fit).observe(d.body);
+      } catch (e) {}
+      setTimeout(fit, 400); setTimeout(fit, 1500);
+    });
+    f.srcdoc = r.html; f._blocked = r.blocked;
+    return f;
+  }
+  /* inline pictures (cid:) come from the attachments, after the text is on screen */
+  function loadInlinePictures(m, done) {
+    if (!m.html) return;
+    var need = (m.files || []).filter(function (a) { return a.cid && a.size < 4e6 && m.html.indexOf(a.cid) >= 0; }).slice(0, 20);
+    if (!need.length) return;
+    call("mail.inline", { id: m.id, atts: need.map(function (a) { return { id: a.id, cid: a.cid, size: a.size }; }) }).then(function (r) {
+      if (r && Object.keys(r).length) { m.cid = r; done(); }
+    }).catch(function () {});
   }
 
   function linkify(el, text) {
@@ -1298,24 +2100,20 @@
     el.appendChild(document.createTextNode(text.slice(last)));
   }
 
-  /* delete at once (it only moves to Deleted Items): the row disappears now, the server catches up */
-  function removeMailNow(id) {
-    var row = document.querySelector('.mswipe[data-id="' + CSS.escape(id) + '"]');
-    var idx = S.mail.items.findIndex(function (x) { return x.id === id; }), item = idx >= 0 ? S.mail.items[idx] : null;
-    if (idx >= 0) S.mail.items.splice(idx, 1);
-    if (row) { row.style.height = row.offsetHeight + "px"; row.classList.add("gone"); requestAnimationFrame(function () { row.style.height = "0px"; }); setTimeout(function () { row.remove(); }, 260); }
-    call("mail.remove", { id: id }).then(function () { toast(T("Moved to Deleted Items", "Silinmiş Öğeler'e taşındı")); })
-      .catch(function (e) { toast(e.message.replace(/^SIGNIN:/, "")); if (item) { S.mail.items.splice(Math.max(0, idx), 0, item); } loadMail(); });
+  /* swipe delete: the row disappears now, the server catches up (with Undo; in Deleted Items it asks first) */
+  function removeMailNow(id, from) {
+    var m = S.mail.items.filter(function (x) { return x.id === id; })[0] || (S.mail.results && S.mail.results.items.filter(function (x) { return x.id === id; })[0]) || { id: id };
+    deleteMsg(m, from || S.mail.folder);
   }
   function setMailRead(m, read, rowBtn) {
     m.read = read; if (rowBtn) rowBtn.classList.toggle("unread", !read);
-    call("mail.markRead", { id: m.id, read: read }).catch(function (e) { m.read = !read; if (rowBtn) rowBtn.classList.toggle("unread", read); toast(e.message.replace(/^SIGNIN:/, "")); });
+    call("mail.markRead", { id: m.id, read: read }).then(function () { loadFolders(); }).catch(function (e) { m.read = !read; if (rowBtn) rowBtn.classList.toggle("unread", read); toast(e.message.replace(/^SIGNIN:/, "")); });
   }
   /* iPhone/Outlook-style swipe: left = delete (red), right = read/unread */
-  function swipeRow(m, btn) {
+  function swipeRow(m, btn, from) {
     var wrap = h("div", { class: "mswipe", "data-id": m.id },
       h("div", { class: "mact left" }, icon(m.read ? "mail" : "mail-open", "s"), h("span", null, m.read ? T("Unread", "Okunmadı") : T("Read", "Okundu"))),
-      h("button", { class: "mact right", "aria-label": T("Delete", "Sil"), onclick: function () { removeMailNow(m.id); } }, icon("trash-2", "s"), h("span", null, T("Delete", "Sil"))),
+      h("button", { class: "mact right", "aria-label": T("Delete", "Sil"), onclick: function () { removeMailNow(m.id, from); } }, icon("trash-2", "s"), h("span", null, T("Delete", "Sil"))),
       btn);
     var x0 = 0, y0 = 0, dx = 0, mode = "", open = 0, W = 0, OPEN = 92;
     function setX(x, anim) { btn.style.transition = anim ? "transform .2s ease" : "none"; btn.style.transform = "translateX(" + x + "px)"; wrap.classList.toggle("l", x > 0); wrap.classList.toggle("r", x < 0); }
@@ -1332,7 +2130,7 @@
     btn.addEventListener("touchend", function () {
       if (mode !== "h") { if (open) { open = 0; setX(0, true); } return; }
       setTimeout(function () { delete btn.dataset.swiped; }, 350);
-      if (dx < -W * 0.45) { setX(-W, true); removeMailNow(m.id); return; }
+      if (dx < -W * 0.45) { setX(from === "deleteditems" ? 0 : -W, true); removeMailNow(m.id, from); return; }
       if (dx < -60) { open = -OPEN; setX(-OPEN, true); return; }
       if (dx > W * 0.28) { setMailRead(m, !m.read, btn); wrap.querySelector(".mact.left span").textContent = m.read ? T("Unread", "Okunmadı") : T("Read", "Okundu"); }
       open = 0; setX(0, true);
@@ -1340,17 +2138,47 @@
     return wrap;
   }
 
-  function deleteMail(m) {
-    popPage();
-    if (S.mail.items.some(function (x) { return x.id === m.id; })) removeMailNow(m.id);
-    else call("mail.remove", { id: m.id }).then(function () { toast(T("Moved to Deleted Items", "Silinmiş Öğeler'e taşındı")); }).catch(function (e) { toast(e.message.replace(/^SIGNIN:/, "")); });
-  }
+  function deleteMail(m) { deleteMsg(m, S.mail.folder); }
 
+  /* ---------- yaver on a mail: ask, summarize, task from e-mail, manual task, attachment */
+  function askYaver(text, display) { closeAllPages(); newChat(); send(text, display ? { display: display } : undefined); }
   function askAbout(m) {
     closeAllPages(); newChat();
     var who = m.from && (m.from.name || m.from.email) || "";
     send(T("Look at this e-mail (mail id=" + m.id + ", subject \"" + m.subject + "\" from " + (m.from && (m.from.name || m.from.email)) + "). Summarize it, tell me what is expected of me and suggest a reply.",
       "Şu e-postaya bak (mail id=" + m.id + ", konu \"" + m.subject + "\", gönderen " + (m.from && (m.from.name || m.from.email)) + "). Özetle, benden ne bekleniyor söyle ve bir yanıt öner."), { display: T("About “" + m.subject + "” from " + who + ": summarize it, what is expected of me, and suggest a reply.", "“" + m.subject + "” (" + who + ") e-postasını özetle, benden ne bekleniyor söyle ve bir yanıt öner.") });
+  }
+  function summarizeMail(m) {
+    var hasAtt = (m.files || []).some(function (a) { return !a.inline; });
+    askYaver(T("Summarize the email \"" + m.subject + "\" from " + mailWho(m.from) + " (mail id " + m.id + ") and list any actions or deadlines for me." + (hasAtt ? " Also read its attachments with the mail tool (get_attachment) and include what matters." : ""),
+      mailWho(m.from) + " kişisinden gelen \"" + m.subject + "\" e-postasını (mail id " + m.id + ") özetle; benim için yapılacak işleri ve son tarihleri listele." + (hasAtt ? " Eklerini de mail aracıyla (get_attachment) oku ve önemli olanları ekle." : "")),
+      T("Summarize “" + m.subject + "” from " + mailWho(m.from), "“" + m.subject + "” (" + mailWho(m.from) + ") e-postasını özetle"));
+  }
+  /* "Task from e-mail": the agent decides between updating an existing task and creating new ones (original OF.taskFromMailPrompt) */
+  function taskFromMailPrompt(m) {
+    var from = mailWho(m.from), d = m.received || m.sent, when = d && !isNaN(new Date(d)) ? new Date(d).toISOString().slice(0, 10) : "";
+    var atts = (m.files || []).some(function (a) { return !a.inline; });
+    return T(
+      "Create or update tasks from the e-mail \"" + m.subject + "\" from " + from + (when ? " (" + when + ")" : "") + ", mail id " + m.id + ".\n" +
+      "1. Read it with the mail tool (action read, id " + m.id + ")" + (atts ? ", and its attachments if they matter" : "") + ". Work out every action item: what must be done, by whom, by when, and what changed.\n" +
+      "2. Look for tasks it relates to on my board with task_board (list with key words from the subject, sender, project names; include done tasks if it may reopen one).\n" +
+      "3. If a matching task exists: update it (status, due, owner, description as the e-mail implies) and add a note with what this e-mail says (date, sender, the decision or request) — in the note, link the e-mail as [" + m.subject + "](mail:" + m.id + "). If a done task gets new work, reopen it. If nothing matches: create the task(s) with task_board add (clear title, owner, due date if given, description, source_mail_id " + m.id + ").\n" +
+      "4. Do not create duplicates. Do not create tasks for FYI or newsletter mail — just tell me there is nothing to do.\n" +
+      "Finish with a short list: which tasks you created or updated — each as a link like [title](task:T3) — and what you changed.",
+      "\"" + m.subject + "\" e-postasından (" + from + (when ? ", " + when : "") + ", mail id " + m.id + ") görev oluştur veya mevcut görevi güncelle.\n" +
+      "1. E-postayı mail aracıyla oku (action read, id " + m.id + ")" + (atts ? ", önemliyse eklerini de oku" : "") + ". Tüm yapılacak işleri çıkar: ne yapılmalı, kim yapacak, ne zamana kadar, ne değişti.\n" +
+      "2. task_board ile panomda ilgili görevleri ara (konu, gönderen ve proje adlarından anahtar kelimelerle list; bir görevi yeniden açabilecekse tamamlananları da dahil et).\n" +
+      "3. Eşleşen görev varsa: e-postanın gerektirdiği şekilde güncelle (durum, tarih, sorumlu, açıklama) ve bu e-postanın ne dediğini not olarak ekle (tarih, gönderen, karar veya talep) — notta e-postaya [" + m.subject + "](mail:" + m.id + ") biçiminde bağlantı ver. Tamamlanmış bir göreve yeni iş geldiyse yeniden aç. Eşleşen yoksa: task_board add ile görev(ler) oluştur (net başlık, sorumlu, varsa son tarih, açıklama, source_mail_id " + m.id + ").\n" +
+      "4. Mükerrer görev oluşturma. Bilgi amaçlı veya bülten e-postaları için görev açma — yapılacak bir şey olmadığını söyle.\n" +
+      "Sonunda kısa bir liste ver: hangi görevleri oluşturdun veya güncelledin — her birini [başlık](task:T3) biçiminde link olarak yaz — ve neyi değiştirdin.");
+  }
+  function manualTaskFromMail(m) {
+    newTaskSheet({ title: m.subject || "", owner: boxName(m.from), source: { mailId: m.id, subject: m.subject || "" } });
+  }
+  function askAboutAttachment(m, a) {
+    askYaver(T("Read the attachment \"" + a.name + "\" of the email \"" + m.subject + "\" from " + mailWho(m.from) + " (mail id " + m.id + ") with the mail tool (get_attachment) and summarize it for me: key points, numbers, dates and anything I need to act on.",
+      mailWho(m.from) + " kişisinden gelen \"" + m.subject + "\" e-postasının (mail id " + m.id + ") \"" + a.name + "\" ekini mail aracıyla (get_attachment) oku ve benim için özetle: ana noktalar, sayılar, tarihler ve yapmam gereken her şey."),
+      T("About the attachment “" + a.name + "” of “" + m.subject + "”", "“" + m.subject + "” e-postasının “" + a.name + "” eki hakkında"));
   }
 
   /* recipient suggestions from recent mail and the company address book */
@@ -1365,7 +2193,7 @@
         call("people.search", { q: L.q }).then(function (list) {
           if (my !== seq) return; clear(box);
           (list || []).slice(0, 6).forEach(function (p) {
-            box.appendChild(h("button", { type: "button", class: "opt", onclick: function () { var L2 = last(); input.value = L2.head + p.email + ", "; box.classList.add("hidden"); input.focus(); } },
+            box.appendChild(h("button", { type: "button", class: "opt", onclick: function () { var L2 = last(); input.value = L2.head + p.email + ", "; box.classList.add("hidden"); input.dispatchEvent(new Event("input")); input.focus(); } },
               avatar(p.name, p.email), h("div", null, p.name, h("small", null, p.email + (p.extra ? " · " + p.extra : "")))));
           });
           box.classList.toggle("hidden", !box.firstChild);
@@ -1375,43 +2203,394 @@
     return box;
   }
 
+  /* ---------- compose, reply, forward, edit a draft; Draft with AI */
+  /* a saved draft: the text the user wrote, and the quoted original below it (kept as it is) — original editDraft */
+  function draftParts(m) {
+    var html = m.html || "";
+    if (!html) return { text: m.body || "", tail: "" };
+    var cut = html.search(/<div[^>]*id=["']?(divRplyFwdMsg|appendonsend)|<hr[^>]*>|<div[^>]*class=["']?(gmail_quote|OutlookMessageHeader)/i);
+    var mine = cut > 0 ? html.slice(0, cut) : html, tail = cut > 0 ? html.slice(cut) : "";
+    var text = new DOMParser().parseFromString(mine.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div)>/gi, "\n"), "text/html").body.textContent.replace(/ /g, " ").replace(/\n{3,}/g, "\n\n").trim();
+    return { text: text, tail: tail };
+  }
+  function boxAddr(b) { return b.name && b.email ? b.name + " <" + b.email + ">" : (b.email || b.name || ""); }
+  function addrList(v) { return String(v || "").split(/[;,\n]/).map(function (x) { return x.trim(); }).filter(Boolean); }
+
   function composeSheet(kind, m) {
+    var draft = kind === "draft", parts = draft ? draftParts(m) : null;
     var to = h("input", { type: "text", inputmode: "email", placeholder: T("Name or e-mail", "İsim ya da e-posta"), autocapitalize: "off", autocomplete: "off", spellcheck: "false" });
     var cc = h("input", { type: "text", inputmode: "email", placeholder: T("optional", "isteğe bağlı"), autocapitalize: "off", autocomplete: "off", spellcheck: "false" });
-    var subj = h("input", { type: "text" });
-    var body = h("textarea", { rows: kind === "forward" ? 4 : 8, placeholder: kind === "forward" ? T("Add a note (optional) — the original e-mail goes below it", "Not ekleyin (isteğe bağlı) — orijinal e-posta altına eklenir") : T("Write your message", "Mesajınızı yazın") });
-    var title = { new: T("New e-mail", "Yeni e-posta"), reply: T("Reply", "Yanıtla"), replyall: T("Reply all", "Tümünü yanıtla"), forward: T("Forward", "İlet") }[kind];
+    var subj = h("input", { type: "text", placeholder: T("Add a subject", "Konu ekleyin") });
+    var body = h("textarea", { rows: kind === "forward" ? 4 : 8, placeholder: kind === "forward" ? T("Add a note (optional) — the original e-mail goes below it", "Not ekleyin (isteğe bağlı) — orijinal e-posta altına eklenir") : kind === "new" ? T("Write your message, or type a few notes and tap Draft with AI", "Mesajınızı yazın ya da birkaç not yazıp Yapay zekâ ile yaz'a dokunun") : T("Write your reply, or type a few notes and tap Draft with AI", "Yanıtınızı yazın ya da birkaç not yazıp Yapay zekâ ile yaz'a dokunun") });
+    if (draft) { to.value = (m.to || []).map(boxAddr).filter(Boolean).join("; "); cc.value = (m.cc || []).map(boxAddr).filter(Boolean).join("; "); subj.value = m.subject === "(no subject)" ? "" : (m.subject || ""); body.value = parts.text; }
+    var title = { new: T("New e-mail", "Yeni e-posta"), reply: T("Reply", "Yanıtla"), replyall: T("Reply all", "Tümünü yanıtla"), forward: T("Forward", "İlet"), draft: T("Edit draft", "Taslağı düzenle") }[kind];
     /* reply / reply all: Exchange picks the recipients; show who they are (without me) so the user knows */
     var me = String(((S.state || {}).mail || {}).user || "").toLowerCase();
     var meU = me.split("\\").pop();
     var mine = function (x) { var e = String((x && x.email) || "").toLowerCase(); return !!e && !!me && (e === me || (me.indexOf("@") < 0 && e.split("@")[0] === meU)); };
-    var replyTo = !m ? [] : kind === "reply" ? [m.from] : kind === "replyall" ? [m.from].concat(m.to || [], m.cc || []) : [];
+    var replyTo = !m || draft ? [] : kind === "reply" ? [m.from] : kind === "replyall" ? [m.from].concat(m.to || [], m.cc || []) : [];
     var seen = {};
     replyTo = replyTo.filter(function (x) { var k = String((x && (x.email || x.name)) || "").toLowerCase(); if (!boxName(x) || seen[k] || mine(x)) return false; seen[k] = 1; return true; });
+    var aiBtn = h("button", { type: "button", class: "btn sm aib", onclick: function () { aiDraft(); } });
+    function aiLabel() { if (aiBusy) return; clear(aiBtn); aiBtn.appendChild(icon("sparkles", "xs")); aiBtn.appendChild(document.createTextNode(body.value.trim() ? T("Rewrite with AI", "Yapay zekâ ile yeniden yaz") : T("Draft with AI", "Yapay zekâ ile yaz"))); }
+    body.addEventListener("input", aiLabel);
+    var aiBusy = false; aiLabel();
     var fields = h("div", null,
-      kind === "new" || kind === "forward" ? h("div", { class: "field" }, h("span", null, T("To", "Kime")), to, suggestPeople(to)) : null,
+      kind === "new" || kind === "forward" || draft ? h("div", { class: "field" }, h("span", null, T("To", "Kime")), to, suggestPeople(to)) : null,
       replyTo.length ? h("div", { class: "field" }, h("span", null, T("To", "Kime")), h("div", { class: "rto" }, replyTo.map(boxName).join(", "))) : null,
       h("div", { class: "field" }, h("span", null, "Cc"), cc, suggestPeople(cc)),
-      kind === "new" ? h("label", { class: "field" }, h("span", null, T("Subject", "Konu")), subj) : null,
-      h("label", { class: "field" }, h("span", null, m ? (/^\s*(re|fw|fwd|ynt|ilt|i̇lt)\s*:/i.test(m.subject || "") && (kind === "forward") === /^\s*(fw|fwd|ilt|i̇lt)\s*:/i.test(m.subject || "") ? m.subject : (kind === "forward" ? "FW: " : "RE: ") + (m.subject || "")) : T("Message", "Mesaj")), body),
-      m ? h("details", { class: "quoted", open: kind === "forward" ? true : null }, h("summary", null, (kind === "forward" ? T("Forwarded e-mail", "İletilen e-posta") : T("Original e-mail", "Orijinal e-posta")) + (m.files && m.files.length && kind === "forward" ? T(" · " + m.files.length + " attachment(s) included", " · " + m.files.length + " ek dahil") : "")),
+      kind === "new" || draft ? h("label", { class: "field" }, h("span", null, T("Subject", "Konu")), subj) : null,
+      h("label", { class: "field" }, h("span", null, m && !draft ? (/^\s*(re|fw|fwd|ynt|ilt|i̇lt)\s*:/i.test(m.subject || "") && (kind === "forward") === /^\s*(fw|fwd|ilt|i̇lt)\s*:/i.test(m.subject || "") ? m.subject : (kind === "forward" ? "FW: " : "RE: ") + (m.subject || "")) : T("Message", "Mesaj")), body),
+      h("div", { class: "airow" }, aiBtn, h("small", null, T("Your notes in the message are used as instructions.", "Mesajdaki notlarınız talimat olarak kullanılır."))),
+      draft && parts.tail ? h("div", { class: "qnote" }, icon("info", "xs"), T("The quoted original message below your text is kept as it is.", "Metninizin altındaki alıntılanmış özgün mesaj olduğu gibi korunur.")) : null,
+      m && !draft ? h("details", { class: "quoted", open: kind === "forward" ? true : null }, h("summary", null, (kind === "forward" ? T("Forwarded e-mail", "İletilen e-posta") : T("Original e-mail", "Orijinal e-posta")) + (m.files && m.files.length && kind === "forward" ? T(" · " + m.files.length + " attachment(s) included", " · " + m.files.length + " ek dahil") : "")),
         h("div", { class: "qh" }, (boxName(m.from)) + (m.received ? " — " + longWhen(m.received) : "")),
         h("div", { class: "qb" }, String(m.body || "").slice(0, 2500) + (String(m.body || "").length > 2500 ? "…" : ""))) : null);
     var busy = false, s = null;
+    function aiDraft() {
+      if (aiBusy || busy) return;
+      aiBusy = true; aiBtn.disabled = true; clear(aiBtn).appendChild(h("div", { class: "spin xs" })); aiBtn.appendChild(document.createTextNode(T("Writing…", "Yazılıyor…")));
+      var ref = m && !draft && kind !== "new" ? m.id : "";
+      call("mail.aiDraft", { kind: draft ? "new" : kind, ref: ref, subject: draft || kind === "new" ? subj.value : (m && m.subject) || "", to: addrList(to.value).concat(replyTo.map(boxName)), notes: body.value }).then(function (t) {
+        if (t) { body.value = String(t); body.dispatchEvent(new Event("input")); }
+      }).catch(function (e) { toast(T("AI draft failed: ", "Yapay zekâ taslağı olmadı: ") + errText(e)); })
+        .then(function () { aiBusy = false; aiBtn.disabled = false; aiLabel(); });
+    }
     function go(sendIt) {
-      if (busy) return false;
-      var args = { kind: kind, ref: m ? m.id : "", to: to.value.split(/[;,]/).map(function (x) { return x.trim(); }).filter(Boolean), cc: cc.value.split(/[;,]/).map(function (x) { return x.trim(); }).filter(Boolean), subject: subj.value, body: body.value, send: sendIt };
-      if ((kind === "new" || kind === "forward") && !args.to.length) { toast(T("Add a recipient", "Alıcı ekleyin")); return false; }
-      if (kind === "new" && sendIt && !args.subject.trim() && !args.body.trim()) { toast(T("Write a subject or a message", "Bir konu ya da mesaj yazın")); return false; }
+      if (busy || aiBusy) return false;
+      var args = { kind: kind, ref: m ? m.id : "", to: addrList(to.value), cc: addrList(cc.value), subject: subj.value, body: body.value, send: sendIt };
+      if ((kind === "new" || kind === "forward" || (draft && sendIt)) && !args.to.length) { toast(T("Add a recipient", "Alıcı ekleyin")); return false; }
+      if ((kind === "new" || draft) && sendIt && !args.subject.trim() && !args.body.trim()) { toast(T("Write a subject or a message", "Bir konu ya da mesaj yazın")); return false; }
       /* the sheet stays open until the server took it — a failed send must not lose what was written */
       busy = true; s.el.classList.add("busy");
       toast(sendIt ? T("Sending…", "Gönderiliyor…") : T("Saving…", "Kaydediliyor…"));
-      call("mail.compose", args).then(function () { busy = false; s.close(); toast(sendIt ? T("Sent", "Gönderildi") : T("Saved in Drafts", "Taslaklara kaydedildi")); })
-        .catch(function (e) { busy = false; s.el.classList.remove("busy"); toast(e.message); });
+      var p = draft ? call("mail.updateDraft", { id: m.id, to: args.to, cc: args.cc, subject: args.subject, body: args.body, tail: parts.tail, send: sendIt }) : call("mail.compose", args);
+      p.then(function (r) {
+        busy = false; s.close();
+        toast(sendIt ? T("Sent", "Gönderildi") : draft ? T("Draft saved", "Taslak kaydedildi") : T("Saved in Drafts", "Taslaklara kaydedildi"));
+        if (draft) {
+          if (sendIt) { leaveReading(m.id); dropMailRow(m.id); }
+          else { var rec = S.pages.filter(function (p2) { return p2.name === "mailread" && p2.mailId === m.id; })[0]; if (rec) { m.to = args.to.map(function (a) { var x = /^(.*)<([^>]+)>$/.exec(a); return x ? { name: x[1].trim(), email: x[2] } : { name: "", email: a }; }); m.cc = args.cc.map(function (a) { var x = /^(.*)<([^>]+)>$/.exec(a); return x ? { name: x[1].trim(), email: x[2] } : { name: "", email: a }; }); m.subject = args.subject; m.html = ""; m.body = args.body + (parts.tail ? "\n\n" + new DOMParser().parseFromString(parts.tail, "text/html").body.textContent.trim() : ""); if (r && r.id) { m.id = r.id; rec.mailId = r.id; } renderRead(rec.body, m, "drafts"); rec.title.firstChild.textContent = m.subject || T("(no subject)", "(konu yok)"); } }
+        }
+        loadFolders();
+        if (topPage() === "mail" && (S.mail.folder === "drafts" || S.mail.folder === "sentitems")) loadMail(true);
+        else if (S.mail.folder === "drafts" || S.mail.folder === "sentitems") S.mail.items = S.mail.items.filter(function (x) { return !(draft && sendIt && x.id === m.id); });
+      }).catch(function (e) { busy = false; s.el.classList.remove("busy"); toast(e.message); });
       return false;
     }
     s = sheet({ title: title, body: fields, actions: [[T("Save draft", "Taslak"), "", function () { return go(false); }], [T("Send", "Gönder"), "p", function () { return go(true); }]] });
     setTimeout(function () { (kind === "new" || kind === "forward" ? to : body).focus(); }, 260);
+    return s;
+  }
+  /* "Send" on a draft in the reading view */
+  function sendDraftNow(m) {
+    var to = (m.to || []).map(boxName).filter(Boolean);
+    if (!to.length) { toast(T("Add a recipient", "Alıcı ekleyin")); composeSheet("draft", m); return; }
+    confirmSheet(T("Send this draft?", "Bu taslak gönderilsin mi?"), T("To: ", "Kime: ") + to.join(", ") + " — " + (m.subject || T("(no subject)", "(konu yok)")), T("Send", "Gönder"), function () {
+      toast(T("Sending…", "Gönderiliyor…"));
+      call("mail.sendDraft", { id: m.id }).then(function () { toast(T("Sent", "Gönderildi")); leaveReading(m.id); dropMailRow(m.id); loadFolders(); }).catch(function (e) { toast(e.message); });
+    }, true);
+  }
+
+  /* ---------- calendar: Agenda / Day / Work week / Week / Month */
+  var CAL_VIEWS = [["agenda", "Agenda", "Ajanda", "list-todo"], ["day", "Day", "Gün", "calendar"], ["workweek", "Work week", "İş haftası", "calendar-check"], ["week", "Week", "Hafta", "calendar-clock"], ["month", "Month", "Ay", "calendar"]];
+  var CAL_HH = 44;
+  function calView() { return S.mail.cal.view || "agenda"; }
+  function calViewName(v) { var x = CAL_VIEWS.filter(function (q) { return q[0] === v; })[0]; return x ? T(x[1], x[2]) : v; }
+  function calSod(d) { var x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
+  function calAdd(d, n) { var x = new Date(d); x.setDate(x.getDate() + n); return x; }
+  function calSow(d) { var x = calSod(d); return calAdd(x, -((x.getDay() + 6) % 7)); }   // weeks start on Monday
+  function calDay() { return S.mail.cal.day || (S.mail.cal.day = calSod(new Date())); }
+  function calRange() {
+    var d = calDay(), v = calView(), s;
+    if (v === "agenda") return [d, calAdd(d, 14)];
+    if (v === "day") return [d, calAdd(d, 1)];
+    if (v === "workweek") { s = calSow(d); return [s, calAdd(s, 5)]; }
+    if (v === "week") { s = calSow(d); return [s, calAdd(s, 7)]; }
+    s = calSow(new Date(d.getFullYear(), d.getMonth(), 1)); return [s, calAdd(s, 42)];
+  }
+  function calTitle() {
+    var r = calRange(), s = r[0], l = calAdd(r[1], -1), v = calView(), d = calDay();
+    if (v === "month") return d.toLocaleDateString(loc(), { month: "long", year: "numeric" });
+    if (v === "day") return d.toLocaleDateString(loc(), { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+    if (v === "agenda" && sameDay(s, new Date())) return T("Next 14 days", "Önümüzdeki 14 gün");
+    return s.getMonth() === l.getMonth() ? s.getDate() + "–" + l.getDate() + " " + l.toLocaleDateString(loc(), { month: "long", year: "numeric" })
+      : s.toLocaleDateString(loc(), { day: "numeric", month: "short" }) + " – " + l.toLocaleDateString(loc(), { day: "numeric", month: "short", year: "numeric" });
+  }
+  function pickCalView() {
+    optionsSheet(T("Calendar view", "Takvim görünümü"), CAL_VIEWS.map(function (v) { return [v[0], T(v[1], v[2]), v[3]]; }), calView(), function (v) {
+      S.mail.cal.view = v; call("mailx.settings.set", { key: "calView", value: v }).catch(function () {});
+      renderMailShell(); loadCal();
+    });
+  }
+  function calGo(delta) {
+    var v = calView(), d = calDay();
+    S.mail.cal.day = v === "month" ? new Date(d.getFullYear(), d.getMonth() + delta, 1) : calAdd(d, delta * (v === "day" ? 1 : 7));
+    renderMailShell(); loadCal();
+  }
+  function calDrill(d, view) { S.mail.cal.day = calSod(d); S.mail.cal.view = view || "day"; renderMailShell(); loadCal(); }
+  function miniMonthSheet() {
+    var base = new Date(calDay().getFullYear(), calDay().getMonth(), 1), s = null;
+    var box = h("div", { class: "mini" });
+    function draw() {
+      clear(box);
+      var st = calSow(base), today = new Date(), r = calRange();
+      box.appendChild(h("div", { class: "mh" }, h("button", { class: "ib sm", "aria-label": T("Previous month", "Önceki ay"), onclick: function () { base = new Date(base.getFullYear(), base.getMonth() - 1, 1); draw(); } }, icon("chevron-left", "s")),
+        h("b", null, base.toLocaleDateString(loc(), { month: "long", year: "numeric" })),
+        h("button", { class: "ib sm", "aria-label": T("Next month", "Sonraki ay"), onclick: function () { base = new Date(base.getFullYear(), base.getMonth() + 1, 1); draw(); } }, icon("chevron-right", "s"))));
+      var g = h("div", { class: "mg" });
+      for (var i = 0; i < 7; i++) g.appendChild(h("div", { class: "dn" }, calAdd(calSow(today), i).toLocaleDateString(loc(), { weekday: "narrow" })));
+      for (var k = 0; k < 42; k++) (function (d) {
+        g.appendChild(h("button", { class: (d.getMonth() !== base.getMonth() ? "out " : "") + (sameDay(d, today) ? "td " : "") + (d >= r[0] && d < r[1] && calView() !== "month" && calView() !== "agenda" ? "inr" : ""), onclick: function () { s.close(); S.mail.cal.day = d; if (calView() === "month" && d.getMonth() !== calDay().getMonth()) S.mail.cal.day = d; renderMailShell(); loadCal(); } }, String(d.getDate())));
+      })(calAdd(st, k));
+      box.appendChild(g);
+    }
+    draw();
+    s = sheet({ title: T("Go to date", "Tarihe git"), body: box, actions: [[T("Today", "Bugün"), "", function () { S.mail.cal.day = calSod(new Date()); renderMailShell(); loadCal(); }]] });
+  }
+  function loadCal(force) {
+    var list = $("#maillist"); if (!list) return;
+    var r = calRange(), key = r[0].getTime() + "-" + r[1].getTime();
+    if (!force && key === S.mail.cal.key && S.mail.cal.loaded) { renderCal(); return; }
+    S.mail.cal.key = key;
+    if (!list.firstChild || force || !S.mail.cal.loaded) { clear(list).appendChild(h("div", { class: "status", style: "padding:24px 16px" }, h("div", { class: "spin" }), T("Loading…", "Yükleniyor…"))); }
+    call("mail.range", { start: r[0].getTime(), end: r[1].getTime() }).then(function (evs) {
+      if (S.mail.cal.key !== key || S.mail.tab !== "cal") return;
+      S.mail.cal.events = (evs || []).slice().sort(function (a, b) { return a.start - b.start; }); S.mail.cal.loaded = true;
+      renderCal();
+    }).catch(function (e) { if (S.mail.cal.key === key) { S.mail.cal.key = ""; mailBlocked(e.message); } });
+  }
+  var EV_COLORS = ["#0f6cbd", "#c239b3", "#0b6a0b", "#ca5010", "#8764b8", "#038387", "#d13438", "#986f0b", "#4f6bed", "#e3008c", "#00b7c3", "#637cef"];
+  function evColor(e) {
+    if (e.categories && e.categories.length) { var s = "cat:" + String(e.categories[0]).toLowerCase(), x = 0; for (var i = 0; i < s.length; i++) x = (x * 31 + s.charCodeAt(i)) | 0; return EV_COLORS[Math.abs(x) % EV_COLORS.length]; }
+    return e.freeBusy === "OOF" ? "var(--warn)" : "var(--violet)";
+  }
+  function evClass(e, base) { var now = Date.now(); return base + (e.response === "Tentative" || e.freeBusy === "Tentative" ? " tent" : "") + (e.freeBusy === "Free" ? " free" : "") + (e.cancelled ? " canc" : "") + (e.response === "Decline" ? " decl" : "") + (e.end < now ? " past" : ""); }
+  function evIsAll(e) { return e.allDay || (e.end - e.start >= 864e5 - 60000); }
+  function renderCal() {
+    var list = $("#maillist"); if (!list || S.mail.tab !== "cal") return;
+    var meta = $("#mailmeta"), v = calView(), r = calRange(), evs = S.mail.cal.events;
+    if (meta) { clear(meta); meta.appendChild(h("span", { class: "dot ok" })); var n = evs.filter(function (e) { return !e.cancelled; }).length; meta.appendChild(document.createTextNode(T(n + (n === 1 ? " event" : " events"), n + " etkinlik"))); }
+    clear(list);
+    if (v === "agenda") renderAgenda(evs);
+    else if (v === "month") list.appendChild(monthGrid(r[0]));
+    else {
+      var g = weekGrid(r[0], Math.round((r[1] - r[0]) / 864e5));
+      list.appendChild(g);
+      /* scroll to the working day once per range (now − 2 h when today is in view) */
+      var p = mailPageRec(), sk = S.mail.cal.key + v;
+      if (p && S.mail.cal.scrollKey !== sk) {
+        S.mail.cal.scrollKey = sk;
+        var now = new Date(), inView = now >= r[0] && now < r[1], hr = inView ? Math.max(7, now.getHours() - 2) : 8;
+        requestAnimationFrame(function () { var body = $(".wkb", g); if (body) p.body.scrollTop = Math.max(0, body.offsetTop + hr * CAL_HH - 8); });
+      }
+    }
+  }
+  function renderAgenda(evs) {
+    var list = $("#maillist");
+    evs = (evs || []).filter(function (e) { return !e.cancelled; });
+    if (!evs.length) { list.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon("calendar")), h("h3", null, T("Nothing scheduled", "Planlanmış bir şey yok")), h("p", null, T("Your calendar is clear for these two weeks.", "Bu iki hafta takviminiz boş.")), h("div", { class: "btnstack" }, h("button", { class: "btn", onclick: function () { eventEditSheet(null); } }, icon("plus", "s"), T("New event", "Yeni etkinlik"))))); return; }
+    var lastDay = "", now = Date.now();
+    evs.forEach(function (e) {
+      var dk = new Date(e.start).toDateString();
+      if (dk !== lastDay) { lastDay = dk; list.appendChild(h("div", { class: "day" }, dayLabel(e.start), h("small", null, new Date(e.start).toLocaleDateString(loc(), { day: "numeric", month: "long" })))); }
+      var resp = e.response || "";
+      var cls = "ev" + (e.end < now ? " past" : "") + (resp === "Tentative" ? " tent" : "") + (e.meeting && (resp === "NoResponseReceived" || resp === "Unknown") ? " none" : "");
+      list.appendChild(h("button", { class: cls, style: "--c:" + evColor(e), onclick: function () { eventSheet(e); } },
+        h("div", { class: "tm" }, e.allDay ? h("b", null, T("All day", "Tüm gün")) : [h("b", null, timeOf(e.start)), timeOf(e.end)]),
+        h("div", { class: "eb" }, h("b", null, e.recurring ? "↻ " : "", e.subject), (e.location || e.organizer) ? h("span", null, [e.location, e.organizer].filter(Boolean).join(" — ")) : null,
+          e.meeting && (resp === "NoResponseReceived" || resp === "Unknown") ? h("span", { class: "tag warn" }, T("Not answered", "Yanıtlanmadı")) : resp === "Tentative" ? h("span", { class: "tag warn" }, T("Tentative", "Belki")) : null)));
+    });
+  }
+  function weekGrid(s, n) {
+    var days = []; for (var i = 0; i < n; i++) days.push(calAdd(s, i));
+    var today = new Date(), HH = CAL_HH, cols = "40px repeat(" + n + ", minmax(0,1fr))", evs = S.mail.cal.events;
+    var head = h("div", { class: "wkh", style: "grid-template-columns:" + cols }, h("div"), days.map(function (d) {
+      return h("button", { class: "dh" + (sameDay(d, today) ? " td" : ""), onclick: function () { if (n > 1) calDrill(d, "day"); } }, h("span", { class: "wd" }, d.toLocaleDateString(loc(), { weekday: n > 5 ? "narrow" : n > 1 ? "short" : "long" })), h("span", { class: "num" }, String(d.getDate())));
+    }));
+    var anyAll = evs.some(function (e) { return evIsAll(e) && !e.cancelled; });
+    var allDay = anyAll ? h("div", { class: "wka", style: "grid-template-columns:" + cols }, h("div", { class: "gut" }, T("all day", "tüm gün")), days.map(function (d) {
+      return h("div", { class: "ac" }, evs.filter(function (e) { return evIsAll(e) && !e.cancelled && e.start < calAdd(d, 1).getTime() && e.end > d.getTime(); }).map(function (e) {
+        return h("button", { class: evClass(e, "wev ad"), style: "--c:" + evColor(e), onclick: function () { eventSheet(e); } }, h("b", null, e.subject));
+      }));
+    })) : null;
+    var gut = h("div", { class: "wgut", style: "height:" + 24 * HH + "px" });
+    for (var hr = 1; hr < 24; hr++) gut.appendChild(h("div", { class: "hl", style: "top:" + hr * HH + "px" }, new Date(2000, 0, 1, hr).toLocaleTimeString(loc(), { hour: "2-digit", minute: "2-digit" })));
+    var cells = days.map(function (d) {
+      var col = h("div", { class: "wday" + (d.getDay() === 0 || d.getDay() === 6 ? " wkend" : ""), style: "height:" + 24 * HH + "px;--hh:" + HH + "px" });
+      /* a tap on an empty slot starts a new event there (half-hour steps) */
+      col.addEventListener("click", function (ev) { if (ev.target !== col && !ev.target.classList.contains("off")) return; var rc = col.getBoundingClientRect(); var mins = Math.floor(((ev.clientY - rc.top) / HH) * 2) * 30; var st = new Date(d); st.setMinutes(Math.max(0, Math.min(23 * 60 + 30, mins))); eventEditSheet(null, st); });
+      if (!(d.getDay() === 0 || d.getDay() === 6)) { col.appendChild(h("div", { class: "off", style: "top:0;height:" + 8 * HH + "px" })); col.appendChild(h("div", { class: "off", style: "top:" + 18 * HH + "px;height:" + 6 * HH + "px" })); }
+      var day0 = d.getTime(), day1 = calAdd(d, 1).getTime();
+      var list = evs.filter(function (e) { return !evIsAll(e) && e.start < day1 && e.end > day0; }).map(function (e) { var st = Math.max(0, (e.start - day0) / 60000), en = Math.min(1440, (e.end - day0) / 60000); return { e: e, st: st, en: Math.max(en, st + 20) }; })
+        .sort(function (a, b) { return a.st - b.st || b.en - a.en; });
+      /* side-by-side layout for overlapping events (clusters → columns) */
+      var cluster = [], cEnd = -1;
+      function flush() { var ends = []; cluster.forEach(function (x) { var k = -1; for (var j = 0; j < ends.length; j++) if (ends[j] <= x.st) { k = j; break; } if (k < 0) { k = ends.length; ends.push(0); } ends[k] = x.en; x.k = k; }); cluster.forEach(function (x) { x.n = ends.length; }); cluster = []; }
+      list.forEach(function (x) { if (x.st >= cEnd && cluster.length) flush(); cluster.push(x); cEnd = Math.max(cEnd, x.en); }); if (cluster.length) flush();
+      list.forEach(function (x) {
+        var e = x.e, hgt = (x.en - x.st) / 60 * HH;
+        col.appendChild(h("button", { class: evClass(e, "wev"), style: "--c:" + evColor(e) + ";top:" + (x.st / 60 * HH + 1) + "px;height:" + Math.max(hgt - 2, 18) + "px;left:calc(" + (x.k / x.n * 100) + "% + 1px);width:calc(" + (100 / x.n) + "% - 3px)", "aria-label": e.subject + " " + timeOf(e.start) + "–" + timeOf(e.end), onclick: function (ev) { ev.stopPropagation(); eventSheet(e); } },
+          h("b", { class: hgt < 36 || x.n > 1 && n > 1 ? "one" : "" }, e.recurring ? "↻ " : "", e.subject), hgt >= 40 ? h("span", null, timeOf(e.start) + "–" + timeOf(e.end)) : null, hgt >= 60 && e.location ? h("span", null, e.location) : null));
+      });
+      if (sameDay(d, today)) col.appendChild(h("div", { class: "wnow", style: "top:" + (today.getHours() * 60 + today.getMinutes()) / 60 * HH + "px" }));
+      return col;
+    });
+    return h("div", { class: "wk" }, head, allDay, h("div", { class: "wkb", style: "grid-template-columns:" + cols }, gut, cells));
+  }
+  function monthGrid(s) {
+    var base = calDay().getMonth(), today = new Date(), evs = S.mail.cal.events;
+    var hd = h("div", { class: "monh" }); for (var i = 0; i < 7; i++) hd.appendChild(h("div", null, calAdd(s, i).toLocaleDateString(loc(), { weekday: "short" })));
+    var grid = h("div", { class: "mon" }, hd);
+    for (var r = 0; r < 6; r++) {
+      var row = h("div", { class: "monr" });
+      for (var c = 0; c < 7; c++) (function (d) {
+        var d0 = d.getTime(), d1 = calAdd(d, 1).getTime();
+        var list = evs.filter(function (e) { return !e.cancelled && e.start < d1 && e.end > d0 && e.end !== d0; });
+        var MAX = 2;
+        row.appendChild(h("button", { class: "monc" + (d.getMonth() !== base ? " out" : "") + (sameDay(d, today) ? " td" : ""), "aria-label": d.toLocaleDateString(loc(), { weekday: "long", day: "numeric", month: "long" }) + (list.length ? " · " + list.length : ""), onclick: function () { calDrill(d, "day"); } },
+          h("span", { class: "dn" }, d.getDate() === 1 ? d.toLocaleDateString(loc(), { day: "numeric", month: "short" }) : String(d.getDate())),
+          list.slice(0, MAX).map(function (e) { return h("span", { class: evClass(e, "me") + (e.allDay ? " adb" : ""), style: "--c:" + evColor(e) }, e.allDay ? null : h("i"), h("span", null, e.subject)); }),
+          list.length > MAX ? h("span", { class: "more" }, "+" + (list.length - MAX)) : null));
+      })(calAdd(s, r * 7 + c));
+      grid.appendChild(row);
+    }
+    return grid;
+  }
+
+  /* event details (original popNode): when, where, join link, organizer and attendees with their answers, description; answer / prepare / edit / delete */
+  var RS_LABEL = { Accept: ["Accepted", "Kabul etti"], Decline: ["Declined", "Reddetti"], Tentative: ["Tentative", "Belki"], NoResponseReceived: ["No response", "Yanıt yok"], Unknown: ["No response", "Yanıt yok"], Organizer: ["Organizer", "Düzenleyen"] };
+  function rsLabel(r) { var x = RS_LABEL[r]; return x ? T(x[0], x[1]) : r; }
+  function eventWhen(e) {
+    var s = new Date(e.start), en = new Date(e.end);
+    return e.allDay ? s.toLocaleDateString(loc(), { weekday: "long", day: "numeric", month: "long", year: "numeric" }) + (en - s > 864e5 ? " – " + calAdd(en, -1).toLocaleDateString(loc(), { day: "numeric", month: "long" }) : "") + T(" · all day", " · tüm gün")
+      : s.toLocaleDateString(loc(), { weekday: "long", day: "numeric", month: "long", year: "numeric" }) + " · " + timeOf(s) + "–" + timeOf(en);
+  }
+  function eventSheet(e) {
+    var body = h("div", { class: "evd" });
+    var s = sheet({ title: e.subject, body: body });
+    function kv(ic, kids) { return h("div", { class: "kv" }, icon(ic, "s"), h("div", null, kids)); }
+    function draw(d, loadingMore) {
+      clear(body);
+      var org = d.response === "Organizer", meeting = !!d.meeting;
+      var ppl = (d.required || []).map(function (p) { return { p: p, opt: false }; }).concat((d.optional || []).map(function (p) { return { p: p, opt: true }; }));
+      var join = joinLink(d.location || "", d.html || "", d.text || "");
+      if (d.cancelled) body.appendChild(h("div", { class: "tag bad" }, T("Canceled", "İptal edildi")));
+      body.appendChild(kv("clock", [eventWhen(d), d.recurring ? h("small", null, T("↻ Recurring event", "↻ Yinelenen etkinlik")) : null]));
+      if (d.location) body.appendChild(kv("map-pin", d.location));
+      if (join) body.appendChild(kv("video", h("button", { class: "btn sm p", onclick: function () { call("open.link", { url: join }); } }, icon("video", "xs"), T("Join meeting", "Toplantıya katıl"))));
+      var orgName = d.organizer ? (typeof d.organizer === "string" ? d.organizer : mailWho(d.organizer)) : "";
+      if (meeting && orgName) body.appendChild(kv("users", h("div", { class: "ppl" },
+        h("div", { class: "pr" }, avatar(orgName, d.organizer && d.organizer.email), h("span", { class: "pn" }, h("b", null, orgName), T(" · organizer", " · düzenleyen"))),
+        ppl.map(function (x) { return h("div", { class: "pr" }, avatar(mailWho(x.p), x.p.email), h("span", { class: "pn" }, mailWho(x.p), x.opt ? h("small", null, T(" (optional)", " (isteğe bağlı)")) : null), x.p.response ? h("span", { class: "rs " + x.p.response }, rsLabel(x.p.response)) : null); }))));
+      if (meeting && !org && d.response) body.appendChild(kv("check", [T("Your response: ", "Yanıtınız: "), h("b", null, rsLabel(d.response))]));
+      if (loadingMore) body.appendChild(h("div", { class: "status" }, h("div", { class: "spin" }), T("Loading…", "Yükleniyor…")));
+      if (d.html && d.text) body.appendChild(h("div", { class: "mframew" }, mailFrame(d.html, { images: S.mail.images })));
+      else if (d.text) { var tb = h("div", { class: "mbody sm" }); linkify(tb, d.text); body.appendChild(tb); }
+      if (meeting && !org && !d.cancelled) body.appendChild(h("div", { class: "btnrow evr" },
+        h("button", { class: "btn sm", onclick: function () { evRespond(d, "decline", s); } }, T("Decline", "Reddet")),
+        h("button", { class: "btn sm", onclick: function () { evRespond(d, "tentative", s); } }, T("Tentative", "Belki")),
+        h("button", { class: "btn sm p", onclick: function () { evRespond(d, "accept", s); } }, T("Accept", "Kabul"))));
+      var full = !loadingMore;
+      body.appendChild(h("div", { class: "btnrow evt" },
+        h("button", { class: "btn sm ghost", onclick: function () { s.close(); prepareMeeting(d); } }, icon("sparkles", "xs"), T("Prepare", "Hazırlan")),
+        full && (!meeting || org) && !d.cancelled ? h("button", { class: "btn sm ghost", onclick: function () { s.close(); eventEditSheet(d); } }, icon("pencil", "xs"), T("Edit", "Düzenle")) : null,
+        full ? h("button", { class: "btn sm ghost dtext", onclick: function () { removeEvent(d, s); } }, icon("trash-2", "xs"), org && meeting ? T("Cancel meeting", "Toplantıyı iptal et") : meeting ? T("Remove", "Kaldır") : T("Delete", "Sil")) : null));
+    }
+    draw(e, true);
+    call("mail.event.get", { id: e.id }).then(function (d) { if (!s.closed) draw(d, false); }).catch(function (err) { draw(e, false); body.insertBefore(h("div", { class: "mnote warn" }, icon("triangle-alert", "s"), h("span", null, errText(err))), body.firstChild); });
+    return s;
+  }
+  function evRespond(d, r, s) {
+    call("mail.respond", { id: d.id, response: r }).then(function () {
+      s.close(); toast({ accept: T("Accepted", "Kabul edildi"), tentative: T("Tentatively accepted", "Belki olarak yanıtlandı"), decline: T("Declined", "Reddedildi") }[r] + T(" — the organizer was notified", " — düzenleyene bildirildi"));
+      loadCal(true);
+    }).catch(function (e) { toast(e.message); });
+  }
+  function respond(id, r) {
+    call("mail.respond", { id: id, response: r }).then(function () { toast(T("Response sent", "Yanıt gönderildi")); loadMail(); }).catch(function (e) { toast(e.message); });
+  }
+  function removeEvent(d, s) {
+    var org = d.response === "Organizer" && d.meeting;
+    confirmSheet(org ? T("Cancel this meeting?", "Toplantı iptal edilsin mi?") : T("Delete this event?", "Etkinlik silinsin mi?"), org ? T("Cancel this meeting and notify the attendees?", "Toplantı iptal edilip katılımcılara bildirilsin mi?") : T("Delete this event from your calendar?", "Bu etkinlik takviminizden silinsin mi?"), org ? T("Cancel meeting", "Toplantıyı iptal et") : T("Delete", "Sil"), function () {
+      call("mail.event.delete", { id: d.id, cancel: org }).then(function () { if (s) s.close(); toast(org ? T("Meeting cancelled", "Toplantı iptal edildi") : T("Event deleted", "Etkinlik silindi")); loadCal(true); }).catch(function (e) { toast(e.message); });
+    });
+  }
+  function prepareMeeting(e) {
+    var when = eventWhen(e), org = e.organizer ? mailWho(e.organizer) : "";
+    askYaver(T("Help me prepare for the meeting \"" + e.subject + "\" on " + when + (org ? ", organized by " + org : "") + ". Look for related emails with the mail tool (search) and give me a short briefing: purpose, open questions, what I should bring.",
+      when + " tarihindeki \"" + e.subject + "\" toplantısına" + (org ? " (düzenleyen: " + org + ")" : "") + " hazırlanmama yardım et. mail aracıyla (search) ilgili e-postaları bul ve kısa bir brifing ver: amaç, açık sorular, yanımda ne getirmeliyim."),
+      T("Prepare for “" + e.subject + "”", "“" + e.subject + "” toplantısına hazırlan"));
+  }
+  /* new / edit event (original dlgNode): title, attendees, optional attendees, date, start–end or all day, location, description */
+  function eventEditSheet(d, start) {
+    var pad = function (n) { return String(n).padStart(2, "0"); };
+    var ds = function (x) { return x.getFullYear() + "-" + pad(x.getMonth() + 1) + "-" + pad(x.getDate()); }, ts = function (x) { return pad(x.getHours()) + ":" + pad(x.getMinutes()); };
+    var s0 = d ? new Date(d.start) : start ? new Date(start) : (function () { var day = calDay(); if (!sameDay(day, new Date())) { var y = new Date(day); y.setHours(9, 0, 0, 0); return y; } var x = new Date(); x.setMinutes(x.getMinutes() < 30 ? 30 : 60, 0, 0); return x; })();
+    var e0 = d ? new Date(d.end) : new Date(s0.getTime() + 30 * 60000);
+    var spanDays = d && d.allDay ? Math.max(1, Math.round((e0 - s0) / 864e5)) : 1;
+    var ti = h("input", { type: "text", placeholder: T("Add a title", "Başlık ekleyin") }); ti.value = d ? d.subject : "";
+    var at = h("input", { type: "text", inputmode: "email", autocapitalize: "off", autocomplete: "off", spellcheck: "false", placeholder: T("Attendees (e-mails, separated by ;)", "Katılımcılar (e-postalar, ; ile)") });
+    var op = h("input", { type: "text", inputmode: "email", autocapitalize: "off", autocomplete: "off", spellcheck: "false", placeholder: T("Optional attendees", "İsteğe bağlı katılımcılar") });
+    if (d) { at.value = (d.required || []).map(function (p) { return p.email || p.name; }).filter(Boolean).join("; "); op.value = (d.optional || []).map(function (p) { return p.email || p.name; }).filter(Boolean).join("; "); }
+    var da = h("input", { type: "date" }); da.value = ds(s0);
+    var st = h("input", { type: "time", step: 900 }); st.value = ts(s0);
+    var en = h("input", { type: "time", step: 900 }); en.value = ts(e0);
+    var ad = h("input", { type: "checkbox" }); ad.checked = !!(d && d.allDay);
+    var lo = h("input", { type: "text", placeholder: T("Add a location or a meeting link", "Yer ya da toplantı bağlantısı ekleyin") }); lo.value = d ? d.location || "" : "";
+    var de = h("textarea", { rows: 3, class: "sm", placeholder: T("Add a description", "Açıklama ekleyin") }); de.value = d ? d.text || "" : "";
+    var times = h("div", { class: "f2" }, h("label", { class: "field" }, h("span", null, T("Start", "Başlangıç")), st), h("label", { class: "field" }, h("span", null, T("End", "Bitiş")), en));
+    function sync() { times.classList.toggle("hidden", ad.checked); }
+    ad.addEventListener("change", sync); sync();
+    /* keep the length when the start moves */
+    st.addEventListener("change", function () { var a = st.value.split(":").map(Number), b = en.value.split(":").map(Number), dur = (e0 - s0) / 60000; if (isNaN(dur) || dur <= 0) dur = 30; var m2 = a[0] * 60 + a[1] + dur; if (m2 < 24 * 60) en.value = pad(Math.floor(m2 / 60)) + ":" + pad(m2 % 60); void b; });
+    var s = null, busy = false;
+    function label() { return addrList(at.value).length || addrList(op.value).length ? T("Send", "Gönder") : T("Save", "Kaydet"); }
+    function save() {
+      if (busy) return false;
+      if (!ti.value.trim()) { toast(T("Add a title", "Bir başlık ekleyin")); ti.focus(); return false; }
+      var p = da.value.split("-").map(Number); if (p.length < 3 || isNaN(p[0])) { toast(T("Pick a date", "Bir tarih seçin")); return false; }
+      var sd, ed;
+      if (ad.checked) { sd = new Date(p[0], p[1] - 1, p[2]); ed = calAdd(sd, spanDays); }
+      else { var a = st.value.split(":").map(Number), b = en.value.split(":").map(Number); sd = new Date(p[0], p[1] - 1, p[2], a[0] || 0, a[1] || 0); ed = new Date(p[0], p[1] - 1, p[2], b[0] || 0, b[1] || 0); if (ed <= sd) ed = new Date(sd.getTime() + 30 * 60000); }
+      var att = addrList(at.value), opt = addrList(op.value);
+      busy = true; s.el.classList.add("busy");
+      call(d ? "mail.event.update" : "mail.event.create", { id: d ? d.id : undefined, subject: ti.value.trim(), start: sd.getTime(), end: ed.getTime(), allDay: ad.checked, location: lo.value.trim(), body: de.value, attendees: att, optional: opt }).then(function () {
+        busy = false; s.close();
+        toast(d ? (att.length || opt.length ? T("Meeting updated — attendees were notified", "Toplantı güncellendi — katılımcılara bildirildi") : T("Event updated", "Etkinlik güncellendi")) : (att.length || opt.length ? T("Meeting created and invitations sent", "Toplantı oluşturuldu, davetler gönderildi") : T("Event saved", "Etkinlik kaydedildi")));
+        S.mail.cal.day = calSod(sd);
+        if (topPage() === "mail" && S.mail.tab === "cal") { renderMailShell(); loadCal(true); } else S.mail.cal.key = "";
+      }).catch(function (e) { busy = false; s.el.classList.remove("busy"); toast(e.message); });
+      return false;
+    }
+    var okBtn = null;
+    s = sheet({ title: d ? T("Edit event", "Etkinliği düzenle") : T("New event", "Yeni etkinlik"), body: h("div", null,
+      h("label", { class: "field" }, h("span", null, T("Title", "Başlık")), ti),
+      h("div", { class: "field" }, h("span", null, T("Attendees", "Katılımcılar")), at, suggestPeople(at)),
+      h("div", { class: "field" }, h("span", null, T("Optional", "İsteğe bağlı")), op, suggestPeople(op)),
+      h("label", { class: "field" }, h("span", null, T("Date", "Tarih")), da),
+      h("label", { class: "chkrow" }, ad, h("span", null, T("All day", "Tüm gün"))),
+      times,
+      h("label", { class: "field" }, h("span", null, T("Location", "Yer")), lo),
+      h("label", { class: "field" }, h("span", null, T("Description", "Açıklama")), de),
+      d && d.meeting ? h("div", { class: "qnote" }, icon("info", "xs"), T("Attendees get the updated invitation.", "Katılımcılara güncellenmiş davet gider.")) : null),
+      actions: [[T("Cancel", "İptal")], [label(), "p", save]] });
+    okBtn = s.el.querySelector(".sf .btn.p");
+    function relabel() { if (okBtn) okBtn.textContent = label(); }
+    at.addEventListener("input", relabel); op.addEventListener("input", relabel);
+    if (!d) setTimeout(function () { ti.focus(); }, 260);
+    return s;
+  }
+
+  /* agent and background events about mail */
+  function onMailEvent(type, d) {
+    if (type === "mail.draft" && d && d.id) {
+      toast(T("Draft saved: ", "Taslak kaydedildi: ") + (d.subject || "") + " — " + T("Open", "Aç"), function () { openMail(d.id, { subject: d.subject }, { folder: "drafts", edit: true }); }, 8000);
+      if (topPage() === "mail" && S.mail.folder === "drafts") loadMail(true);
+    } else if (type === "mail.triage") {
+      if (topPage() !== "mail" || S.mail.tab !== "mail" || S.mail.results) return;
+      call("mailx.triage").then(function (tr) { var ch = false; S.mail.items.forEach(function (m) { if (tr && tr[m.id] && !m.triage) { m.triage = tr[m.id]; ch = true; } }); if (ch) renderMailList(); }).catch(function () {});
+    } else if (type === "mail.index") loadIndexState();
   }
 
   /* ------------------------------------------------------------ settings */
@@ -1512,12 +2691,14 @@
     wrap.appendChild(group(T("Assistant", "Asistan"), [
       row({ icon: "languages", label: T("Answer language", "Cevap dili"), value: { auto: T("Like my message", "Mesajım gibi"), tr: "Türkçe", en: "English" }[st.langSetting] || st.langSetting, onclick: function () { optionsSheet(T("Answer language", "Cevap dili"), [["auto", T("Same as my message", "Mesajımla aynı")], ["tr", "Türkçe"], ["en", "English"]], st.langSetting, function (v) { setCfg("lang", v).then(function (st2) { if (!st2) return; document.documentElement.lang = S.lang; renderShell(); S.pages.forEach(function (pg) { if (pg.name === "settings") pg.title.firstChild.textContent = T("Settings", "Ayarlar"); }); }); }); } }),
       row({ icon: "user", label: T("Personality", "Kişilik"), sub: st.persona ? st.persona : T("Default", "Varsayılan"), onclick: function () { editSheet({ title: T("Personality", "Kişilik"), text: T("Who yaver is and how it talks. Leave empty for the default.", "yaver kimdir ve nasıl konuşur. Varsayılan için boş bırakın."), multi: true, value: st.persona, placeholder: st.personaDefault, save: function (v) { setCfg("persona", v); } }); } }),
-      row({ icon: "shield-check", label: T("Ask before actions", "İşlemlerden önce sor"), sub: T("Deleting, moving, overwriting. Sending mail is always confirmed.", "Silme, taşıma, üzerine yazma. E-posta gönderimi her zaman onaylatılır."), wrap: true, toggle: st.askRisky, onToggle: function (on) { setCfg("askRisky", on); } }),
+      window.YVP ? YVP.permRow() : row({ icon: "shield-check", label: T("Ask before actions", "İşlemlerden önce sor"), sub: T("Deleting, moving, overwriting. Sending mail is always confirmed.", "Silme, taşıma, üzerine yazma. E-posta gönderimi her zaman onaylatılır."), wrap: true, toggle: st.askRisky, onToggle: function (on) { setCfg("askRisky", on); } }),
       row({ icon: "brain", label: T("Memory", "Hafıza"), sub: T("What yaver knows about you", "yaver'in sizin hakkınızda bildikleri"), onclick: function () { openKnowledge(); } }),
       row({ icon: "square-kanban", label: T("Tasks", "Görevler"), sub: T("Your work task board", "İş görev panonuz"), value: S.overdue ? T(S.overdue + " overdue", S.overdue + " gecikmiş") : "", onclick: function () { openTasks(); } }),
       row({ icon: "clock", label: T("Reminders and scheduled tasks", "Hatırlatmalar ve zamanlanmış görevler"), onclick: openSchedule })
     ]));
     wrap.appendChild(h("div", { id: "s-extras" }));
+    wrap.appendChild(h("div", { id: "s-parity" }));
+    if (window.YVP) YVP.settings(wrap);
 
     var mailGroup = group(T("Company mail", "Kurum postası"), [
       row({ icon: "globe", label: T("Outlook web address", "Outlook web adresi"), sub: M.owa || T("e.g. https://mail.company.com/owa", "ör. https://eposta.sirket.com.tr/owa"), onclick: function () { editSheet({ title: T("Outlook web address", "Outlook web adresi"), value: M.owa, type: "url", placeholder: "https://eposta.sirket.com.tr/owa", help: T("The address you open Outlook on the web with.", "Outlook'u web'de açtığınız adres."), save: function (v) { setCfg("mailOwa", v.trim()); } }); } }),
@@ -1555,8 +2736,9 @@
     ], T("Search works without keys (DuckDuckGo, Bing, Mojeek from the phone). Keys make it faster and more reliable.", "Arama anahtarsız çalışır (telefondan DuckDuckGo, Bing, Mojeek). Anahtarlar daha hızlı ve güvenilir yapar.")));
 
     wrap.appendChild(group(T("Data", "Veri"), [
-      row({ icon: "upload", label: T("Import a yaver export", "yaver dışa aktarımını içe al"), sub: ".zip", onclick: function () { call("import.zip").then(function (m) { if (m) toast(m); refreshConvos(); }).catch(function (e) { toast(e.message); }); } }),
-      row({ icon: "folder", label: T("Files", "Dosyalar"), sub: T("Attachments, downloads and files yaver made", "Ekler, indirilenler ve yaver'in oluşturduğu dosyalar"), onclick: function () { call("workspace.list").then(function (t) { sheet({ title: T("Files", "Dosyalar"), body: h("div", { class: "res", style: "display:block;white-space:pre;font-size:12.5px;overflow:auto;max-height:55vh" }, t || T("(empty)", "(boş)")), actions: [[T("Close", "Kapat")]] }); }); } }),
+      window.YVP ? YVP.exportRow() : null,
+      window.YVP ? YVP.importRow() : row({ icon: "upload", label: T("Import a yaver export", "yaver dışa aktarımını içe al"), sub: ".zip", onclick: function () { call("import.zip").then(function (m) { if (m) toast(m); refreshConvos(); }).catch(function (e) { toast(e.message); }); } }),
+      row({ icon: "folder", label: T("Files", "Dosyalar"), sub: T("Attachments, downloads, files yaver made, its skills — browse, open, share", "Ekler, indirilenler, yaver'in oluşturduğu dosyalar, yetenekleri — göz atın, açın, paylaşın"), onclick: function () { openFiles("/workspace"); } }),
       row({ icon: "log-in", label: T("Sign out everywhere", "Her yerden çıkış yap"), sub: T("Clears the mail session and website sign-ins", "Posta oturumunu ve site girişlerini temizler"), onclick: function () { sheet({ title: T("Sign out everywhere?", "Her yerden çıkılsın mı?"), actions: [[T("Cancel", "İptal")], [T("Sign out", "Çıkış yap"), "danger", function () { call("cookies.clear").then(function () { refreshState().then(renderSettings); toast(T("Signed out", "Çıkış yapıldı")); }); }]] }); } }),
       row({ icon: "file-text", label: T("Diagnostic log", "Tanılama günlüğü"), sub: T("What yaver did: mail sign-in, connections, tools, errors. No passwords.", "yaver'in yaptıkları: posta oturumu, bağlantılar, araçlar, hatalar. Şifre içermez."), wrap: true, onclick: diagSheet }),
       row({ icon: "info", label: T("Last crash report", "Son çökme raporu"), onclick: function () { call("crash.last").then(function (t) { sheet({ title: T("Last crash report", "Son çökme raporu"), body: h("div", { class: "res", style: "display:block;white-space:pre-wrap;font-size:12px;max-height:50vh;overflow:auto" }, t || T("No crash recorded.", "Kayıtlı çökme yok.")), actions: t ? [[T("Copy", "Kopyala"), "p", function () { call("copy", { text: t }); }], [T("Close", "Kapat")]] : [[T("Close", "Kapat")]] }); }); } })
@@ -1614,6 +2796,7 @@
       h("button", { class: "opt", onclick: function () { s.close(); if (!S.convoId || S.convoId === "_new") { toast(T("The context is already empty", "Bağlam zaten boş")); return; } runCommand("/clear"); } }, icon("eraser", "s"), h("div", null, T("Clear the context", "Bağlamı temizle"), h("small", null, T("yaver forgets the earlier messages; they stay visible", "yaver önceki mesajları unutur; ekranda kalırlar")))),
       h("button", { class: "opt", onclick: function () { s.close(); exportConvo(); } }, icon("download", "s"), h("div", null, T("Export this chat", "Bu sohbeti dışa aktar"), h("small", null, T("Readable copy + full record for troubleshooting", "Okunabilir kopya + sorun giderme için tam kayıt")))),
       h("button", { class: "opt", onclick: function () { s.close(); diagSheet(); } }, icon("file-text", "s"), h("div", null, T("Diagnostic log", "Tanılama günlüğü"))),
+      window.YVP ? YVP.chatMenuItems(function () { s.close(); }) : null,
       h("button", { class: "opt", onclick: function () { s.close(); newChat(true); } }, icon("square-pen", "s"), h("div", null, T("New chat", "Yeni sohbet")))) });
   }
 
@@ -1632,25 +2815,37 @@
 
   function pickModel(key, allowEmpty) {
     var list = h("div", { class: "mlist" }, h("div", { class: "status" }, h("div", { class: "spin" }), T("Loading models…", "Modeller yükleniyor…")));
-    var q = h("input", { type: "search", placeholder: T("Filter: free, gpt, claude, gemini…", "Süz: free, gpt, claude, gemini…") });
-    var all = [];
-    var s = sheet({ title: T("Choose a model", "Model seçin"), body: h("div", null, h("label", { class: "search" }, icon("search", "xs"), q), list), actions: allowEmpty ? [[T("Use the main model", "Ana modeli kullan"), "", function () { setCfg(key, ""); }]] : [] });
+    var q = h("input", { type: "search", placeholder: T("Filter: free, gpt, claude, gemini…", "Süz: free, gpt, claude, gemini…"), "aria-label": T("Filter models", "Modelleri süz") });
+    var all = [], freeOnly = false;
+    var count = h("small", { class: "muted mcount" });
+    var fchip = h("button", { class: "cchip", "aria-pressed": "false", onclick: function () { freeOnly = !freeOnly; fchip.classList.toggle("on", freeOnly); fchip.setAttribute("aria-pressed", String(freeOnly)); draw(); } }, icon("badge-check", "xs"), h("span", null, T("Free only", "Yalnızca ücretsiz")));
+    var s = sheet({ title: T("Choose a model", "Model seçin"), body: h("div", null, h("label", { class: "search" }, icon("search", "xs"), q), h("div", { class: "dbgbar" }, fchip, count), list), actions: allowEmpty ? [[T("Use the main model", "Ana modeli kullan"), "", function () { setCfg(key, ""); }]] : [] });
+    function isFree(m) { return !!m.free || /:free$/i.test(m.id); }
+    function ctxLabel(n) { return n >= 1e6 ? (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + "M" : Math.round(n / 1000) + "k"; }
     function draw() {
       clear(list);
-      var f = q.value.toLowerCase().trim();
-      var shown = all.filter(function (m) { return !f || m.toLowerCase().indexOf(f) >= 0; }).slice(0, 300);
+      var words = q.value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+      var cur = S.state.llm[key] || "";
+      var match = function (m) { return (!freeOnly || isFree(m)) && words.every(function (w) { return w === "free" || w === "ücretsiz" ? isFree(m) : m.id.toLowerCase().indexOf(w) >= 0 || String(m.name || "").toLowerCase().indexOf(w) >= 0; }); };
+      var hit = all.filter(match), shown = hit.slice(0, 300);
+      var nf = all.filter(isFree).length;
+      count.textContent = all.length ? (hit.length !== all.length ? hit.length + " / " : "") + all.length + T(" models", " model") + (nf ? " · " + nf + T(" free", " ücretsiz") : "") : "";
+      if (cur && !hit.some(function (m) { return m.id === cur; }) && !words.length && !freeOnly) shown.unshift({ id: cur, current: true });
       if (!shown.length) list.appendChild(h("div", { class: "status" }, T("No model matches.", "Eşleşen model yok.")));
       shown.forEach(function (m) {
-        list.appendChild(h("button", { class: "opt", onclick: function () { s.close(); setCfg(key, m).then(function (st) { if (!st) return; toast(T("Model: ", "Model: ") + m); if (topPage() === "setup") renderSetup(); }); } },
-          h("div", null, m.split("/").pop(), h("small", null, m.indexOf("/") > 0 ? m.split("/")[0] + (/:free$/.test(m) ? T(" · free", " · ücretsiz") : "") : "")), (S.state.llm[key] === m) ? icon("check", "s c") : null));
+        var id = m.id, prov = id.indexOf("/") > 0 ? id.split("/")[0] : "";
+        var meta = [prov, m.ctx ? ctxLabel(m.ctx) + T(" context", " bağlam") : "", m.name && m.name !== id ? m.name : ""].filter(Boolean).join(" · ");
+        list.appendChild(h("button", { class: "opt", onclick: function () { s.close(); setCfg(key, id).then(function (st) { if (!st) return; toast(T("Model: ", "Model: ") + id); if (topPage() === "setup") renderSetup(); }); } },
+          h("div", null, id.split("/").pop(), meta ? h("small", null, meta) : null, isFree(m) ? h("span", { class: "bdg ok mfree" }, T("free", "ücretsiz")) : null), (cur === id) ? icon("check", "s c") : null));
       });
     }
     q.addEventListener("input", draw);
-    call("models").then(function (m) { all = m || []; draw(); }).catch(function (e) {
+    call("models.info").catch(function () { return call("models").then(function (ids) { return (ids || []).map(function (id) { return { id: id, ctx: 0, free: /:free$/i.test(id) }; }); }); }).then(function (m) { all = m || []; draw(); }).catch(function (e) {
       clear(list).appendChild(h("div", { class: "err" }, icon("triangle-alert", "s"), h("div", null, e.message)));
       list.appendChild(h("button", { class: "btn", style: "width:100%;margin-top:8px", onclick: function () { s.close(); editSheet({ title: T("Model name", "Model adı"), value: S.state.llm[key], placeholder: "openai/gpt-4o-mini", save: function (v) { setCfg(key, v.trim()); } }); } }, T("Type the name instead", "Adını yazın")));
     });
   }
+
 
   /* ------------------------------------------------------------ knowledge: memory, about you, skills, lessons, trash */
   var KB_TABS = [["memory", "brain", "Memory", "Hafıza"], ["user", "user", "About you", "Hakkınızda"], ["skills", "graduation-cap", "Skills", "Yetenekler"], ["lessons", "sparkles", "Learned", "Öğrenilenler"], ["trash", "trash-2", "Trash", "Çöp kutusu"]];
@@ -1784,13 +2979,14 @@
   }
 
   function skillsView(box, list) {
+    if (window.YVP) return YVP.skillsView(box, list);
     box.appendChild(h("p", { class: "kexpl" }, T("Procedures yaver saved to reuse: each skill is a folder with instructions (SKILL.md) and helper files. yaver opens the right one when a task matches.", "yaver'in tekrar kullanmak için kaydettiği yöntemler: her yetenek talimatlar (SKILL.md) ve yardımcı dosyalar içeren bir klasördür. Görev uyduğunda yaver doğru olanı açar.")));
     if (!list.length) { box.appendChild(h("div", { class: "kempty" }, icon("graduation-cap"), T("No skills yet. Ask yaver to “save this as a skill” after it did something you want repeated.", "Henüz yetenek yok. Tekrarlanmasını istediğiniz bir işten sonra yaver'e “bunu yetenek olarak kaydet” deyin."))); return; }
     var lb = h("div", { class: "klist" });
     list.forEach(function (s) {
       lb.appendChild(h("button", { class: "kcard", onclick: function () {
         sheet({ title: s.name, body: h("div", null, h("p", { class: "kquote" }, s.description || "—"), h("dl", { class: "dl" }, h("dt", null, T("Folder", "Klasör")), h("dd", null, s.dir || ""), h("dt", null, T("Files", "Dosyalar")), h("dd", null, (s.files || []).join("\n") || "SKILL.md"))),
-          actions: [[T("Close", "Kapat")], [T("Use it", "Kullan"), "p", function () { closeAllPages(); $("#input").value = T("Use the skill “" + s.name + "” to ", "“" + s.name + "” yeteneğini kullanarak "); autosize(); syncSend(); $("#input").focus(); }]] });
+          actions: [[T("Files", "Dosyalar"), "", function () { openFiles(s.path || "/.yaver/skills/" + (s.dir || s.name)); }], [T("Use it", "Kullan"), "p", function () { closeAllPages(); $("#input").value = T("Use the skill “" + s.name + "” to ", "“" + s.name + "” yeteneğini kullanarak "); autosize(); syncSend(); $("#input").focus(); }]] });
       } }, h("div", { class: "kbad" }, h("span", { class: "bdg tp" }, icon("graduation-cap", "xs"), s.dir || s.name), (s.files || []).length > 1 ? h("span", { class: "bdg" }, (s.files.length) + T(" files", " dosya")) : null),
         h("div", { class: "ktext" }, h("b", null, s.name)), s.description ? h("div", { class: "kfacts clamp" }, s.description) : null));
     });
@@ -1974,11 +3170,11 @@
     var ti = h("input", { type: "text", placeholder: T("What needs doing", "Ne yapılacak") }); ti.value = prefill.title || "";
     var ow = h("input", { type: "text", list: "tpeople", placeholder: T("optional", "isteğe bağlı") }); ow.value = prefill.owner || S.tasks.owner || "";
     var du = h("input", { type: "date" });
-    var de = h("textarea", { rows: 3, class: "sm", placeholder: T("Details (optional)", "Ayrıntılar (isteğe bağlı)") });
+    var de = h("textarea", { rows: 3, class: "sm", placeholder: T("Details (optional)", "Ayrıntılar (isteğe bağlı)") }); de.value = prefill.desc || "";
     sheet({ title: T("New task", "Yeni görev"), body: h("div", null, peopleList(), h("label", { class: "field" }, h("span", null, T("Title", "Başlık")), ti), h("div", { class: "f2" }, h("label", { class: "field" }, h("span", null, T("Owner", "Sorumlu")), ow), h("label", { class: "field" }, h("span", null, T("Due", "Son tarih")), du)), h("label", { class: "field" }, h("span", null, T("Description", "Açıklama")), de)),
       actions: [[T("Cancel", "İptal")], [T("Add task", "Görevi ekle"), "p", function () {
         if (!ti.value.trim()) { toast(T("Give it a title", "Bir başlık verin")); return false; }
-        call("tasks.add", { title: ti.value.trim(), owner: ow.value.trim(), due: du.value, desc: de.value.trim(), status: "todo" }).then(function (t) { toast(T("Task added", "Görev eklendi") + (t && t.id ? " · " + t.id : "")); loadTasks(); refreshOverdue(); }).catch(function (e) { toast(e.message); });
+        call("tasks.add", { title: ti.value.trim(), owner: ow.value.trim(), due: du.value, desc: de.value.trim(), status: "todo", source: prefill.source || null }).then(function (t) { toast(T("Task added", "Görev eklendi") + (t && t.id ? " · " + t.id : "")); loadTasks(); refreshOverdue(); }).catch(function (e) { toast(e.message); });
       }]] });
     setTimeout(function () { ti.focus(); }, 260);
   }
@@ -2155,6 +3351,7 @@
       mbox.appendChild(group(T("Mail assistant", "Posta asistanı"), [
         row({ icon: "inbox", label: T("Sort new mail", "Yeni postayı ayıkla"), sub: T("Short summary and a “needs reply” flag for each new e-mail", "Her yeni e-posta için kısa özet ve “yanıt bekliyor” işareti"), wrap: true, toggle: MX.triage !== false, onToggle: function (on) { mset("triage", on); } }),
         row({ icon: "image", label: T("Look at pictures in mail", "Postadaki resimlere bak"), sub: T("Uses the vision model", "Görsel modeli kullanır"), toggle: MX.vision !== false, onToggle: function (on) { mset("vision", on); } }),
+        row({ icon: "images", label: T("Always show pictures in e-mail", "E-postalardaki resimleri her zaman göster"), sub: T("Off: pictures from the internet stay blocked until you tap “Show pictures”", "Kapalı: internetteki resimler “Resimleri göster”e dokunana kadar engelli kalır"), wrap: true, toggle: !!MX.images, onToggle: function (on) { mset("images", on); S.mail.images = on; } }),
         row({ icon: "sun", label: T("Daily plan", "Günlük plan"), sub: T("Once a day, after this time", "Günde bir kez, bu saatten sonra"), value: brief || T("Off", "Kapalı"), onclick: function () {
           optionsSheet(T("Daily plan", "Günlük plan"), [["", T("Off", "Kapalı")], ["07:30", "07:30"], ["08:00", "08:00"], ["08:30", "08:30"], ["09:00", "09:00"], ["custom", T("Other time…", "Başka saat…")]], brief, function (v) {
             if (v === "custom") editSheet({ title: T("Daily plan time", "Günlük plan saati"), type: "time", value: brief || "08:00", save: function (x) { mset("briefAt", x); } });
@@ -2202,7 +3399,9 @@
   }
   function gatesLogSheet() {
     var box = h("div", null, loading());
-    sheet({ title: T("Decision log", "Karar günlüğü"), body: box, actions: [[T("Close", "Kapat")]] });
+    sheet({ title: T("Decision log", "Karar günlüğü"), body: box, actions: [[T("Close", "Kapat")], [T("Clear log", "Günlüğü temizle"), "", function () {
+      call("gates.clearLog").then(function () { toast(T("Decision log cleared", "Karar günlüğü temizlendi")); gatesLogSheet(); }).catch(function (e) { toast(e.message); });
+    }]] });
     call("gates.log", { limit: 60 }).then(function (r) {
       clear(box);
       var st = (r && r.stats) || {}, log = (r && r.log) || [], labels = {};
@@ -2283,7 +3482,7 @@
     ta.addEventListener("input", function () { autosize(); syncSend(); updateHints(); });
     app.appendChild(h("div", { class: "bar" },
       h("button", { class: "ib", "aria-label": T("Chats", "Sohbetler"), onclick: openDrawer }, icon("menu")),
-      h("div", { class: "title", id: "ctitle" }, "yaver"),
+      h("div", { class: "title", id: "ctitle", onclick: function () { if (window.YVP) YVP.titleTap(); } }, "yaver"),
       h("button", { class: "ctxm hidden", id: "ctxm", onclick: ctxSheet }),
       h("button", { class: "ib", "aria-label": T("Mail", "Posta"), onclick: openMailPage }, icon("mail")),
       h("button", { class: "ib", "aria-label": T("New chat", "Yeni sohbet"), onclick: function () { newChat(true); } }, icon("square-pen")),
@@ -2292,6 +3491,7 @@
     app.appendChild(h("div", { id: "scroll" }, h("div", { class: "thread", id: "thread" })));
     app.appendChild(h("div", { class: "composer" }, h("div", { class: "hints hidden", id: "hints", role: "listbox" }), h("div", { class: "cbox" },
       h("div", { class: "atts hidden", id: "atts" }),
+      h("div", { class: "cchips", id: "cchips" }),
       h("div", { class: "crow" },
         h("button", { class: "ib", "aria-label": T("Attach", "Ekle"), onclick: pick }, icon("paperclip")),
         ta,
@@ -2311,13 +3511,24 @@
       h("label", { class: "dsearch" }, icon("search", "xs"), ds),
       h("div", { class: "dlist" }),
       h("div", { class: "dnav" },
-        h("button", { onclick: openMailPage }, icon("mail"), T("Mail", "Posta")),
-        h("button", { onclick: function () { closeDrawer(); S.mail.tab = "cal"; openMailPage(); } }, icon("calendar"), T("Calendar", "Takvim")),
+        h("button", { onclick: function () { openMailPage("mail"); } }, icon("mail"), T("Mail", "Posta")),
+        h("button", { onclick: function () { openMailPage("cal"); } }, icon("calendar"), T("Calendar", "Takvim")),
         h("button", { onclick: function () { closeDrawer(); openTasks(); } }, h("span", { class: "nb" }, icon("square-kanban"), h("i", { class: "badge hidden", id: "odbadge" })), T("Tasks", "Görevler")),
         h("button", { onclick: function () { closeDrawer(); openKnowledge(); } }, icon("brain"), T("Memory", "Hafıza")),
+        h("button", { onclick: function () { openFiles(); } }, icon("folder"), T("Files", "Dosyalar")),
         h("button", { onclick: function () { openSettings(); } }, icon("settings"), T("Settings", "Ayarlar")))));
     renderAtts(); syncSend(); renderThread(); refreshOverdue();
+    if (window.YVP) YVP.shell();
   }
+
+  /* ------------------------------------------------------------ internals for parity.js */
+  window.YVI = { S: S, call: call, h: h, icon: icon, T: T, $: $, clear: clear, toast: toast, sheet: sheet, editSheet: editSheet, optionsSheet: optionsSheet, md: md,
+    pushPage: pushPage, popPage: popPage, topPage: topPage, closeAllPages: closeAllPages, renderThread: renderThread, loadConvo: loadConvo, refreshState: refreshState, setCfg: setCfg,
+    row: row, group: group, openSettings: openSettings, openMailPage: openMailPage, openTasks: openTasks, openKnowledge: openKnowledge, openFiles: openFiles, previewFile: previewFile,
+    newChat: newChat, runCommand: runCommand, send: send, renderAtts: renderAtts, autosize: autosize, syncSend: syncSend, addSide: addSide, refreshConvos: refreshConvos,
+    COMMANDS: COMMANDS, pickModel: pickModel, editFile: typeof editFile === "function" ? editFile : null, timeOf: timeOf, bytes: bytes, wsUrl: wsUrl, kbChanged: kbChanged,
+    renderSettings: renderSettings, renderShell: renderShell, closeDrawer: closeDrawer, openDrawer: openDrawer, stop: stop,
+    chatMenu: chatMenu, ctxSheet: ctxSheet, openSchedule: openSchedule, openSetup: openSetup, openMail: openMail, composeSheet: composeSheet, newTaskSheet: newTaskSheet, taskSheet: taskSheet, peopleSheet: peopleSheet, gatesLogSheet: gatesLogSheet, eventSheet: eventSheet, onEvent: function (t, d) { onEvent(t, d); }, renderPlanBar: renderPlanBar, sheets: sheets };
 
   /* ------------------------------------------------------------ start */
   function start() {

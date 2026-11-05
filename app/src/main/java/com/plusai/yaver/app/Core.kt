@@ -53,6 +53,7 @@ class YaverApp : Application() {
         try { MailKeepAlive.arm(this) } catch (e: Throwable) { Diag.e("app", "keepalive", e) }
         try { Learn.start() } catch (e: Throwable) { Diag.e("app", "learn", e) }
         try { Folders.init() } catch (e: Throwable) { Diag.e("app", "folders", e) }
+        try { SkillsUi.seed() } catch (e: Throwable) { Diag.e("app", "seed skill", e) }
     }
 }
 
@@ -70,7 +71,8 @@ object Y {
     fun ui(f: () -> Unit) { if (Looper.myLooper() == Looper.getMainLooper()) f() else main.post(f) }
     fun bg(f: () -> Unit) { io.execute { try { f() } catch (e: Throwable) { android.util.Log.e("yaver", "bg", e) } } }
 
-    val tr: Boolean get() = Cfg.lang == "tr" || (Cfg.lang == "auto" && java.util.Locale.getDefault().language == "tr")
+    /** The interface language: Settings → Interface language when set (P3-9), else the answer language setting. */
+    val tr: Boolean get() { val u = Prefs.get("cfg.uiLang", ""); if (u == "tr" || u == "en") return u == "tr"; return Cfg.lang == "tr" || (Cfg.lang == "auto" && java.util.Locale.getDefault().language == "tr") }
     fun t(en: String, tr: String) = if (this.tr) tr else en
 
     fun dark(c: Context) = (c.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
@@ -93,6 +95,8 @@ object Prefs {
     fun on(k: String, d: Boolean): Boolean { val v = get(k, ""); return if (v.isEmpty()) d else v == "1" }
     fun set(k: String, b: Boolean) = put(k, if (b) "1" else "0")
     fun int(k: String, d: Int): Int = get(k, "").toIntOrNull() ?: d
+    /** Every stored string (for the state export). */
+    fun all(): Map<String, String> = (sp?.all ?: emptyMap<String, Any?>()).mapNotNull { (k, v) -> if (v is String) k to v else null }.toMap()
 }
 
 /** Secrets (API keys, mail password) are encrypted with a key that never leaves the phone's keystore. */

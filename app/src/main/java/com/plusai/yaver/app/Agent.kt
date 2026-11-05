@@ -25,7 +25,9 @@ class ToolCtx(val convo: Convo, val cancel: Cancel, val background: Boolean, val
     /** Why the last approval was refused by a gate (used by [denied]). */
     @Volatile var lastDenial: String? = null
 
-    fun progress(s: String) { listener?.onProgress(s) }
+    /** Progress lines of the tool that runs now (kept on its tool message: the tool card's Progress log). */
+    @Volatile var toolLog: MutableList<String>? = null
+    fun progress(s: String) { toolLog?.let { l -> synchronized(l) { if (l.size < 200) l.add(s.replace(Regex("\\s+"), " ").trim().take(240)) } }; listener?.onProgress(s) }
     fun note(s: String) { listener?.onNote(s) }
 
     /**
@@ -36,13 +38,19 @@ class ToolCtx(val convo: Convo, val cancel: Cancel, val background: Boolean, val
     fun approve(title: String, details: List<Pair<String, String?>>, always: Boolean = false, danger: Boolean = false): Boolean {
         lastDenial = null
         val text = details.filter { !it.second.isNullOrBlank() }.joinToString("\n") { "${it.first}: ${it.second}" }
-        if (!always && !Cfg.askRisky) {
+        // permission presets (Permissions.kt): full = no approvals; readonly = nothing changes; ask = the user already
+        // confirmed this tool call before it ran (Agent.preApproved), so the tool's own question is not asked twice
+        val perm = Permissions.mode
+        if (!always && perm == "full") { Diag.i("permissions", "full auto: $title"); return true }
+        if (perm == "readonly") { lastDenial = "permissions are set to read-only ($title). Tell the user what you would change instead."; return false }
+        if (!always && perm == "ask" && Agent.preApproved.get() == true) return true
+        if (!always && perm == "auto") {
             val tool = Agent.currentTool.get() ?: "action"
             val args = Agent.currentArgs.get() ?: JSONObject()
             // a failing safety check must not wave the action through: the user decides
             val g = try { Gates.approval(tool, args, title, userText, cancel) } catch (e: CancelledException) { throw e } catch (e: Throwable) { Diag.e("gates", "approval check failed", e); ApprovalOutcome("ask") }
             g.note?.let { note(it); Diag.i("gates", it) }
-            if (g.chips.isNotEmpty()) note(g.chips.joinToString(" · ") { it.second })
+            if (g.chips.isNotEmpty()) note("S1 · " + g.chips.joinToString(" · ") { it.second })
             if (g.ok) return true
             if (!g.askUser) { lastDenial = g.why; Diag.i("gates", "approval denied: ${g.why}"); return false }
             if (background || listener == null) { lastDenial = "needs the user's confirmation ($title)"; return false }
@@ -74,6 +82,21 @@ object Agent {
     /** Tool being run on this thread (for the smart-approval gate inside ToolCtx.approve). */
     val currentTool = ThreadLocal<String?>()
     val currentArgs = ThreadLocal<JSONObject?>()
+    /** The user confirmed the running tool call under the "ask" preset (its own approval question is then skipped). */
+    val preApproved = ThreadLocal<Boolean?>()
+
+    /** Permission preset before a tool runs (the original's execTool): null = run it, else the result to return instead. */
+    private fun permissionGate(ctx: ToolCtx, name: String, args: JSONObject): String? {
+        return when (val d = Permissions.decide(Permissions.mode, name, args)) {
+            is Permissions.Decision.Run -> null
+            is Permissions.Decision.Refuse -> { ctx.note("🛡 " + Y.t("read-only: $name not run", "salt okunur: $name çalıştırılmadı")); d.message }
+            is Permissions.Decision.Ask -> {
+                if (ctx.background || ctx.listener == null) return "Not executed: permissions are set to \"ask first\" and nobody is there to confirm ($name). Tell the user what you would do."
+                if (ctx.listener.approve(d.title, d.details, false)) { preApproved.set(true); null }
+                else "Not executed: the user denied this action."
+            }
+        }
+    }
 
     fun defaultPersona() = Prompt.DEFAULT_SOUL
 
@@ -102,6 +125,7 @@ object Agent {
         m.getOrPut("web") { LinkedHashSet() }.addAll(listOf("web_extract", "download_file", "page_images"))
         m.getOrPut("browser") { LinkedHashSet() }.addAll(listOf("browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_back", "browser_find", "browser_download"))
         m.getOrPut("memory") { LinkedHashSet() }.add("session_search")
+        m.getOrPut("vision") { LinkedHashSet() }.add("vision_analyze")
         m.getOrPut("mail") { LinkedHashSet() }.add("task_board")
         m.getOrPut("planning") { LinkedHashSet() }.addAll(listOf("todo", "clarify", "goal", "present_plan", "present_files", "delegate_task", "subagents", "heartbeat", "harness"))
         return m
@@ -281,11 +305,15 @@ object Agent {
         val turn = GateTurn(userText, Lang.name(Lang.fixed() ?: c.lang))
         var final = ""
         val prevInfo = Llm.info.get()
+        val prevTrace = Trace.convo.get()
+        Trace.convo.set(c.id)
+        if (!isSub) Changes.begin(c.id)
         try {
             final = loop(c, ctx, st, turn, turnStart, isSub, noTools, model, toolsets, allowedTools, if (maxSteps > 0) maxSteps else Cfg.maxSteps, systemExtra, note, progress)
         } catch (e: CancelledException) {
             closeOpenCalls(c, Y.t("(not run: stopped by the user)", "(çalıştırılmadı: kullanıcı durdurdu)"))
             c.messages.put(JSONObject().put("role", "assistant").put("content", Y.t("⏹ Stopped.", "⏹ Durduruldu.")).put("local", true))
+            if (!isSub) attachChanges(c)
             Convos.save(c)
             if (!isSub) try { Planning.onStopped(c) } catch (_: Throwable) {}
             Convos.end(c)
@@ -295,18 +323,31 @@ object Agent {
             closeOpenCalls(c, "(not run: error)")
             val msg = "⚠️ " + (e.message ?: e.toString())
             c.messages.put(JSONObject().put("role", "assistant").put("content", msg).put("local", true).put("error", true))
+            if (!isSub) attachChanges(c)
             Convos.save(c)
             if (!isSub && !isInternal && !background) try { Harness.checkpoint(c) } catch (_: Throwable) {}
             Convos.end(c)
             throw e
         } finally {
             Llm.info.set(prevInfo); Llm.onRetry.set(null)   // pooled worker threads must not keep this turn's listener
+            Trace.convo.set(prevTrace)
         }
         try {
+            if (!isSub) attachChanges(c)
             Convos.save(c)
             if (!isSub) afterTurn(c, turnStart, text, userText, isInternal, internal, background, cancel, learnSnap)
         } finally { Convos.end(c) }
         return final
+    }
+
+    /** The "N files changed" card of a turn (Changes.kt): kept on the turn's last assistant message. */
+    private fun attachChanges(c: Convo) {
+        val ch = Changes.end(c.id) ?: return
+        for (i in c.messages.length() - 1 downTo 0) {
+            val m = c.messages.optJSONObject(i) ?: continue
+            if (m.optString("role") == "assistant") { m.put("changes", ch); break }
+        }
+        Diag.i("changes", "${c.id}: ${ch.optJSONArray("files")?.length() ?: 0} files changed (+${ch.optInt("add")} −${ch.optInt("del")})")
     }
 
     /** Lessons (Learn.snap "h:" keys) + memory notes (MemoryX), for the "Memory: +1 learned" chip. */
@@ -546,10 +587,13 @@ object Agent {
         val all = Tools.schemas(isSub)
         for (t in calls) {
             ctx.cancel.check()
+            val t0 = System.currentTimeMillis()
             val parsed = LoopUtil.jsonTry(t.args.ifEmpty { "{}" })
             listener?.onToolStart(t.name, parsed as? JSONObject ?: JSONObject().put("_raw", clip(t.args, 300)))
             Diag.i("tool", "${t.name} " + clip(t.args, 300))
             val tool = Tools.get(t.name)
+            val plog = java.util.Collections.synchronizedList(ArrayList<String>())
+            ctx.toolLog = plog
             var ok = true
             var result: String = if (tool == null) LoopUtil.unknownToolError(t.name, sentNames) else {
                 val (args, err) = LoopUtil.checkCall(t.name, t.args, LoopUtil.paramsOf(all, t.name) ?: JSONObject(), st)
@@ -558,7 +602,7 @@ object Agent {
                     noTools || (allowed != null && t.name !in allowed) || (isSub && !tool.subagentOk) -> "Error: tool ${t.name} is not enabled for this turn."
                     else -> {
                         if (t.name !in sentNames) members.entries.firstOrNull { t.name in it.value }?.key?.let { ts -> enableToolset(ts); note(Y.t("+tools: $ts · enabled on demand", "+araçlar: $ts · ihtiyaç olunca açıldı")) }
-                        val gate = Planning.gate(c, t.name, args!!)
+                        val gate = Planning.gate(c, t.name, args!!) ?: permissionGate(ctx, t.name, args)
                         if (gate != null) gate else try {
                             currentTool.set(t.name); currentArgs.set(args)
                             tool.run(Refs.expand(args), ctx)
@@ -567,13 +611,19 @@ object Agent {
                         } catch (e: Throwable) {
                             Diag.e("tool", "${t.name} failed", e)
                             "Error: " + (e.message ?: e.toString())
-                        } finally { currentTool.set(null); currentArgs.set(null) }
+                        } finally { currentTool.set(null); currentArgs.set(null); preApproved.set(null) }
                     }
                 }
             }
             if (result.startsWith("Error") || result.startsWith("Not executed")) ok = false
             result = LoopUtil.finishResult(Refs.short(result), t.name, t.args, st)
-            c.messages.put(JSONObject().put("role", "tool").put("tool_call_id", t.id).put("name", t.name).put("content", result).put("ok", ok))
+            val ms = System.currentTimeMillis() - t0
+            try { Trace.tool(c.id, t.name, t.args, result, ok, ms, ctx.depth) } catch (_: Throwable) {}
+            ctx.toolLog = null
+            val tm = JSONObject().put("role", "tool").put("tool_call_id", t.id).put("name", t.name).put("content", result).put("ok", ok).put("ms", ms)
+            val lines = synchronized(plog) { plog.filter { it.isNotEmpty() }.distinct() }
+            if (lines.isNotEmpty()) tm.put("progress", JSONArray(if (lines.size > 40) lines.take(5) + listOf("…") + lines.takeLast(34) else lines))
+            c.messages.put(tm)
             Convos.save(c)
             listener?.onToolEnd(t.name, result, ok)
         }
@@ -603,7 +653,7 @@ object Agent {
     /** After a turn: System-1 (or every 10 turns) decides whether to save memories / skills; a small tool loop does it. */
     fun backgroundReview(c: Convo, turnStart: Int) {
         if (turnStart >= c.messages.length() || Cfg.model.isEmpty()) return
-        val d = Gates.review(c, turnStart) ?: run {
+        val d = Gates.review(c, turnStart, Parity.reviewFloor) ?: run {
             var n = 0
             ConvoState.edit(c.id) { s -> n = s.optInt("reviewCounter", 0) + 1; s.put("reviewCounter", n) }
             if (n % 10 != 0) { Diag.i("review", "background review: turn $n — runs every 10th turn (System-1 off)"); return }

@@ -4,7 +4,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-/** Skills: reusable procedures stored as skills/<name>/SKILL.md (with --- name/description --- frontmatter) plus supporting files. */
+/**
+ * Skills: reusable procedures stored as /.yaver/skills/<name>/SKILL.md (with --- name/description --- frontmatter) plus
+ * supporting files (scripts/, templates/, references/ …). The folder is part of the virtual disk (VPath), so a skill's
+ * scripts run from their paths with execute_code or the terminal, exactly as in the original.
+ */
 object Skills {
     const val GUIDANCE = "When you work out a non-trivial workflow, record it with skill_manage for future reuse. If a listed skill matches the task, load it with skill_view before starting."
 
@@ -53,7 +57,7 @@ object Skills {
 
     /** For a settings/skills screen. */
     fun listJson(): JSONArray = JSONArray(list().map {
-        JSONObject().put("name", it.name).put("dir", it.dir).put("description", it.description).put("files", JSONArray(it.files))
+        JSONObject().put("name", it.name).put("dir", it.dir).put("path", vdir(it)).put("description", it.description).put("files", JSONArray(it.files))
     })
 
     fun slug(name: String) = name.lowercase().replace(Regex("[^a-z0-9-]+"), "-").replace(Regex("^-|-$"), "")
@@ -64,11 +68,21 @@ object Skills {
         return f
     }
 
-    private fun shown(f: File) = "skills/" + f.canonicalPath.removePrefix(root.canonicalPath).trimStart('/')
+    private fun shown(f: File) = VPath.SKILLS + "/" + f.canonicalPath.removePrefix(root.canonicalPath).trimStart('/')
+
+    /** The virtual folder of a skill. */
+    fun vdir(s: Skill) = VPath.SKILLS + "/" + s.dir
+
+    /** What skill_view adds after SKILL.md: where the skill lives and its files, as paths the other tools take. */
+    fun footer(s: Skill): String {
+        val others = s.files.filter { it != "SKILL.md" }
+        return "\n\n---\n[Skill folder: ${vdir(s)}/" + (if (others.isNotEmpty()) " — files: " + others.take(60).joinToString(", ") { "${vdir(s)}/$it" } + (if (others.size > 60) " … (${others.size} files)" else "") else "") +
+            ". These are real paths on the disk: read them with read_file, run scripts with execute_code (Python: exec(open(path).read()); JavaScript: fs.readFile(path)) or the terminal (python ${vdir(s)}/scripts/x.py, node …, cp, zip), and write results to /workspace.]"
+    }
 
     fun register() {
         Tools.add(Tool("skills_list", "List skills with descriptions.", P.props(), emptyList()) { _, _ ->
-            list().joinToString("\n") { "- ${it.name}: ${it.description} (${it.files.size} files)" }.ifEmpty { "(no skills yet)" }
+            list().joinToString("\n") { "- ${it.name}: ${it.description} (${vdir(it)}/, ${it.files.size} files)" }.ifEmpty { "(no skills yet)" }
         })
 
         Tools.add(Tool(
@@ -76,9 +90,12 @@ object Skills {
             P.props("name" to P.s("Skill name"), "file" to P.s("Optional file inside the skill, e.g. references/x.md")), listOf("name")
         ) { a, _ ->
             val s = get(a.str("name"))
-            val f = if (a.str("file").isNotEmpty()) inside(s.file.parentFile!!, a.str("file")) else s.file
-            if (!f.isFile) throw IllegalArgumentException("not found: ${a.str("file")}")
-            f.readText()
+            val rel = a.str("file").removePrefix(vdir(s) + "/").removePrefix("skills/${s.dir}/")
+            val f = if (rel.isNotEmpty()) inside(s.file.parentFile!!, rel) else s.file
+            if (!f.isFile) throw IllegalArgumentException("not found: ${a.str("file")} (files of ${s.name}: ${s.files.joinToString(", ")})")
+            if (rel.isEmpty()) f.readText() + footer(s)
+            else if (Workspace.isText(f)) f.readText()
+            else "${shown(f)} is a binary file (${Workspace.fmtBytes(f.length())}) — use it by its path, e.g. in execute_code or the terminal."
         })
 
         Tools.add(Tool(
@@ -116,7 +133,7 @@ object Skills {
                     if (a.str("file").isEmpty()) throw IllegalArgumentException("file required")
                     dir.mkdirs()
                     val f = inside(dir, a.str("file"))
-                    f.parentFile?.mkdirs(); f.writeText(a.optString("content", ""))
+                    f.parentFile?.mkdirs(); f.writeText(a.optString("content", "")); onChange?.invoke()
                     "Wrote ${shown(f)}"
                 }
                 "delete" -> {
