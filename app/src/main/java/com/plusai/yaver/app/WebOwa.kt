@@ -43,7 +43,7 @@ object WebOwa {
         ready = latch
         Y.main.post {
             try {
-                view?.destroy()
+                view?.destroy(); view = null   // a failed start must not leave the destroyed view in place
                 val v = WebView(Y.app)
                 v.settings.javaScriptEnabled = true
                 v.settings.domStorageEnabled = true

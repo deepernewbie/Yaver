@@ -1,3 +1,54 @@
+# yaver 5.0
+
+## Yeni
+- **"Bugün" kartı:** yeni sohbet ekranında şunlar toplu görünür. Kart katlanabilir ve 5 dakikada bir tazelenir.
+  - sıradaki toplantılar (dokununca açılır)
+  - yanıt bekleyen e-postalar (dokununca açılır)
+  - okunmamış sayısı
+  - vadesi gelen görevler
+  - sıradaki alarm
+  - tek dokunuşla "Günü özetle"
+- **Ana ekran widget'ı:** sıradaki toplantı, okunmamış ve yanıt bekleyen sayısı, "Sor" düğmesi (klavye açık gelir) ve mikrofon. Satırlara dokununca posta ya da takvim açılır.
+- **Ekrandakini sor:** yaver varsayılan dijital asistan yapılınca, ana tuşa uzun basıldığında o an ekranda olanın metni ve ekran görüntüsü alınır. Sohbet "Ekran: <uygulama>" etiketiyle açılır, "Bu ne diyor?" gibi sorabilirsiniz.
+- **Yarıda kalan işe devam:** uygulama bir iş sırasında kapanırsa sohbet açıldığında "Önceki iş yarıda kaldı — Devam et" çıkar.
+- **Mesaja uzun basma:** kopyala, paylaş, sesli oku, tekrar sor, düzenleyip gönder.
+- **Hareketler:** soldan kaydırınca sohbet listesi açılır. Posta ve takvim aşağı çekilerek yenilenir.
+- **Paylaşımlar:** Chrome'dan paylaşılan başlık ve adres artık iki kez yazılmaz. Birden çok metin ve dosya, ayrıca bazı uygulamaların "clip" ile verdiği dosyalar da alınır.
+
+## Daha hızlı ve sağlam ajan
+- **Paralel okuma:** bir adımdaki salt okunur araç çağrıları (dosya ya da posta okuma, arama, web'den çekme) 4'e kadar aynı anda çalışır. Değişiklik yapan araçlar yine sırayla çalışır.
+- **Zayıf ve ücretsiz modellerin hatalarına dayanıklılık:**
+  - tekrarlanan çağrı kimlikleri artık kaybolmaz
+  - `functions.x` gibi bozuk araç adları ve kod bloğu içine yazılmış argümanlar düzeltilir
+  - metin olarak yazılmış `<tool_call>` blokları çalıştırılır
+  - toparlama çağrısı da hata verirse iş hata olarak bitmez, kısa bir özet kalır
+- **Hata türüne göre davranış:**
+  - 429 ya da 5xx hatasında beklenip yeniden denenir (3/8/20/40 sn, sunucunun "Retry-After" süresine uyulur) ve ekranda "model meşgul — N sn sonra yeniden" yazar.
+  - 401 ya da 403 hatası yeniden denenmez; sağlayıcının mesajı gösterilir.
+- **Durdur düğmesi:** paralel çalışan bütün ağ bağlantılarını keser.
+- **Testler:** ajan döngüsü 22 zor senaryoda (115 kontrol) sahte modelle uçtan uca test edildi.
+
+## Arayüz
+- 66 küçük dokunma alanı en az 40 piksele büyütüldü.
+- Dar ekranda kesilen başlık, tablo, kod düğmesi, takvim araç çubuğu ve posta araç çubuğu düzeltildi.
+- **Uzun sohbetler:** son 30 tur gösterilir, "Önceki mesajları göster" ile devamı gelir. 400 mesajlık sohbet 2–4 kat daha hızlı açılıyor; araç adımı başına güncelleme 117 ms'den 19 ms'ye indi.
+- 500 e-postalık liste bölümler hâlinde çizilir.
+
+## Güvenlik
+- Başka uygulamalar yaver'e komut çalıştıramaz: dışarıdan gelen istek yalnızca mesaj kutusuna yazılır.
+- Paylaşım yoluyla yaver'in kendi gizli dosyaları içeri alınamaz.
+- Asistan oturumu bir önceki ekranın verisini yeniden kullanmaz.
+
+## Telefonda yapılacaklar
+- **Ekrandakini sor için:** Ayarlar → Uygulamalar → Varsayılan uygulamalar → Dijital asistan uygulaması → yaver. Aynı ekranda "Ekrandaki metni kullan" ve "Ekran görüntüsünü kullan" seçeneklerini açın. İlk açılışta istenen mikrofon iznini verin, böylece diğer uygulamalarda sesle yazma çalışmaya devam eder.
+- **Widget için:** ana ekrana uzun basın → Widget'lar → yaver.
+
+# yaver 4.2
+
+- **Cevaplardaki e-postalar dokunulabilir bağlantı:** model e-postayı kısa kimliğiyle yazarsa (`m3k9x2ab`, "(id: …)" ya da kod içinde), kimlik yerine e-postanın konusu ve göndereni gösterilir. Dokununca e-posta açılır. Cümlede konu zaten geçiyorsa bağlantı yalnızca "E-postayı aç" der. Yalnızca gerçek e-posta kimlikleri bağlantıya dönüşür; "mesajlar" gibi kelimelere dokunulmaz.
+- Modele de e-postaları kimlik yerine `[Konu — Gönderen](mail:…)` bağlantısı olarak yazması söylendi.
+- **Cevaplardaki dosyalar da dokunulabilir bağlantı:** `/workspace/...` yolları, `ornek-rapor.docx` gibi yalın dosya adları, `uploads/x.m4a` gibi göreli yollar ve kod içinde yazılan adlar (boşluklu olanlar dahil) dosya simgesi ve adıyla gösterilir. Dokununca önizleme açılır. Yalın ad, dosya çalışma alanında gerçekten varsa bağlantıya dönüşür (alt klasörlerde de aranır). Dosyaya verilen Markdown bağlantıları kendi metinleriyle aynı görünümü alır.
+
 # yaver 4.1: yenilikler (4.0'dan bu yana)
 
 ## Ses ve video

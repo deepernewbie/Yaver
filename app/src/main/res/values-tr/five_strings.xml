@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="five_widget_label">yaver · Bugün</string>
+    <string name="five_widget_desc">Sıradaki toplantı, okunmamış ve yanıt bekleyen postalar, hızlı Sor düğmesi</string>
+    <string name="five_widget_loading">Gününüz yükleniyor…</string>
+    <string name="five_widget_ask">Sor</string>
+    <string name="five_widget_voice">Sesle sor</string>
+    <string name="five_assist_label">yaver</string>
+</resources>

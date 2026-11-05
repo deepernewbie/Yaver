@@ -1,6 +1,7 @@
 package com.plusai.yaver.app
 
 import android.Manifest
+import android.widget.Toast
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.NotificationManager
@@ -97,6 +98,7 @@ class MainActivity : Activity() {
         // live memory: pick up what another phone learned (at most once a minute)
         if (System.currentTimeMillis() - lastSyncCheck > 60_000L) { lastSyncCheck = System.currentTimeMillis(); Y.bg { try { if (OSync.on() && Mail.connected) OSync.check() } catch (e: Throwable) { Diag.e("osync", "resume check", e) } } }
         PermGate.activity = this
+        askMicIfAssistant()
         Bridge.emit("resume", Bridge.state())
         Learn.touch()
         try { Folders.onForeground() } catch (e: Throwable) { Diag.e("folders", "foreground", e) }
@@ -266,6 +268,24 @@ class MainActivity : Activity() {
         Bridge.emit("resume", Bridge.state())
     }
 
+    /**
+     * Choosing yaver as the digital assistant also makes it the phone's voice-input service (FiveRecognitionService
+     * hands speech on to Google's/Samsung's recogniser). That hand-over needs the microphone permission, otherwise
+     * other apps' voice typing fails: ask once, as soon as yaver is the assistant.
+     */
+    private fun askMicIfAssistant() {
+        try {
+            val asst = android.provider.Settings.Secure.getString(contentResolver, "assistant") ?: ""
+            val voice = android.provider.Settings.Secure.getString(contentResolver, "voice_recognition_service") ?: ""
+            val mine = asst.startsWith("$packageName/") || voice.startsWith("$packageName/")
+            if (mine && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED && !Prefs.on("askedMicAssist", false)) {
+                Prefs.set("askedMicAssist", true)
+                Toast.makeText(this, Y.t("yaver is now your assistant: allow the microphone so voice typing keeps working in other apps", "yaver artık asistanınız: diğer uygulamalarda sesle yazmanın çalışması için mikrofona izin verin"), Toast.LENGTH_LONG).show()
+                requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 46)
+            }
+        } catch (e: Throwable) { Diag.e("assist", "mic check", e) }
+    }
+
     private fun askNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !Prefs.on("askedNotif", false)) {
             Prefs.set("askedNotif", true)
@@ -294,19 +314,33 @@ class MainActivity : Activity() {
         if (nid > 0) getSystemService(NotificationManager::class.java)?.cancel(nid)
         val action = i.getStringExtra(Keys.ACTION)
         val payload = i.getStringExtra(Keys.PAYLOAD)
-        val o = JSONObject()
+        var o = JSONObject()
         when {
             i.action == Intent.ACTION_ASSIST || i.action == "android.intent.action.VOICE_COMMAND" || i.action == Intent.ACTION_SEARCH_LONG_PRESS ->
                 o.put("action", if (Prefs.on("voiceOnAssist", false)) "voice" else "assist")
             i.action == Intent.ACTION_SEND || i.action == Intent.ACTION_SEND_MULTIPLE -> {
                 o.put("action", "share")
-                o.put("text", listOfNotNull(i.getStringExtra(Intent.EXTRA_SUBJECT), i.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()).joinToString("\n").trim())
+                // Chrome: EXTRA_SUBJECT = page title, EXTRA_TEXT = URL; SEND_MULTIPLE may carry a list of texts
+                val texts = ArrayList<String?>()
+                i.getCharSequenceExtra(Intent.EXTRA_TEXT)?.let { texts.add(it.toString()) }
+                if (i.action == Intent.ACTION_SEND_MULTIPLE) try { i.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)?.forEach { texts.add(it?.toString()) } } catch (_: Throwable) {}
+                o.put("text", FiveLogic.shareText(i.getStringExtra(Intent.EXTRA_SUBJECT), texts, i.getStringExtra(Intent.EXTRA_HTML_TEXT)))
                 val uris = ArrayList<Uri>()
                 if (i.action == Intent.ACTION_SEND_MULTIPLE) i.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let { uris.addAll(it) } else i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)?.let { uris.add(it) }
+                // some apps grant the files only through ClipData
+                i.clipData?.let { cd -> for (k in 0 until cd.itemCount) cd.getItemAt(k)?.uri?.let { if (it !in uris) uris.add(it) } }
                 if (uris.isNotEmpty()) {
+                    for (u in uris) try { contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: Throwable) {}  // only document URIs allow it
+                    i.removeExtra(Keys.ACTION); i.removeExtra(Keys.PAYLOAD)
                     Y.bg {
                         val arr = JSONArray()
-                        for (u in uris) try { val p = Workspace.importUri(this, u); arr.put(JSONObject().put("path", p).put("name", p.substringAfterLast('/')).put("image", Workspace.isImage(p))) } catch (_: Throwable) {}
+                        var failed = 0
+                        for (u in uris) try {
+                            val p = Workspace.importUri(this, u)
+                            arr.put(JSONObject().put("path", p).put("name", p.substringAfterLast('/')).put("image", Workspace.isImage(p)))
+                            Workspace.changed(Workspace.rel(Workspace.resolve(p)))
+                        } catch (e: Throwable) { failed++; Diag.e("share", "import $u", e) }
+                        if (failed > 0) U.toast(this, Y.t("$failed shared file(s) could not be read", "Paylaşılan $failed dosya okunamadı"))
                         o.put("files", arr)
                         Bridge.launch(o)
                     }
@@ -315,10 +349,24 @@ class MainActivity : Activity() {
             }
             i.action == Intent.ACTION_PROCESS_TEXT -> o.put("action", "share").put("text", i.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString() ?: "")
             action == "mail_login" -> { startActivity(Intent(this, MailLoginActivity::class.java)); return }
-            action != null && action != "open" -> { o.put("action", action); if (payload != null) o.put("text", payload) }
+            // yaver 5: widget rows → a page of the app; the assistant session → chat with the screen as context
+            action == "nav" -> { FiveLogic.launchFor(action, payload)?.let { o = it } }
+            action == "screen" && i.getStringExtra(Keys.TOKEN) != Keys.token() -> o.put("action", "assist")
+            action == "screen" -> {
+                val cap = FiveScreen.peek()
+                if (cap != null) o = FiveScreen.launchJson(cap) else o.put("action", "assist")
+                showKeyboard()
+            }
+            action != null && action != "open" -> {
+                // only yaver's own intents may run a prompt; from any other app the text just fills the composer
+                val trusted = i.getStringExtra(Keys.TOKEN) == Keys.token()
+                if (!trusted && action !in setOf("assist", "voice", "mail_login")) { Diag.i("intent", "untrusted '$action' from outside — composer only"); o.put("action", "share"); if (payload != null) o.put("text", payload) }
+                else { o.put("action", action); if (payload != null) o.put("text", payload) }
+            }
             else -> return
         }
-        i.removeExtra(Keys.ACTION); i.removeExtra(Keys.PAYLOAD)
+        if (o.optString("action") == "assist" && i.getBooleanExtra(FiveWidget.EXTRA_KEYBOARD, false)) showKeyboard()
+        i.removeExtra(Keys.ACTION); i.removeExtra(Keys.PAYLOAD); i.removeExtra(FiveWidget.EXTRA_KEYBOARD); i.removeExtra(Keys.TOKEN)
         Bridge.launch(o)
     }
 }

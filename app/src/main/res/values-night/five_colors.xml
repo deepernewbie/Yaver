@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="five_w_bg">#F21F2023</color>
+    <color name="five_w_text">#E8EAED</color>
+    <color name="five_w_text2">#9AA0A6</color>
+    <color name="five_w_accent">#A8C7FA</color>
+    <color name="five_w_on_accent">#062E6F</color>
+    <color name="five_w_chip">#2D3440</color>
+</resources>

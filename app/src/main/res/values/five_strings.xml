@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="five_widget_brand" translatable="false">yaver</string>
+    <string name="five_widget_label">yaver · Today</string>
+    <string name="five_widget_desc">Next meeting, unread mail and what needs a reply, with a quick Ask button</string>
+    <string name="five_widget_loading">Loading your day…</string>
+    <string name="five_widget_ask">Ask yaver</string>
+    <string name="five_widget_voice">Ask by voice</string>
+    <string name="five_assist_label">yaver</string>
+</resources>

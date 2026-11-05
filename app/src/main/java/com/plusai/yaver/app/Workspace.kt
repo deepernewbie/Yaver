@@ -83,6 +83,10 @@ object Workspace {
 
     /** Copies a picked or shared file into the workspace (uploads/, or [dirName]: a workspace folder or any writable folder of the disk such as "/.yaver/skills/x"). Returns its path ("/workspace/uploads/a.pdf"). */
     fun importUri(c: Context, uri: Uri, dirName: String = "uploads"): String {
+        // only files other apps hand over (content://): never file:// paths, never yaver's own provider —
+        // a crafted share must not copy the app's private files (settings, passwords) into the workspace
+        if (uri.scheme != "content") throw SecurityException("only content:// files can be imported (got ${uri.scheme})")
+        if (uri.authority?.startsWith(c.packageName) == true) throw SecurityException("yaver's own files cannot be imported")
         var name = "file"
         try {
             c.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cur ->

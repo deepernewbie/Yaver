@@ -70,7 +70,7 @@ class AgentService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun pi(action: String, code: Int): PendingIntent = PendingIntent.getActivity(
-        this, code, Intent(this, MainActivity::class.java).putExtra(Keys.ACTION, action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        this, code, Intent(this, MainActivity::class.java).putExtra(Keys.TOKEN, Keys.token()).putExtra(Keys.ACTION, action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
@@ -114,6 +114,8 @@ class AgentService : Service() {
             t.scheduleWithFixedDelay({
                 try { MailWatch.check(this) } catch (e: Throwable) { android.util.Log.w("yaver", "mail check: $e") }
                 try { MailPlus.onMailCheck(this) } catch (e: Throwable) { Diag.e("mailx", "background check", e) }
+                // yaver 5: keep the today brief (and the home-screen widget) fresh while widgets are placed
+                try { if (FiveWidget.hasWidgets(this)) FiveBrief.refreshIfStale() } catch (e: Throwable) { Diag.e("brief", "background", e) }
             }, 20, maxOf(1, Cfg.mailPoll).toLong() * 60, TimeUnit.SECONDS)
         }
         return if (Prefs.on("alwaysOn", true)) START_STICKY else START_NOT_STICKY
@@ -171,7 +173,7 @@ class YaverTileService : TileService() {
     override fun onClick() {
         super.onClick()
         Y.init(this)
-        val i = Intent(this, MainActivity::class.java).putExtra(Keys.ACTION, if (Prefs.on("tileVoice", true)) "voice" else "assist")
+        val i = Intent(this, MainActivity::class.java).putExtra(Keys.TOKEN, Keys.token()).putExtra(Keys.ACTION, if (Prefs.on("tileVoice", true)) "voice" else "assist")
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         if (Build.VERSION.SDK_INT >= 34) startActivityAndCollapse(PendingIntent.getActivity(this, 201, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
         else startActivityAndCollapse(i)
@@ -189,7 +191,7 @@ object MailActions {
 
     private fun open(c: Context, action: String, payload: String, nid: Int, req: Int): PendingIntent {
         val i = Intent(c, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .putExtra(Keys.ACTION, action).putExtra(Keys.PAYLOAD, payload).putExtra(Keys.NOTIF_ID, nid)
+            .putExtra(Keys.TOKEN, Keys.token()).putExtra(Keys.ACTION, action).putExtra(Keys.PAYLOAD, payload).putExtra(Keys.NOTIF_ID, nid)
         return PendingIntent.getActivity(c, req, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 

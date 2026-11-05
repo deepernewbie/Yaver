@@ -83,6 +83,12 @@ object Keys {
     const val PAYLOAD = "yaver_payload"
     const val NOTIF_ID = "yaver_notif_id"
     const val CONVO = "yaver_convo"
+    /** Marks yaver's own intents (widget, notifications, tile, assistant): other apps may start the exported activity too. */
+    const val TOKEN = "yaver_token"
+    fun token(): String = Prefs.get("intentToken", "").ifEmpty {
+        val t = java.util.UUID.randomUUID().toString().replace("-", "")
+        Prefs.put("intentToken", t); t
+    }
 }
 
 /** Plain preferences ("1"/"0" for switches). */
@@ -169,7 +175,7 @@ object Notifier {
     fun intent(c: Context, action: String?, payload: String?, id: Int): PendingIntent {
         val i = Intent(c, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            putExtra(Keys.ACTION, action ?: "open")
+            putExtra(Keys.TOKEN, Keys.token()).putExtra(Keys.ACTION, action ?: "open")
             if (payload != null) putExtra(Keys.PAYLOAD, payload)
             putExtra(Keys.NOTIF_ID, id)
         }
@@ -201,7 +207,7 @@ object Shortcuts {
             fun mk(id: String, label: String, action: String, icon: Int): ShortcutInfo =
                 ShortcutInfo.Builder(c, id).setShortLabel(label).setLongLabel(label)
                     .setIcon(Icon.createWithResource("android", icon))
-                    .setIntent(Intent(c, MainActivity::class.java).setAction(Intent.ACTION_VIEW).putExtra(Keys.ACTION, action).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
+                    .setIntent(Intent(c, MainActivity::class.java).setAction(Intent.ACTION_VIEW).putExtra(Keys.TOKEN, Keys.token()).putExtra(Keys.ACTION, action).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
                     .build()
             sm.setDynamicShortcuts(
                 listOf(
@@ -220,12 +226,21 @@ object Shortcuts {
 /** Cancels a running request or agent turn. */
 class Cancel {
     @Volatile var cancelled = false
-    @Volatile var conn: java.net.HttpURLConnection? = null
+    /** The connections in flight: several at once when read-only tools run in parallel (the last 32 are kept). */
+    private val conns = ArrayDeque<java.net.HttpURLConnection>()
+    var conn: java.net.HttpURLConnection?
+        get() = synchronized(conns) { conns.lastOrNull() }
+        set(v) {
+            if (v == null) return
+            synchronized(conns) { conns.addLast(v); while (conns.size > 32) conns.removeFirst() }
+            if (cancelled) try { v.disconnect() } catch (_: Throwable) {}
+        }
     private val hooks = ArrayList<() -> Unit>()
     fun onCancel(f: () -> Unit) { synchronized(hooks) { hooks.add(f) } }
     fun cancel() {
         cancelled = true
-        try { conn?.disconnect() } catch (_: Throwable) {}
+        val open = synchronized(conns) { ArrayList(conns) }
+        for (c in open) try { c.disconnect() } catch (_: Throwable) {}
         val l = synchronized(hooks) { ArrayList(hooks) }
         for (h in l) try { h() } catch (_: Throwable) {}
     }

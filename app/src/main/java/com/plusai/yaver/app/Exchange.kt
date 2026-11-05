@@ -130,7 +130,7 @@ class EwsTransport(private val url: String, private val user: String, private va
  */
 class OwaTransport(private val origin: String, private val user: String, private val pass: String, private val web: Boolean = false) : MailTransport {
     override val label = "Outlook web ${URL(origin).host}" + if (web) " (web)" else ""
-    private val fix = HashMap<String, MutableSet<String>>()
+    private val fix = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()   // parallel mail reads share it
 
     private val host = URL(origin).host
     private fun ua() = mapOf("User-Agent" to Mail.ua)
@@ -270,7 +270,7 @@ class OwaTransport(private val origin: String, private val user: String, private
     }
 
     private fun send(root: Element, op: String, depth: Int, timeoutMs: Int, cancel: Cancel?, alt: Boolean = false): Document {
-        val f = fix.getOrPut(op) { HashSet() }
+        val f = fix.getOrPut(op) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
         val wrap = wrapFirst != alt
         val body = OwaJson.toJson(root, null, wrap) as JSONObject
         val hasRcpt = OwaJson.hasRecipients(body)

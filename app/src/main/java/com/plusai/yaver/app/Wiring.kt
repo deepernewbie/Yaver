@@ -93,7 +93,14 @@ object Wiring {
         Folders.listener = { type, data -> Bridge.emit(type, data); if (type == "folders.note") Diag.i("folders", data.optString("text")) }
 
         // ---- mail, tasks, Outlook backup
-        MailPlus.emit = { type, data -> Bridge.emit(type, data) }
+        MailPlus.emit = { type, data ->
+            Bridge.emit(type, data)
+            // yaver 5: the widget shows unread / needs-reply / task counts
+            if (type == "mail.triage" || type == "mail.changed" || type == "tasks") try { FiveWidget.updateSoon() } catch (_: Throwable) {}
+        }
+
+        // ---- yaver 5: resume interrupted runs (Agent.resumeInfo: harness)
+        FiveHooks.resumeInfo = { c -> Agent.resumeInfo(c) }
         OSync.skillsDir = { Skills.root }
         OSync.memMetaExport = { JSONObject(MemoryX.meta().toString()) }
         OSync.memMetaImport = { mm -> MemoryX.importMeta(mm.toString()) }

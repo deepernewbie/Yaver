@@ -54,6 +54,8 @@ object Convos {
 
     fun begin(c: Convo) { live[c.id] = c }
     fun end(c: Convo) { live.remove(c.id, c) }
+    /** A turn is working on this conversation right now (chat, scheduled task, sub-agent — whoever called [begin]). */
+    fun isLive(id: String) = live.containsKey(id)
 
     /** Copies what a stale copy may have changed (title, per-message feedback marks) into the live instance. */
     fun mergeInto(dst: Convo, src: Convo) {

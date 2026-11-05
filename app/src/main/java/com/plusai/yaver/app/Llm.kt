@@ -14,7 +14,7 @@ class LlmResult(
     val tokensOut: Int
 )
 
-class LlmException(msg: String, val status: Int = 0) : RuntimeException(msg)
+class LlmException(msg: String, val status: Int = 0, val retryAfter: Int = 0) : RuntimeException(msg)
 
 /** OpenAI-compatible chat completions (OpenRouter, OpenAI, Groq, Together, Ollama, LM Studio…), streaming and tool calls. */
 object Llm {
@@ -22,6 +22,12 @@ object Llm {
     val info = ThreadLocal<((Int, String, Int, Int) -> Unit)?>()
     /** Called before a call is sent again (network retry / overflow retry), so live text already shown is cleared. */
     val onRetry = ThreadLocal<(() -> Unit)?>()
+
+    /** Status lines for the running turn ("model busy — retrying in 8 s"); set by the agent loop. */
+    val retryNote = ThreadLocal<((String) -> Unit)?>()
+    /** Waits before retrying a rate-limited / failing call (the original: 3, 8, 20, 40 s). Test seam. */
+    @Volatile var retryWaitsMs: LongArray = longArrayOf(3000, 8000, 20000, 40000)
+    const val READ_TIMEOUT_MS = 180000
 
     /** The server accepts stream_options.include_usage (token counts while streaming); off after an HTTP 400. */
     @Volatile private var usageOk = true
@@ -99,12 +105,13 @@ object Llm {
         if (maxTokens > 0) body.put("max_tokens", maxTokens)
         if (effort != null && effortOk) { if (Cfg.llmBase.contains("openrouter")) body.put("reasoning", JSONObject().put("effort", effort)) else body.put("reasoning_effort", effort) }
         if (stream) { body.put("stream", true); if (usageOk) body.put("stream_options", JSONObject().put("include_usage", true)) }
-        val waits = intArrayOf(2, 5, 12, 25)
+        val waits = retryWaitsMs
         var attempt = 0
         var droppedUsage = false
         var lastErr: Throwable? = null
         while (true) {
             cancel?.check()
+            var wait: Long
             try {
                 val r = once(body, stream, onDelta, onThink, cancel)
                 if (droppedUsage) usageOk = false
@@ -113,7 +120,6 @@ object Llm {
                 lastErr = e
                 // a prompt that is too long is not fixed by dropping optional fields: hand it to the compactor right away
                 if (Compactor.isOverflow(e)) throw e
-                val retry = e.status == 0 || e.status == 408 || e.status == 429 || e.status >= 500
                 val msg = (e.message ?: "").lowercase()
                 if (e.status == 400 && body.has("stream_options")) { body.remove("stream_options"); droppedUsage = true; continue }
                 if ((e.status == 400 || e.status == 422) && (body.has("reasoning") || body.has("reasoning_effort"))) {
@@ -122,20 +128,73 @@ object Llm {
                     continue
                 }
                 if (e.status == 400 && body.has("tool_choice")) { body.remove("tool_choice"); toolChoiceOk = false; Diag.i("llm", "tool_choice not accepted — sent without it from now on"); continue }
-                if (!retry || attempt >= waits.size) throw e
+                // the original's classification: rate limits and temporary server / gateway errors are retried with growing
+                // waits (Retry-After honoured); anything else (400, 401, 402, 403, 404…) is not fixed by asking again
+                if (!retryable(e.status) || attempt >= waits.size) throw if (attempt > 0) LlmException(retriedMsg(e.message ?: "", attempt), e.status) else e
+                wait = maxOf(waits[attempt], if (e.retryAfter in 1..119) e.retryAfter * 1000L else 0L)
             } catch (e: CancelledException) {
                 throw e
             } catch (e: java.io.IOException) {
                 if (cancel?.cancelled == true) throw CancelledException()
                 lastErr = e
-                if (attempt >= waits.size) throw LlmException(Y.t("Network error talking to the model: ", "Modele bağlanırken ağ hatası: ") + (e.message ?: e.toString()))
+                val hung = e is java.net.SocketTimeoutException
+                val m = if (hung) Y.t("The model did not answer within ${READ_TIMEOUT_MS / 60000} minutes. Try again, or choose another model in Settings.", "Model ${READ_TIMEOUT_MS / 60000} dakika içinde cevap vermedi. Yeniden deneyin ya da Ayarlar'dan başka bir model seçin.")
+                    else Y.t("Network error talking to the model: ", "Modele bağlanırken ağ hatası: ") + (e.message ?: e.toString())
+                // a hung model is asked once more; a dropped connection up to the full retry schedule
+                if (attempt >= (if (hung) 1 else waits.size)) throw LlmException(if (attempt > 0) retriedMsg(m, attempt) else m)
+                wait = waits[attempt]
             }
-            val w = waits[attempt++]
-            var slept = 0
-            while (slept < w * 1000) { cancel?.check(); Thread.sleep(250); slept += 250 }
-            android.util.Log.w("yaver", "LLM retry $attempt after ${lastErr?.message}")
+            attempt++
+            val why = lastErr.let { if (it is LlmException) (if (it.status == 429) "rate limit (429)" else "server error ${it.status}") else "network error" }
+            Diag.i("llm", "retry $attempt/${waits.size} in ${wait} ms after $why: ${clip(lastErr?.message ?: "", 160)}")
+            try { retryNote.get()?.invoke(Y.t("model busy ($why) — retrying in ${(wait + 999) / 1000} s ($attempt/${waits.size})", "model meşgul ($why) — ${(wait + 999) / 1000} sn sonra yeniden deneniyor ($attempt/${waits.size})")) } catch (_: Throwable) {}
+            var slept = 0L
+            while (slept < wait) { cancel?.check(); val d = minOf(100L, wait - slept); Thread.sleep(d); slept += d }
             try { onRetry.get()?.invoke() } catch (_: Throwable) {}
         }
+    }
+
+    private fun retryable(status: Int) = status == 0 || status == 408 || status == 409 || status == 425 || status == 429 || status >= 500
+    private fun retriedMsg(m: String, n: Int) = "$m " + Y.t("(after $n retr${if (n == 1) "y" else "ies"})", "($n yeniden denemeden sonra)")
+
+    /** POST /chat/completions; returns (status, body when not streamed or on error, Retry-After seconds). */
+    private class Resp(val code: Int, val raw: String, val retryAfter: Int)
+
+    private fun post(body: ByteArray, cancel: Cancel?, onLine: (String) -> Unit): Resp {
+        val c = java.net.URL(Cfg.llmBase + "/chat/completions").openConnection() as java.net.HttpURLConnection
+        cancel?.conn = c
+        try {
+            c.instanceFollowRedirects = false
+            c.connectTimeout = 30000
+            // no answer (headers) or no data at all for this long: the model or gateway hung
+            c.readTimeout = READ_TIMEOUT_MS
+            c.useCaches = false
+            c.requestMethod = "POST"
+            for ((k, v) in headers()) c.setRequestProperty(k, v)
+            c.setRequestProperty("User-Agent", Http.UA)
+            c.doOutput = true
+            c.setFixedLengthStreamingMode(body.size)
+            c.outputStream.use { it.write(body) }
+            val code = c.responseCode
+            // Retry-After (seconds); OpenRouter also sends X-RateLimit-Reset (epoch milliseconds)
+            val ra = c.getHeaderField("Retry-After")?.trim()?.toIntOrNull()
+                ?: c.getHeaderField("X-RateLimit-Reset")?.trim()?.toLongOrNull()?.let { ((it - System.currentTimeMillis()) / 1000).toInt().coerceAtLeast(0) } ?: 0
+            if (code !in 200..299) {
+                val err = try { String(Http.readAll(c.errorStream, 200000, cancel), Charsets.UTF_8) } catch (e: java.io.IOException) { "" }
+                // some stacks swallow the body of a 401: the status line still says what happened
+                return Resp(code, err.ifBlank { (c.responseMessage ?: "").ifBlank { if (code == 401) "unauthorized — check the API key in Settings" else "" } }, ra)
+            }
+            val ct = c.contentType ?: ""
+            c.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
+                if (!ct.contains("event-stream")) return Resp(code, r.readText(), 0)
+                while (true) {
+                    cancel?.check()
+                    val line = r.readLine() ?: break
+                    onLine(line)
+                }
+            }
+            return Resp(code, "", 0)
+        } finally { try { c.disconnect() } catch (_: Throwable) {} }
     }
 
     private fun once(body: JSONObject, stream: Boolean, onDelta: ((String) -> Unit)?, onThink: ((String) -> Unit)?, cancel: Cancel?): LlmResult {
@@ -147,17 +206,17 @@ object Llm {
         var tin = 0
         var tout = 0
         var streamErr: String? = null
-        val (code, raw) = Http.streamLines(Cfg.llmBase + "/chat/completions", headers(), body.toString().toByteArray(), cancel) { line ->
-            if (!line.startsWith("data:")) return@streamLines
+        val resp = post(body.toString().toByteArray(), cancel) { line ->
+            if (!line.startsWith("data:")) return@post
             val d = line.substring(5).trim()
-            if (d == "[DONE]") { done = true; return@streamLines }
-            if (d.isEmpty()) return@streamLines
-            val j = try { JSONObject(d) } catch (e: Exception) { return@streamLines }
-            j.optJSONObject("error")?.let { streamErr = it.optString("message", it.toString()); return@streamLines }
+            if (d == "[DONE]") { done = true; return@post }
+            if (d.isEmpty()) return@post
+            val j = try { JSONObject(d) } catch (e: Exception) { return@post }
+            j.optJSONObject("error")?.let { streamErr = it.optString("message", it.toString()); return@post }
             j.optJSONObject("usage")?.let { tin = it.optInt("prompt_tokens", tin); tout = it.optInt("completion_tokens", tout) }
-            val ch = j.optJSONArray("choices")?.optJSONObject(0) ?: return@streamLines
+            val ch = j.optJSONArray("choices")?.optJSONObject(0) ?: return@post
             ch.optString("finish_reason", "").let { if (it.isNotEmpty() && it != "null") finish = it }
-            val delta = ch.optJSONObject("delta") ?: return@streamLines
+            val delta = ch.optJSONObject("delta") ?: return@post
             val c = delta.optString("content", "")
             if (c.isNotEmpty() && c != "null") { content.append(c); onDelta?.invoke(c) }
             val r = delta.optString("reasoning", "").ifEmpty { delta.optString("reasoning_content", "") }
@@ -169,9 +228,10 @@ object Llm {
                 info.get()?.invoke(reasoning.length, slot[1], calls.sumOf { it[2].length }, calls.size)
             }
         }
+        val code = resp.code; val raw = resp.raw
         if (code !in 200..299) {
             val msg = try { val j = JSONObject(raw); j.optJSONObject("error")?.let { e -> e.optString("message") + (e.optJSONObject("metadata")?.optString("raw")?.let { " — $it" } ?: "") } ?: raw } catch (e: Exception) { raw }
-            throw LlmException("LLM HTTP $code: ${msg.take(500)}", code)
+            throw LlmException("LLM HTTP $code: ${msg.take(500)}", code, resp.retryAfter)
         }
         streamErr?.let { throw LlmException("LLM: $it", 502) }
         if (raw.isNotEmpty()) {

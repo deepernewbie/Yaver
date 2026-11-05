@@ -19,7 +19,7 @@
 
   /* ------------------------------------------------------------ state */
   var S = { lang: "tr", state: null, convo: null, convoId: "", live: "", liveStatus: "", liveTool: null, running: {}, atts: [], convos: [], pages: [], voiceTurn: false, mail: { folder: "inbox", tab: "mail", items: [], query: "" },
-    side: {}, fu: {}, plan: {}, ctx: {}, subs: {}, doneAt: {}, queued: {}, fbAsk: null, todoOpen: false, overdue: 0, kb: { tab: "memory", q: "", filter: "all", sort: "use" }, tasks: { q: "", owner: "", status: "open", sort: "" } };
+    side: {}, fu: {}, plan: {}, win: {}, resumable: {}, screen: null, ctx: {}, subs: {}, doneAt: {}, queued: {}, fbAsk: null, todoOpen: false, overdue: 0, kb: { tab: "memory", q: "", filter: "all", sort: "use" }, tasks: { q: "", owner: "", status: "open", sort: "" } };
   function T(en, tr) { return S.lang === "tr" ? tr : en; }
 
   /* ------------------------------------------------------------ dom helpers */
@@ -139,12 +139,67 @@
     });
   }
 
+  /* short e-mail handles (m + 7 letters/digits) the model writes as text or `code`: asked from yaver which are real
+     handles (a word like "mesajlar" also fits the shape), then shown as chips with the subject */
+  var REF_RX = /\bm[0-9a-z]{7}\b/g, REFS = {};
+  function refChips(root) {
+    var cand = {}, texts = [], codes = [], walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), n, m;
+    while ((n = walker.nextNode())) {
+      if (n.parentNode.closest("a,pre")) continue;
+      var inCode = n.parentNode.closest("code");
+      if (inCode) { var t = inCode.textContent.trim(); if (/^m[0-9a-z]{7}$/.test(t)) { cand[t] = 1; codes.push(inCode); } continue; }
+      REF_RX.lastIndex = 0; var any = false;
+      while ((m = REF_RX.exec(n.nodeValue))) { cand[m[0]] = 1; any = true; }
+      if (any) texts.push(n);
+    }
+    var ask = Object.keys(cand).filter(function (k) { return !(k in REFS); });
+    if (!texts.length && !codes.length) return;
+    (ask.length ? call("mail.refs", { tokens: ask }) : Promise.resolve({})).then(function (r) {
+      ask.forEach(function (k) { REFS[k] = r && r[k] ? r[k] : null; if (REFS[k] && REFS[k].subject) MAIL_SUBJ[k] = REFS[k].subject + (REFS[k].from ? " — " + REFS[k].from : ""); });
+      codes.forEach(function (c) { var t = c.textContent.trim(); if (!REFS[t] || !c.parentNode) return; var subj = REFS[t].subject, blk = c.parentNode.closest("p,li,td,th,div"); c.parentNode.replaceChild(subj && blk && blk.textContent.indexOf(subj) >= 0 ? mailChip(t, T("Open e-mail", "E-postayı aç")) : mailChip(t), c); });
+      texts.forEach(function (tn) {
+        if (!tn.parentNode) return;
+        var txt = tn.nodeValue, frag = document.createDocumentFragment(), last = 0, mm, hit = false;
+        REF_RX.lastIndex = 0;
+        while ((mm = REF_RX.exec(txt))) {
+          if (!REFS[mm[0]]) continue;
+          hit = true;
+          frag.appendChild(document.createTextNode(txt.slice(last, mm.index).replace(/\(?\s*((e-?)?(mail|posta)\s*)?(id|ref)\s*[:=]?\s*$/i, "")));
+          /* the sentence already names the subject: the chip just says "open" */
+          var subj = REFS[mm[0]].subject, blk = tn.parentNode.closest("p,li,td,th,div");
+          frag.appendChild(subj && blk && blk.textContent.indexOf(subj) >= 0 ? mailChip(mm[0], T("Open e-mail", "E-postayı aç")) : mailChip(mm[0])); last = REF_RX.lastIndex;
+        }
+        if (!hit) return;
+        frag.appendChild(document.createTextNode(txt.slice(last).replace(/^\s*\)/, "")));
+        tn.parentNode.replaceChild(frag, tn);
+      });
+      /* "(id: `m3k9x2ab`)" leaves "(id: " and ")" around the chip */
+      root.querySelectorAll("a.mlink").forEach(function (a) {
+        var p = a.previousSibling, nx = a.nextSibling;
+        if (p && p.nodeType === 3 && /\(\s*((e-?)?(mail|posta)\s*)?(id|ref)\s*[:=]?\s*$/i.test(p.nodeValue) && nx && nx.nodeType === 3 && /^\s*\)/.test(nx.nodeValue)) {
+          p.nodeValue = p.nodeValue.replace(/\(\s*((e-?)?(mail|posta)\s*)?(id|ref)\s*[:=]?\s*$/i, ""); nx.nodeValue = nx.nodeValue.replace(/^\s*\)/, "");
+        }
+      });
+    }).catch(function () {});
+  }
+
+  var MDC = Object.create(null), MDN = 0;
   function md(text) {
     text = String(text || "").replace(/\]\(\s*mail:/g, "](#mail:");
-    var html = window.marked ? marked.parse(String(text || "")) : String(text || "").replace(/[&<]/g, function (c) { return c === "&" ? "&amp;" : "&lt;"; });
-    if (window.DOMPurify) html = DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
+    /* parsing + sanitizing is most of the cost of a long chat: the same text is parsed once */
+    var html = MDC[text];
+    if (html == null) {
+      html = window.marked ? marked.parse(String(text || "")) : String(text || "").replace(/[&<]/g, function (c) { return c === "&" ? "&amp;" : "&lt;"; });
+      if (window.DOMPurify) html = DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
+      if (MDN > 600) { MDC = Object.create(null); MDN = 0; }
+      MDC[text] = html; MDN++;
+    }
     var box = h("div", { class: "md", html: html });
-    box.querySelectorAll("table").forEach(function (t) { var w = h("div", { class: "tw" }); t.parentNode.insertBefore(w, t); w.appendChild(t); });
+    box.querySelectorAll("table").forEach(function (t) {
+      var w = h("div", { class: "tw" }); t.parentNode.insertBefore(w, t); w.appendChild(t);
+      /* short cells stay on one line (the table scrolls sideways) instead of one word per line */
+      t.querySelectorAll("td").forEach(function (td) { var n = td.textContent.trim().length; if (n <= 28) td.classList.add("nw"); else if (n <= 120) td.classList.add("mw"); });
+    });
     box.querySelectorAll("img").forEach(function (im) {
       var src = im.getAttribute("src") || "";
       if (/^(https?:|data:|blob:)/.test(src)) return;
@@ -153,9 +208,12 @@
       im.addEventListener("click", function (e) { e.stopPropagation(); previewFile(src); });
     });
     box.querySelectorAll("pre").forEach(function (p) {
-      p.appendChild(h("button", { class: "cp", "aria-label": T("Copy", "Kopyala"), onclick: function (e) { e.stopPropagation(); call("copy", { text: p.innerText }); toast(T("Copied", "Kopyalandı")); } }, icon("copy", "xs")));
+      /* the copy button sits outside the sideways-scrolling code, so it stays in place and does not cover the text */
+      var w = h("div", { class: "pw" }); p.parentNode.insertBefore(w, p); w.appendChild(p);
+      w.appendChild(h("button", { class: "cp", "aria-label": T("Copy", "Kopyala"), onclick: function (e) { e.stopPropagation(); call("copy", { text: p.innerText }); toast(T("Copied", "Kopyalandı")); } }, icon("copy", "xs")));
     });
     mailChips(box);
+    refChips(box);
     filePaths(box);
     box.querySelectorAll("a[href]").forEach(function (a) { if (isFileHref(a.getAttribute("href")) && !a.classList.contains("mlink")) a.classList.add("flink"); });
     box.addEventListener("click", function (e) {
@@ -277,7 +335,7 @@
     var scroll = $("#scroll"), th = clear($("#thread"));
     var msgs = (S.convo && S.convo.messages) || [];
     renderPlanBar(); renderCtx(); if (window.YVP) YVP.shell();
-    if (!msgs.length && !S.running[S.convoId] && !(S.side[S.convoId || "_new"] || []).length) { th.appendChild(helloView()); updateTitle(); return; }
+    if (!msgs.length && !S.running[S.convoId] && !(S.side[S.convoId || "_new"] || []).length) { th.appendChild(helloView()); updateTitle(); renderResume(); return; }
     var calls = {}, trace = null, turn = null, lastText = null; S1SEEN = "";
     var running = !!S.running[S.convoId];
     function ensureTurn() { if (!turn) { turn = h("div", { class: "turn" }, h("div", { class: "who" }, h("div", { class: "mark" }, "y"), "yaver")); th.appendChild(turn); } return turn; }
@@ -289,7 +347,18 @@
       else if (m.role === "assistant" && !m.error && !m.local && m.content && String(m.content).trim()) lastAns = idx;
     });
     if (lastAns >= 0 && !running) finals[lastAns] = true;
+    /* a long chat shows its last turns only; "Show earlier messages" adds more (opening and every live update stay fast) */
+    var starts = [];
+    msgs.forEach(function (m, idx) { if (m.role === "user" && !m.harness && !isInternalUser(m) && !m.steer && !m.queued) starts.push(idx); });
+    var win = S.win[S.convoId] || TURN_WIN, from = starts.length > win ? starts[starts.length - win] : 0;
+    if (from > 0) {
+      var hiddenTurns = starts.length - win;
+      th.appendChild(h("button", { class: "earlier", onclick: function () {
+        var sc = $("#scroll"); S.holdScroll = sc.scrollHeight - sc.scrollTop; S.win[S.convoId] = win + TURN_WIN; renderThread();
+      } }, icon("arrow-up", "xs"), T("Show earlier messages (" + hiddenTurns + ")", "Önceki mesajları göster (" + hiddenTurns + ")")));
+    }
     var side = (S.side[S.convoId || "_new"] || []).slice(), sp = 0;
+    while (sp < side.length && side[sp].at < from) sp++;
     function flushSide(upto) {
       while (sp < side.length && (upto == null || side[sp].at <= upto)) {
         var el = sideEl(side[sp]); sp++;
@@ -297,6 +366,7 @@
       }
     }
     msgs.forEach(function (m, idx) {
+      if (idx < from) { (m.tool_calls || []).forEach(function (tc) { calls[tc.id] = { name: (tc["function"] || {}).name, args: parseArgs((tc["function"] || {}).arguments) }; }); return; }
       flushSide(idx);
       if (m.harness) return;
       if (m.divider) {
@@ -310,8 +380,12 @@
         trace = null; turn = null; lastText = null;
         if (m.label || m.internal) { var lbl = m.label || T("Automatic turn", "Otomatik tur") + " · " + m.internal; th.appendChild(h("div", { class: "note" }, icon(/heartbeat/i.test(lbl) ? "heart-pulse" : /goal|hedef/i.test(lbl) ? "target" : /sub-?agent|alt ajan/i.test(lbl) ? "users-round" : "clock", "xs"), lbl)); return; }
         var files = [].concat(m.images || [], m.files || []);
+        var scr = m.screen || screenOf(m.content);
+        var bub = h("div", { class: "bubble" }, m.display != null && m.display !== "" ? m.display : stripScreen(m.content || ""));
+        longPress(bub, function () { msgMenu("user", m, idx); });
         th.appendChild(h("div", { class: "u" }, h("div", null,
-          h("div", { class: "bubble" }, m.display != null && m.display !== "" ? m.display : (m.content || "")),
+          bub,
+          scr ? h("div", { class: "scrtag" }, icon("smartphone", "xs"), scr === "Ekran" || scr === "Screen" || scr === "?" ? T("Screen", "Ekran") : T("Screen: ", "Ekran: ") + scr) : null,
           m.queued ? h("div", { class: "qcap" }, icon("clock", "xs"), T("Queued — yaver reads it at its next step", "Sırada — yaver bir sonraki adımında okuyacak")) : null,
           m.steer && !m.queued ? h("div", { class: "qcap done" }, icon(S.delivered && S.delivered[m.ts] ? "check-check" : "check", "xs"), S.delivered && S.delivered[m.ts] ? T("Delivered mid-run", "Çalışırken iletildi") : T("Sent mid-run", "Çalışırken gönderildi")) : null,
           files.length ? h("div", { class: "files" }, files.map(function (f) {
@@ -331,6 +405,7 @@
             h("button", { class: "ib", "aria-label": T("Share", "Paylaş"), onclick: function () { call("share.text", { text: text }); } }, icon("share-2", "s")),
             finals[idx] ? fbButtons(m, idx) : null));
           ensureTurn().appendChild(lastText);
+          (function (mm, i) { longPress(box, function () { msgMenu("assistant", mm, i); }); })(m, idx);
           if (window.YVP) YVP.answerExtras(lastText, box, m, idx, msgs, finals[idx]);
           if (finals[idx] && S.fbAsk && S.fbAsk.convoId === S.convoId && S.fbAsk.idx === idx) lastText.appendChild(fbNoteBox(idx));
         }
@@ -369,9 +444,11 @@
         tr.insertBefore(more, tr.firstChild);
       }
     });
-    updateTitle();
-    requestAnimationFrame(function () { scroll.scrollTop = scroll.scrollHeight; });
+    updateTitle(); renderResume();
+    if (S.holdScroll != null) { var fb = S.holdScroll; S.holdScroll = null; scroll.scrollTop = scroll.scrollHeight - fb; }
+    else requestAnimationFrame(function () { scroll.scrollTop = scroll.scrollHeight; });
   }
+  var TURN_WIN = 30;
 
   var S1SEEN = "";
   var liveT = 0;
@@ -406,6 +483,7 @@
       h("div", { class: "mark big" }, "y"),
       h("h1", null, greeting() + "."),
       h("p", null, T("Ask anything — I can search the web, read your mail and calendar, work with files and set reminders.", "İstediğini sor — web'de arayabilir, postanı ve takvimini okuyabilir, dosyalarla çalışabilir, hatırlatma kurabilirim.")),
+      briefEl(),
       h("div", { class: "ideas" }, ideas.map(function (it) {
         return h("button", { class: "idea", onclick: function () { if (it[2] === "plan") planDay(); else if (it[4] && window.YVP) YVP.openTarget(it[4]); else send(it[3] || it[1]); } }, icon(it[0], "s"), h("span", null, it[1]));
       })),
@@ -429,6 +507,7 @@
   function loadConvo(id) {
     if (!id) { S.convo = null; S.convoId = ""; S.live = ""; renderThread(); syncSend(); return Promise.resolve(); }
     return call("convos.load", { id: id }).then(function (c) {
+      if (S.convoId !== c.id) delete S.win[c.id];
       S.convo = c; S.convoId = c.id;
       /* messages typed while yaver worked: shown as queued until the core adds them to the chat */
       var q = S.queued[c.id];
@@ -446,12 +525,12 @@
       else if (fuItems && !fuItems.length && S.fu[c.id] && S.fu[c.id].state === "ready") delete S.fu[c.id];
       if (c.planning) S.plan[c.id] = c.planning;
       renderThread(); syncSend();
-      if (!c.running) refreshCtx(c.id);
+      if (!c.running) { refreshCtx(c.id); checkResumable(c.id); }
     }).catch(function () { S.convo = null; S.convoId = ""; renderThread(); });
   }
 
   function newChat(focus) {
-    S.convo = null; S.convoId = ""; S.live = ""; S.liveTool = null; S.atts = []; S.fbAsk = null; S.todoOpen = false;
+    S.convo = null; S.convoId = ""; S.live = ""; S.liveTool = null; S.atts = []; S.fbAsk = null; S.todoOpen = false; S.screen = null; renderScreenChip();
     delete S.side["_new"]; delete S.side[""];
     renderAtts(); renderThread(); syncSend(); closeDrawer(); closeAllPages();
     if (focus) setTimeout(function () { $("#input").focus(); }, 80);
@@ -479,7 +558,7 @@
     opts = opts || {};
     var ta = $("#input");
     var t = text != null ? text : ta.value;
-    if (!String(t).trim() && !S.atts.length) return;
+    if (!String(t).trim() && !S.atts.length && !(S.screen && text == null)) return;
     if (!(S.state && S.state.llm && S.state.llm.ready)) { openSetup(); return; }
     // an open clarifying question takes the typed text as its answer
     var pendingAsk = openAsk(S.convoId);
@@ -488,13 +567,27 @@
     var steering = !!S.running[S.convoId];
     if (steering && S.atts.length) { toast(T("yaver is still working — attach files after it finishes.", "yaver hâlâ çalışıyor — dosyaları bittikten sonra ekleyin.")); return; }
     var atts = S.atts.slice();
+    /* the screen the user shared (assistant gesture): its text goes along as context, its picture as an attachment; the bubble shows only what was typed */
+    var scr = !steering && text == null && !opts.label ? S.screen : null;
+    var screenFlag = false;
+    if (scr && scr.native && Date.now() - scr.at > 10 * 60000) { toast(T("The screen capture expired — sent without it.", "Ekran yakalamasının süresi doldu — onsuz gönderildi.")); scr = null; S.screen = null; renderScreenChip(); }
+    if (scr) {
+      if (!String(t).trim()) t = T("What is on my screen?", "Ekranımda ne var?");
+      opts = Object.assign({}, opts, { display: opts.display || String(t) });
+      if (scr.native) screenFlag = true;   /* native adds the screen text and picture */
+      else {
+        if (scr.text) t = String(t) + "\n\n[" + T("Screen", "Ekran") + ": " + (scr.app || "?") + "]\n```\n" + String(scr.text).replace(/```/g, "ʼʼʼ").slice(0, 12000) + "\n```";
+        if (scr.image) atts.push({ path: scr.image, name: String(scr.image).split("/").pop(), image: true });
+      }
+      S.screen = null; renderScreenChip();
+    }
     var speak = S.voiceTurn; S.voiceTurn = false;
     ta.value = ""; autosize(); S.atts = []; renderAtts(); hideHints();
     if (S.fu[S.convoId]) delete S.fu[S.convoId];
     S.fbAsk = null;
     // show it at once
     if (!S.convo) S.convo = { id: "", title: String(t).slice(0, 60), messages: [] };
-    S.convo.messages = (S.convo.messages || []).concat([opts.label ? { role: "user", content: t, label: opts.label } : { role: "user", content: t, display: opts.display || t, images: atts.filter(function (a) { return a.image; }).map(function (a) { return a.path; }), files: atts.filter(function (a) { return !a.image; }).map(function (a) { return a.path; }) }]);
+    S.convo.messages = (S.convo.messages || []).concat([opts.label ? { role: "user", content: t, label: opts.label } : { role: "user", content: t, display: opts.display || t, screen: scr ? scr.app || T("Screen", "Ekran") : null, images: atts.filter(function (a) { return a.image; }).map(function (a) { return a.path; }), files: atts.filter(function (a) { return !a.image; }).map(function (a) { return a.path; }) }]);
     var tmpId = S.convoId || "_new";
     if (tmpId === "_new") moveSide("", "_new");
     S.running[tmpId] = true; S.convoId = tmpId; S.wait = { t0: Date.now(), info: null };
@@ -504,6 +597,7 @@
     if (opts.label) args.label = opts.label;
     if (opts.internal) args.internal = true;
     if (opts.display) args.display = opts.display;
+    if (screenFlag) { args.screen = true; if (scr.image) S.convo.messages[S.convo.messages.length - 1].images.push(scr.image); }
     var sentAt = Date.now();
     call("chat.send", args).then(function (r) {
       r = r || {};
@@ -609,7 +703,7 @@
   function syncSend() {
     var b = $("#send"); if (!b) return;
     var running = !!S.running[S.convoId];
-    var has = ($("#input").value.trim().length > 0) || S.atts.length > 0;
+    var has = ($("#input").value.trim().length > 0) || S.atts.length > 0 || !!S.screen;
     clear(b);
     if (running && !has) { b.className = "send stop"; b.appendChild(icon("square", "xs")); b.setAttribute("aria-label", T("Stop", "Durdur")); b.disabled = false; }
     else if (has) { b.className = "send"; b.appendChild(icon("arrow-up")); b.setAttribute("aria-label", T("Send", "Gönder")); b.disabled = false; }
@@ -672,7 +766,8 @@
     else if (type === "launch") onLaunch(d);
     else if (type === "toast") toast(d.text);
     else if (type === "refresh") { refreshState(); refreshConvos(); }
-    else if (type === "resume") { S.state = d; if (d.lang) S.lang = d.lang; if (S.convoId) loadConvo(S.convoId); if (topPage() === "mail") loadMail(); if (topPage() === "settings") renderSettings(); }
+    else if (type === "brief") { BRIEF.data = d; BRIEF.at = Date.now(); BRIEF.err = false; paintBrief(); }
+    else if (type === "resume") { S.state = d; if (d.lang) S.lang = d.lang; if (S.convoId) loadConvo(S.convoId); else if ($("#brief")) loadBrief(true); if (topPage() === "mail") loadMail(); if (topPage() === "settings") renderSettings(); }
     else if (type === "mail" || type === "mail.changed") { refreshState().then(function () { if (topPage() === "mail") loadMail(); }); }
     /* notes without a chat (Outlook backup, background jobs) are toasts, not lines in whatever chat happens to be open */
     else if (type === "note") { if (d.convoId) addSide(d.convoId, "note", { text: d.text }); else toast(stripEmoji(d.text)); }
@@ -989,6 +1084,8 @@
     else if (a === "share") { closeAllPages(); if (d.text) { $("#input").value = d.text; autosize(); } (d.files || []).forEach(function (f) { S.atts.push(f); }); renderAtts(); syncSend(); $("#input").focus(); }
     else if (a === "open_convo" && d.text) { closeAllPages(); loadConvo(d.text); }
     else if (a === "mail") openMailPage();
+    else if (a === "nav") onNav(d);
+    else if (a === "screen") onScreenContext(d, true);
     else if (a === "mail_open" && d.text) openMail(d.text);
     else if (a === "mail_ask" && d.text) {
       toast(T("Opening the e-mail…", "E-posta açılıyor…"));
@@ -1208,27 +1305,75 @@
     return true;
   }
   var FPATH_RX = /(^|[\s(\[“"'«])((?:\/workspace|\/\.yaver|~)\/[^\s<>"'`)\]]*[^\s<>"'`)\].,;:!?…”»])/g;
-  /* plain-text paths in an answer (/workspace/report.md, `~/skills/x/SKILL.md`) become taps that open the file */
+  /* files named in an answer become chips (icon + file name; tap opens the preview):
+     - absolute paths in text or `code` (/workspace/rapor.docx, ~/skills/x/SKILL.md) — right away;
+     - bare names and relative paths (rapor.docx, uploads/kayit.m4a, `1940. Cd..m4a`) — after yaver confirms the file exists;
+     - markdown links to a file ([Aylık rapor](/workspace/rapor.docx)) keep their text and get the file icon. */
+  var FNAME_EXT = "docx?|xlsx?|xlsm|pptx?|odt|ods|odp|rtf|pdf|md|markdown|csv|tsv|txt|log|json|ya?ml|xml|toml|html?|svg|png|jpe?g|gif|webp|heic|bmp|m4a|mp3|wav|ogg|oga|opus|flac|aac|amr|mp4|m4v|mov|webm|mkv|3gp|zip|tar|gz|tgz|7z|py|js|mjs|ts|kt|css|sh|sql|ipynb";
+  var FNAME_RX = new RegExp("(^|[\\s(\\[“\"'«*])((?:[\\w\\-.çğıöşüÇĞİÖŞÜ]+\\/)*[\\wçğıöşüÇĞİÖŞÜ][\\w\\-.()çğıöşüÇĞİÖŞÜ]*\\.(?:" + FNAME_EXT + "))(?=$|[\\s)\\]”\"'».,;:!?…*])", "gi");
+  var FNAME_WHOLE = new RegExp("^[^\\/<>:*?\"|]{1,120}\\.(?:" + FNAME_EXT + ")$", "i");
+  var FEXISTS = {};
+  function fileChip(vp, label) {
+    var name = String(vp).split("/").pop();
+    var k = FK[kindOf(name)] || FK.other;
+    return h("a", { class: "fchip flink", href: vp, title: vp, "data-path": vp }, icon(k[0], "xs"), h("span", null, label || name));
+  }
   function filePaths(root) {
+    /* markdown links to files: same look, their own text */
+    root.querySelectorAll("a[href]").forEach(function (a) {
+      var href = a.getAttribute("href");
+      if (a.classList.contains("mlink") || a.classList.contains("fchip") || !isFileHref(href) || a.querySelector("img")) return;
+      var vp = href.replace(/^file:\/\//i, "");
+      try { vp = decodeURIComponent(vp); } catch (x) {}
+      a.parentNode.replaceChild(fileChip(vp, a.textContent.trim() || null), a);
+    });
+    var later = [], ask = {};
     root.querySelectorAll("code").forEach(function (c) {
       if (c.closest("pre,a")) return;
       var t = c.textContent.trim();
-      if (/^(\/workspace|\/\.yaver|~)\/\S+$/.test(t) && !/[<>]/.test(t)) { c.classList.add("fpath"); c.setAttribute("role", "link"); c.addEventListener("click", function (e) { e.stopPropagation(); previewFile(t); }); }
+      if (/^(\/workspace|\/\.yaver|\/tmp|~)\/\S.*$/.test(t) && !/[<>]/.test(t)) c.parentNode.replaceChild(fileChip(t), c);
+      else if (FNAME_WHOLE.test(t) && !/^https?:/i.test(t)) { later.push({ code: c, name: t }); ask[t] = 1; }
     });
     var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), nodes = [], n;
-    while ((n = walker.nextNode())) { FPATH_RX.lastIndex = 0; if (FPATH_RX.test(n.nodeValue) && !n.parentNode.closest("a,pre,code")) nodes.push(n); }
+    while ((n = walker.nextNode())) {
+      if (n.parentNode.closest("a,pre,code")) continue;
+      FPATH_RX.lastIndex = 0; FNAME_RX.lastIndex = 0;
+      if (FPATH_RX.test(n.nodeValue) || FNAME_RX.test(n.nodeValue)) nodes.push(n);
+    }
     nodes.forEach(function (tn) {
-      var txt = tn.nodeValue, frag = document.createDocumentFragment(), last = 0, m;
+      /* absolute paths now; other names marked for the existence check */
+      var txt = tn.nodeValue, frag = document.createDocumentFragment(), last = 0, m, spans = [];
       FPATH_RX.lastIndex = 0;
-      while ((m = FPATH_RX.exec(txt))) {
-        var st = m.index + m[1].length;
-        frag.appendChild(document.createTextNode(txt.slice(last, st)));
-        frag.appendChild(h("a", { class: "flink", href: m[2] }, m[2]));
-        last = st + m[2].length;
+      while ((m = FPATH_RX.exec(txt))) spans.push({ at: m.index + m[1].length, s: m[2], abs: true });
+      FNAME_RX.lastIndex = 0;
+      while ((m = FNAME_RX.exec(txt))) {
+        var at = m.index + m[1].length, s2 = m[2];
+        if (/^(https?|www)\b/i.test(s2) || spans.some(function (x) { return at < x.at + x.s.length && at + s2.length > x.at; })) continue;
+        if (txt.charAt(at - 1) === "/" || /@/.test(txt.slice(Math.max(0, at - 1), at))) continue;   /* part of a URL or address */
+        spans.push({ at: at, s: s2, abs: false }); ask[s2] = 1;
       }
+      if (!spans.length) return;
+      spans.sort(function (x, y) { return x.at - y.at; });
+      spans.forEach(function (x) {
+        frag.appendChild(document.createTextNode(txt.slice(last, x.at)));
+        if (x.abs) frag.appendChild(fileChip(x.s));
+        else { var ph = h("span", { class: "fcand" }, x.s); later.push({ span: ph, name: x.s }); frag.appendChild(ph); }
+        last = x.at + x.s.length;
+      });
       frag.appendChild(document.createTextNode(txt.slice(last)));
       tn.parentNode.replaceChild(frag, tn);
     });
+    if (!later.length) return;
+    var q = Object.keys(ask).filter(function (k) { return !(k in FEXISTS); });
+    (q.length ? call("files.exists", { paths: q }) : Promise.resolve({})).then(function (hit) {
+      q.forEach(function (k) { FEXISTS[k] = (hit && hit[k]) || ""; });
+      later.forEach(function (x) {
+        var vp = FEXISTS[x.name], el = x.code || x.span;
+        if (!el.parentNode) return;
+        if (vp) el.parentNode.replaceChild(fileChip(vp, x.name.split("/").pop()), el);
+        else if (x.span) el.parentNode.replaceChild(document.createTextNode(x.name), el);
+      });
+    }).catch(function () { later.forEach(function (x) { if (x.span && x.span.parentNode) x.span.parentNode.replaceChild(document.createTextNode(x.name), x.span); }); });
   }
 
   function fsub(e) {
@@ -1599,6 +1744,7 @@
         h("button", { class: S.mail.tab === "mail" ? "on" : "", onclick: function () { S.mail.tab = "mail"; renderMailShell(); loadMail(); } }, icon("inbox", "xs"), T("Mail", "Posta")),
         h("button", { class: S.mail.tab === "cal" ? "on" : "", onclick: function () { S.mail.tab = "cal"; renderMailShell(); loadMail(); } }, icon("calendar", "xs"), T("Calendar", "Takvim"))));
       body.appendChild(h("div", { id: "mailbox" }));
+      pullToRefresh(body, function () { return !sheets.length; }, function () { loadMail(true); if (S.mail.tab === "mail") loadFolders(); });
       renderMailShell(); loadMail();
     }, { actions: [refresh, plus] });
     call("mailx.settings").then(function (x) {
@@ -1615,7 +1761,7 @@
     if (plus) { clear(plus).appendChild(icon(S.mail.tab === "cal" ? "plus" : "square-pen", "s")); plus.setAttribute("aria-label", S.mail.tab === "cal" ? T("New event", "Yeni etkinlik") : T("New e-mail", "Yeni e-posta")); }
     var box = clear($("#mailbox", p.body));
     if (S.mail.tab === "mail") {
-      var q = h("input", { type: "search", placeholder: T("Search mail", "Postada ara"), value: S.mail.query, enterkeyhint: "search" });
+      var q = h("input", { type: "search", placeholder: T("Search", "Ara"), "aria-label": T("Search mail", "Postada ara"), value: S.mail.query, enterkeyhint: "search" });
       q.addEventListener("keydown", function (e) { if (e.key === "Enter") { S.mail.query = q.value.trim(); q.blur(); runMailSearch(false); } });
       /* clearing the box (its ×, or deleting the text) shows the folder again */
       q.addEventListener("input", function () { if (!q.value.trim() && (S.mail.query || S.mail.results)) { S.mail.query = ""; if (hasMailFilters()) runMailSearch(false); else { S.mail.results = null; renderMailShell(); loadMail(true); } } });
@@ -1724,13 +1870,24 @@
         res && S.mail.query ? h("div", { class: "btnstack" }, h("button", { class: "btn", onclick: function () { S.mail.results = null; renderMailShell(); loadMail(true); } }, icon("search", "s"), T("Search the server instead", "Sunucuda ara"))) : null));
       renderIndexLine(); return;
     }
-    items.forEach(function (m) { list.appendChild(mailRow(m, !!res)); });
+    /* the first rows at once, the rest in small chunks so a long list never blocks the screen */
+    var my = ++mailPaint, n0 = Math.min(items.length, 40), tail = h("div", { class: "mtail" });
+    for (var i = 0; i < n0; i++) list.appendChild(mailRow(items[i], !!res));
+    list.appendChild(tail);
+    (function chunk(i) {
+      if (i >= items.length || my !== mailPaint || !tail.isConnected) return;
+      var frag = document.createDocumentFragment(), end = Math.min(items.length, i + 60);
+      for (; i < end; i++) frag.appendChild(mailRow(items[i], !!res));
+      tail.parentNode.insertBefore(frag, tail);
+      setTimeout(function () { chunk(end); }, 16);
+    })(n0);
     if (!res && !S.mail.query && S.mail.items.length < S.mail.total) {
       var more = h("button", { class: "btn sm mmore", onclick: function () { more.disabled = true; clear(more).appendChild(h("div", { class: "spin xs" })); loadMail(false, true); } }, T("Load more (" + (S.mail.total - S.mail.items.length) + ")", "Daha fazla (" + (S.mail.total - S.mail.items.length) + ")"));
       list.appendChild(h("div", { class: "mmorew" }, more));
     }
     renderIndexLine();
   }
+  var mailPaint = 0;
   var FSHORT = { inbox: ["Inbox", "Gelen"], sentitems: ["Sent", "Giden"], archive: ["Archive", "Arşiv"] };
   function mailRow(m, fromIndex) {
     /* Sent Items / Drafts: who it went to matters, not me as the sender */
@@ -3496,13 +3653,15 @@
     app.appendChild(h("div", { class: "planbar hidden", id: "planbar" }));
     app.appendChild(h("div", { id: "scroll" }, h("div", { class: "thread", id: "thread" })));
     app.appendChild(h("div", { class: "composer" }, h("div", { class: "hints hidden", id: "hints", role: "listbox" }), h("div", { class: "cbox" },
+      h("div", { class: "resbar hidden", id: "resbar" }),
+      h("div", { class: "scrchip hidden", id: "scrchip" }),
       h("div", { class: "atts hidden", id: "atts" }),
       h("div", { class: "cchips", id: "cchips" }),
       h("div", { class: "crow" },
         h("button", { class: "ib", "aria-label": T("Attach", "Ekle"), onclick: pick }, icon("paperclip")),
         ta,
         h("button", { class: "send", id: "send", onclick: function () {
-          if (ta.value.trim() || S.atts.length) send();
+          if (ta.value.trim() || S.atts.length || S.screen) send();
           else if (S.running[S.convoId]) stop();
           else listen(true);
         } })))));
@@ -3527,6 +3686,216 @@
     if (window.YVP) YVP.shell();
   }
 
+  /* ------------------------------------------------------------ 5.0: today brief, screen context, resume, nav, gestures */
+  /* browser storage can be blocked: the value is also kept in memory for this session */
+  var LSM = {};
+  function lsGet(k) { try { var v = localStorage.getItem(k); if (v != null) return v; } catch (e) { } return k in LSM ? LSM[k] : null; }
+  function lsSet(k, v) { LSM[k] = v; try { localStorage.setItem(k, v); } catch (e) { } }
+  function quietFail(e) { return /unknown method/.test(String((e && e.message) || e)); }
+
+  /* "Bugün": next meetings, mails waiting for an answer, unread, due tasks, next alarm — on the new-chat screen */
+  var BRIEF = { data: null, at: 0, loading: false, off: false, err: false };
+  function loadBrief(force) {
+    if (BRIEF.loading || BRIEF.off) return;
+    if (!force && BRIEF.data && Date.now() - BRIEF.at < 60000) { paintBrief(); return; }
+    BRIEF.loading = true; paintBrief();
+    call("brief.today").then(function (d) { BRIEF.data = d || null; BRIEF.err = false; BRIEF.at = Date.now(); }, function (e) { if (quietFail(e)) BRIEF.off = true; BRIEF.err = !BRIEF.data; BRIEF.at = Date.now(); })
+      .then(function () { BRIEF.loading = false; paintBrief(); });
+  }
+  function briefEmpty(d) { return !d || (d.mailConnected !== false && !(d.events || []).length && !(d.needReply || []).length && !d.unread && !(d.tasks || []).length && !d.nextAlarm); }
+  function briefWhen(e) {
+    var d = new Date(e.start), today = new Date(), tm = new Date(today); tm.setDate(tm.getDate() + 1);
+    var day = sameDay(d, today) ? "" : sameDay(d, tm) ? T("Tomorrow ", "Yarın ") : d.toLocaleDateString(loc(), { weekday: "short" }) + " ";
+    return e.allDay ? (day ? day.trim() : T("Today", "Bugün")) + T(" · all day", " · tüm gün") : day + timeOf(e.start);
+  }
+  function briefEl() { var el = h("section", { class: "brief", id: "brief", "aria-label": T("Today", "Bugün") }); setTimeout(function () { loadBrief(false); }, 0); return el; }
+  function paintBrief() {
+    var el = $("#brief"); if (!el) return;
+    var d = BRIEF.data;
+    if (BRIEF.off || (BRIEF.err && !d) || (!BRIEF.loading && briefEmpty(d))) { el.classList.add("hidden"); clear(el); return; }
+    el.classList.remove("hidden"); clear(el);
+    var collapsed = lsGet("yv.brief.c") === "1";
+    if (!d) { /* first load: a skeleton of the card */
+      el.appendChild(h("div", { class: "bhead" }, icon("sun", "s"), h("b", null, T("Today", "Bugün")), h("span", { class: "sk w40" })));
+      if (!collapsed) el.appendChild(h("div", { class: "bbody sk-body", "aria-busy": "true" }, h("span", { class: "sk" }), h("span", { class: "sk w70" }), h("span", { class: "sk w50" })));
+      return;
+    }
+    var evs = (d.events || []).slice(0, 3), rep = (d.needReply || []).slice(0, 3), tasks = d.tasks || [];
+    var bits = [];
+    if ((d.events || []).length) bits.push(T(d.events.length + " event" + (d.events.length > 1 ? "s" : ""), d.events.length + " etkinlik"));
+    if ((d.needReply || []).length) bits.push(T(d.needReply.length + " to answer", d.needReply.length + " yanıt bekliyor"));
+    if (d.unread) bits.push(T(d.unread + " unread", d.unread + " okunmamış"));
+    var head = h("button", { class: "bhead", "aria-expanded": collapsed ? "false" : "true", onclick: function () { lsSet("yv.brief.c", collapsed ? "0" : "1"); paintBrief(); } },
+      icon("sun", "s"), h("b", null, T("Today", "Bugün")), h("span", { class: "bsum" }, bits.join(" · ")), BRIEF.loading ? h("div", { class: "spin xs" }) : null, icon("chevron-down", "xs bchev"));
+    el.classList.toggle("collapsed", collapsed);
+    el.appendChild(head);
+    if (collapsed) return;
+    var body = h("div", { class: "bbody" });
+    if (d.mailConnected === false) {
+      var conf = S.state && S.state.mail && S.state.mail.configured;
+      body.appendChild(h("div", { class: "brow warn" }, icon("mail", "s"), h("span", { class: "bt" }, T("Mail is not connected", "Posta bağlı değil")),
+        h("button", { class: "btn xs", onclick: function () { if (conf) signInMail(); else openSettings("mail"); } }, T("Connect", "Bağlan"))));
+    }
+    if (evs.length) body.appendChild(h("div", { class: "bsec" }, T("Coming up", "Sıradaki etkinlikler")));
+    evs.forEach(function (e) {
+      body.appendChild(h("button", { class: "brow", onclick: function () { if (/^phone:/.test(String(e.id))) phoneEventSheet(e); else openEventById(e.id); } },
+        h("span", { class: "btime" }, briefWhen(e)),
+        h("span", { class: "bt" }, h("b", null, e.subject || T("(no title)", "(başlıksız)")),
+          e.location || e.online ? h("small", null, icon(e.online ? "video" : "map-pin", "xs"), e.location || T("Online", "Çevrim içi")) : null)));
+    });
+    if (rep.length) body.appendChild(h("div", { class: "bsec" }, T("Waiting for your reply", "Yanıt bekleyen")));
+    rep.forEach(function (m) {
+      body.appendChild(h("button", { class: "brow", onclick: function () { openMail(m.id, null, { folder: "inbox" }); } },
+        icon("reply", "s"), h("span", { class: "bt" }, h("b", null, m.subject || T("(no subject)", "(konu yok)")), h("small", null, m.from || ""))));
+    });
+    var chips = h("div", { class: "bchips" },
+      h("button", { class: "cchip on", onclick: summarizeDay }, icon("sparkles", "xs"), T("Summarize the day", "Günü özetle")),
+      d.unread ? h("button", { class: "cchip", onclick: function () { S.mail.pivot = "unread"; S.mail.folder = "inbox"; S.mail.query = ""; S.mail.results = null; openMailPage("mail"); } }, icon("mail", "xs"), T(d.unread + " unread", d.unread + " okunmamış")) : null,
+      tasks.length ? h("button", { class: "cchip", onclick: function () { openTasks(); } }, icon("list-checks", "xs"), T(tasks.length + " task" + (tasks.length > 1 ? "s" : "") + " due", tasks.length + " görev vadeli")) : null,
+      d.nextAlarm ? h("span", { class: "cchip ro" }, icon("alarm-clock", "xs"), T("Alarm ", "Alarm ") + d.nextAlarm) : null);
+    body.appendChild(chips);
+    el.appendChild(body);
+  }
+  function summarizeDay() {
+    newChat();
+    send(T("Summarize my day: today's meetings in order (with what to prepare), the e-mails waiting for my answer (most important first), tasks due today, my next alarm, and a suggested plan for the day. Keep it short.",
+      "Günümü özetle: bugünkü toplantılarım sırayla (neye hazırlanmam gerektiğiyle), yanıt bekleyen e-postalarım (en önemlisi önce), bugün vadesi gelen görevlerim, sıradaki alarmım ve gün için kısa bir plan önerisi. Kısa tut."), { display: T("Summarize the day", "Günü özetle") });
+  }
+  /* every 5 minutes while the card is on screen: a forced refresh (native answers with what it has and sends a "brief" event when done) */
+  setInterval(function () { if ($("#brief") && !S.pages.length && document.visibilityState !== "hidden" && !BRIEF.off && Date.now() - BRIEF.at > 5 * 60000) { BRIEF.at = Date.now(); call("brief.refresh").then(function (d) { if (d) { BRIEF.data = d; paintBrief(); } }).catch(function () { }); } }, 30000);
+  /* an event from the phone's own calendar: details only (it is not in Exchange) */
+  function phoneEventSheet(e) {
+    var when = e.allDay ? new Date(e.start).toLocaleDateString(loc(), { weekday: "long", day: "numeric", month: "long" }) + T(" · all day", " · tüm gün") : longWhen(e.start) + (e.end ? "–" + timeOf(e.end) : "");
+    sheet({ title: e.subject || T("(no title)", "(başlıksız)"), body: h("div", { class: "evd" },
+      h("div", { class: "kv" }, icon("clock", "s"), h("div", null, when)),
+      e.location ? h("div", { class: "kv" }, icon(e.online ? "video" : "map-pin", "s"), h("div", null, e.location)) : null,
+      h("div", { class: "kv" }, icon("smartphone", "s"), h("div", null, T("From the phone's calendar", "Telefonun takviminden")))),
+      actions: [[T("Open calendar", "Takvimi aç"), "", function () { openMailPage("cal"); }], [T("Close", "Kapat"), "p"]] });
+  }
+  function openEventById(id) {
+    if (!id) return;
+    call("mail.event.get", { id: id }).then(function (d) { if (d) eventSheet(d); }).catch(function (e) { toast(errText(e)); });
+  }
+
+  /* the screen shared from the assistant gesture: a removable chip above the composer */
+  function screenOf(c) {
+    c = String(c || "");
+    var x = /\[(?:Screen|Ekran): ([^\]\n]{1,80})\]/.exec(c) || /\[Screen context — the user opened yaver over the app "([^"]{1,80}?)(?: \([^"]*\))?"/.exec(c);
+    return x ? x[1] : "";
+  }
+  function stripScreen(c) { return String(c || "").replace(/\n*\[(?:Screen|Ekran): [^\]\n]*\]\n```[\s\S]*?```\s*$/, "").replace(/\n*\[(?:Screen|Ekran): [^\]\n]*\]\s*$/, ""); }
+  function renderScreenChip() {
+    var box = $("#scrchip"); if (!box) return; clear(box);
+    var s = S.screen; box.classList.toggle("hidden", !s); if (!s) return;
+    box.appendChild(h("div", { class: "att scr" }, s.image ? h("img", { src: wsUrl(s.image), alt: "" }) : icon("smartphone", "s"),
+      h("span", null, s.app ? T("Screen: ", "Ekran: ") + s.app : T("Screen", "Ekran")),
+      h("button", { class: "x", "aria-label": T("Remove the screen", "Ekranı kaldır"), onclick: function () { if (s.native) call("screen.context.clear").catch(function () { }); S.screen = null; renderScreenChip(); syncSend(); } }, icon("x", "xs"))));
+  }
+  /* native: the capture stays native, chat.send {screen:true} attaches it (launch {action:"screen"}).
+     inline: screen.context.take already cleared it, so its text goes along in the message (startup). */
+  function onScreenContext(d, native) {
+    if (!d) return;
+    if (!native && !d.text && !d.image) return;
+    closeSheets(); closeDrawer(); closeAllPages(); newChat();
+    S.screen = { app: String(d.app || "").trim(), native: !!native, text: native ? "" : String(d.text || ""), image: d.image || null, at: Date.now() };
+    renderScreenChip(); syncSend();
+    setTimeout(function () { var ta = $("#input"); if (ta) ta.focus(); }, 80);
+  }
+
+  /* a chat whose last run was cut off (app killed, phone restarted): offer to continue */
+  function checkResumable(id) {
+    if (!id || S.running[id]) return;
+    call("run.resumable", { convoId: id }).then(function (r) {
+      if (r && r.convoId === id) S.resumable[id] = r; else delete S.resumable[id];
+      if (S.convoId === id) renderResume();
+    }).catch(function () { });
+  }
+  function renderResume() {
+    var bar = $("#resbar"); if (!bar) return;
+    var r = S.convoId && S.resumable[S.convoId];
+    if (!r || S.running[S.convoId]) { bar.classList.add("hidden"); clear(bar); return; }
+    if (bar.dataset.id === S.convoId && !bar.classList.contains("hidden")) return;
+    bar.dataset.id = S.convoId; clear(bar); bar.classList.remove("hidden");
+    var id = S.convoId;
+    bar.appendChild(h("div", { class: "rb" }, icon("rotate-ccw", "s"),
+      h("div", { class: "rt" }, h("b", null, T("The last task was interrupted", "Önceki iş yarıda kaldı")), r.lastUser ? h("small", null, String(r.lastUser).slice(0, 120)) : null),
+      h("button", { class: "btn xs p", onclick: function (e) {
+        var b = e.currentTarget; b.disabled = true;
+        call("run.resume", { convoId: id }).then(function (r) { if (r && r.started === false && !r.running) { b.disabled = false; toast(T("Could not continue", "Devam edilemedi")); return; } delete S.resumable[id]; S.running[id] = true; renderResume(); if (S.convoId === id) loadConvo(id); refreshConvos(); })
+          .catch(function (x) { b.disabled = false; toast(errText(x)); });
+      } }, T("Continue", "Devam et")),
+      h("button", { class: "ib sm", "aria-label": T("Dismiss", "Kapat"), onclick: function () { delete S.resumable[id]; bar.dataset.id = ""; renderResume(); } }, icon("x", "xs"))));
+  }
+
+  /* "nav" from the notification / widget / assistant: open a page, an e-mail or an event */
+  function onNav(d) {
+    var pg = d && d.page, id = d && d.id ? String(d.id) : "";
+    closeSheets(); closeDrawer();
+    if (pg === "mail" || pg === "calendar") { var keep = topPage() === "mail"; while (S.pages.length && topPage() !== "mail") popPage(); if (!keep) closeAllPages(); }
+    if (pg === "mail") { openMailPage("mail"); if (id) openMail(id, null, { folder: "inbox" }); }
+    else if (pg === "calendar") { openMailPage("cal"); if (id) openEventById(id); }
+    else if (pg === "tasks") { closeAllPages(); openTasks(); }
+    else if (pg === "files") { closeAllPages(); openFiles(id || undefined); }
+    else if (pg === "chat") { closeAllPages(); if (id) loadConvo(id); else newChat(true); }
+  }
+
+  /* long-press a message: copy, share, ask again */
+  function longPress(el, fn) {
+    var t = 0, x0 = 0, y0 = 0, fired = 0;
+    el.addEventListener("touchstart", function (e) { var p = e.touches[0]; x0 = p.clientX; y0 = p.clientY; clearTimeout(t); t = setTimeout(function () {
+      /* a long-press may also start text selection: then the user wants to select, not the menu */
+      t = setTimeout(function () { el.classList.remove("pressing"); if (window.getSelection && String(window.getSelection())) return; fired = Date.now(); if (navigator.vibrate) try { navigator.vibrate(12); } catch (x) { } fn(); }, 140);
+    }, 460); el.classList.add("pressing"); }, { passive: true });
+    el.addEventListener("touchmove", function (e) { var p = e.touches[0]; if (Math.abs(p.clientX - x0) > 10 || Math.abs(p.clientY - y0) > 10) { clearTimeout(t); el.classList.remove("pressing"); } }, { passive: true });
+    el.addEventListener("touchend", function (e) { clearTimeout(t); el.classList.remove("pressing"); if (Date.now() - fired < 400) e.preventDefault(); });
+    el.addEventListener("touchcancel", function () { clearTimeout(t); el.classList.remove("pressing"); });
+    el.addEventListener("contextmenu", function (e) { if (window.getSelection && String(window.getSelection())) return; e.preventDefault(); if (Date.now() - fired > 600) { fired = Date.now(); fn(); } });
+  }
+  function msgMenu(kind, m, idx) {
+    var msgs = (S.convo && S.convo.messages) || [];
+    var text = kind === "user" ? String(m.display != null && m.display !== "" ? m.display : stripScreen(m.content)) : String(m.content || "");
+    var ask = text;
+    if (kind === "assistant") { ask = ""; for (var i = idx - 1; i >= 0; i--) { var u = msgs[i]; if (u.role === "user" && !isInternalUser(u) && !u.steer) { ask = String(u.display || stripScreen(u.content) || ""); break; } } }
+    var opts = [["copy", T("Copy", "Kopyala"), "copy"], ["share", T("Share", "Paylaş"), "share-2"]];
+    if (kind === "assistant") opts.push(["speak", T("Read aloud", "Sesli oku"), "volume-2"]);
+    if (ask.trim()) opts.push(["again", T("Ask again", "Tekrar sor"), "repeat", ask.slice(0, 80)]);
+    if (kind === "user") opts.push(["edit", T("Edit and send", "Düzenleyip gönder"), "pencil"]);
+    optionsSheet(kind === "user" ? T("Your message", "Mesajınız") : T("yaver's answer", "yaver'in yanıtı"), opts, null, function (k) {
+      if (k === "copy") { call("copy", { text: text }); toast(T("Copied", "Kopyalandı")); }
+      else if (k === "share") call("share.text", { text: text }).catch(function (e) { toast(e.message); });
+      else if (k === "speak") call("speak", { text: text });
+      else if (k === "again") send(ask);
+      else if (k === "edit") { var ta = $("#input"); ta.value = text; autosize(); syncSend(); ta.focus(); }
+    });
+  }
+
+  /* swipe right from the left edge opens the chat list; swipe left on it closes it */
+  function edgeSwipe() {
+    var x0 = -1, y0 = 0, mode = "";
+    document.addEventListener("touchstart", function (e) {
+      var p = e.touches[0]; mode = ""; x0 = -1;
+      var drawerOn = !!$(".drawer.on");
+      if (drawerOn) { x0 = p.clientX; y0 = p.clientY; mode = "close"; return; }
+      if (p.clientX <= 36 && !S.pages.length && !sheets.length)   /* a bit wider than the system back-gesture strip, which never reaches the page */ { x0 = p.clientX; y0 = p.clientY; mode = "open"; }
+    }, { passive: true });
+    document.addEventListener("touchmove", function (e) {
+      if (x0 < 0 || !mode) return; var p = e.touches[0], dx = p.clientX - x0, dy = Math.abs(p.clientY - y0);
+      if (dy > 40) { mode = ""; return; }
+      if (mode === "open" && dx > 60) { mode = ""; openDrawer(); }
+      else if (mode === "close" && dx < -70) { mode = ""; closeDrawer(); }
+    }, { passive: true });
+  }
+
+  /* pull down at the top of the mail list to refresh */
+  function pullToRefresh(body, test, run) {
+    var y0 = -1, dy = 0, ind = h("div", { class: "ptr" }, icon("refresh-cw", "s"), h("span", null, ""));
+    body.insertBefore(ind, body.firstChild);
+    function set(v) { dy = v; ind.style.height = Math.min(64, v * 0.5) + "px"; ind.classList.toggle("ready", v > 110); ind.lastChild.textContent = v > 110 ? T("Release to refresh", "Yenilemek için bırakın") : T("Pull to refresh", "Yenilemek için çekin"); }
+    body.addEventListener("touchstart", function (e) { y0 = body.scrollTop <= 0 && test() ? e.touches[0].clientY : -1; dy = 0; }, { passive: true });
+    body.addEventListener("touchmove", function (e) { if (y0 < 0) return; var v = e.touches[0].clientY - y0; if (v <= 0) { set(0); return; } if (body.scrollTop > 0) { y0 = -1; set(0); return; } set(v); }, { passive: true });
+    body.addEventListener("touchend", function () { if (y0 < 0) return; y0 = -1; if (dy > 110) { ind.classList.add("busy"); ind.lastChild.textContent = T("Refreshing…", "Yenileniyor…"); run(); setTimeout(function () { ind.classList.remove("busy"); set(0); }, 700); } else set(0); });
+  }
+
   /* ------------------------------------------------------------ internals for parity.js */
   window.YVI = { S: S, call: call, h: h, icon: icon, T: T, $: $, clear: clear, toast: toast, sheet: sheet, editSheet: editSheet, optionsSheet: optionsSheet, md: md,
     pushPage: pushPage, popPage: popPage, topPage: topPage, closeAllPages: closeAllPages, renderThread: renderThread, loadConvo: loadConvo, refreshState: refreshState, setCfg: setCfg,
@@ -3534,7 +3903,8 @@
     newChat: newChat, runCommand: runCommand, send: send, renderAtts: renderAtts, autosize: autosize, syncSend: syncSend, addSide: addSide, refreshConvos: refreshConvos,
     COMMANDS: COMMANDS, pickModel: pickModel, editFile: typeof editFile === "function" ? editFile : null, timeOf: timeOf, bytes: bytes, wsUrl: wsUrl, kbChanged: kbChanged,
     renderSettings: renderSettings, renderShell: renderShell, closeDrawer: closeDrawer, openDrawer: openDrawer, stop: stop,
-    chatMenu: chatMenu, ctxSheet: ctxSheet, openSchedule: openSchedule, openSetup: openSetup, openMail: openMail, composeSheet: composeSheet, newTaskSheet: newTaskSheet, taskSheet: taskSheet, peopleSheet: peopleSheet, gatesLogSheet: gatesLogSheet, eventSheet: eventSheet, onEvent: function (t, d) { onEvent(t, d); }, renderPlanBar: renderPlanBar, sheets: sheets };
+    chatMenu: chatMenu, ctxSheet: ctxSheet, openSchedule: openSchedule, openSetup: openSetup, openMail: openMail, composeSheet: composeSheet, newTaskSheet: newTaskSheet, taskSheet: taskSheet, peopleSheet: peopleSheet, gatesLogSheet: gatesLogSheet, eventSheet: eventSheet, onEvent: function (t, d) { onEvent(t, d); }, renderPlanBar: renderPlanBar, sheets: sheets,
+    loadBrief: loadBrief, BRIEF: BRIEF, openEventById: openEventById, msgMenu: msgMenu, renderMailList: renderMailList };
 
   /* ------------------------------------------------------------ start */
   function start() {
@@ -3545,6 +3915,13 @@
       if (st.current) loadConvo(st.current);
       refreshConvos();
       if (!st.llm.ready) openSetup();
+      edgeSwipe();
+      /* a screen captured before the interface was ready and not announced by a launch {action:"screen"} (those are replayed
+         right after "ready"): take it a moment later, unless a launch already put it on the composer */
+      setTimeout(function () {
+        if (S.screen || !st.llm.ready) return;
+        call("screen.context.take").then(function (d) { if (d && !S.screen) onScreenContext(d, false); }).catch(function () { });
+      }, 1200);
     }).catch(function (e) { document.body.textContent = "yaver: " + e.message; });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();

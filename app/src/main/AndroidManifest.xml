@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
@@ -45,6 +46,10 @@
         </intent>
         <intent>
             <action android:name="android.intent.action.DIAL" />
+        </intent>
+        <!-- yaver 5: FiveRecognitionService forwards to the phone's real speech recognizer -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
         </intent>
     </queries>
 
@@ -132,6 +137,49 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- yaver 5: home-screen widget (today: next meeting, unread / needs reply, Ask + mic) -->
+        <receiver
+            android:name=".app.FiveWidgetProvider"
+            android:exported="true"
+            android:label="@string/five_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/five_widget_info" />
+        </receiver>
+
+        <!-- yaver 5: the default digital assistant (long-press home) with the screen's text and screenshot -->
+        <service
+            android:name=".app.FiveVoiceService"
+            android:exported="true"
+            android:label="@string/five_assist_label"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/interaction_service" />
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".app.FiveVoiceSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+        <service
+            android:name=".app.FiveRecognitionService"
+            android:exported="true"
+            android:label="@string/five_assist_label">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/five_recognition_service" />
+        </service>
 
         <receiver android:name=".app.ScheduleReceiver" android:exported="false" />
         <receiver android:name=".app.MailActionReceiver" android:exported="false" />

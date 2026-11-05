@@ -182,10 +182,28 @@ object Parity {
     // ---------------------------------------------------------------- answers: which paths exist (clickable file names)
     fun filesExist(paths: JSONArray): JSONObject {
         val out = JSONObject()
+        var index: Map<String, String>? = null   // file name → newest path in /workspace (built once, only when needed)
+        fun byName(name: String): String? {
+            val idx = index ?: run {
+                val m = HashMap<String, Pair<String, Long>>()
+                val root = VPath.workspaceDir()
+                try {
+                    var n = 0
+                    root.walkTopDown().onEnter { it.name != ".yaver-trash" && !it.name.startsWith(".") }.filter { it.isFile }.forEach { f ->
+                        if (++n > 20000) return@forEach
+                        val k = f.name.lowercase(); val prev = m[k]
+                        if (prev == null || f.lastModified() > prev.second) m[k] = Pair(VPath.of(f), f.lastModified())
+                    }
+                } catch (_: Exception) {}
+                m.mapValues { it.value.first }.also { index = it }
+            }
+            return idx[name.lowercase()]
+        }
         for (i in 0 until minOf(paths.length(), 80)) {
             val p = paths.optString(i).trim(); if (p.isEmpty()) continue
-            val cands = listOf(VPath.normTool(p), VPath.norm("${VPath.WS}/uploads/${p.substringAfterLast('/')}"), VPath.norm("${VPath.WS}/outputs/${p.substringAfterLast('/')}"))
-            val hit = cands.firstOrNull { try { VPath.isFile(it) } catch (_: Exception) { false } }
+            val b = p.substringAfterLast('/')
+            val cands = listOf(VPath.normTool(p)) + listOf("uploads", "outputs", "downloads", "mail", "plots").map { VPath.norm("${VPath.WS}/$it/$b") }
+            val hit = cands.firstOrNull { try { VPath.isFile(it) } catch (_: Exception) { false } } ?: (if (!p.contains('/')) byName(b) else null)
             if (hit != null) out.put(p, hit)
         }
         return out

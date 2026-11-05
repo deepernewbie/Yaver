@@ -53,6 +53,9 @@ object Refs {
         return synchronized(lock) { load()[t] } ?: (s ?: "")
     }
 
+    /** The real id behind a handle, or null when [t] is not a known handle (a word that only looks like one). */
+    fun known(t: String): String? = if (!REF_RX.matches(t)) null else synchronized(lock) { load()[t] }
+
     /** Long ids in a tool result → handles. */
     fun short(text: String): String {
         if (text.length < 34 || !ID_RX.containsMatchIn(text)) return text

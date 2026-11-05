@@ -181,7 +181,13 @@ object Bridge {
         if (!Cfg.llmReady) throw IllegalStateException(Y.t("Choose a model first (Settings → Model).", "Önce bir model seçin (Ayarlar → Model)."))
         val id = a.str("convoId")
         val c = (if (id.isNotEmpty()) Convos.load(id) else null) ?: Convo.create()
-        val att = a.list("attachments")
+        // yaver 5: chat.send {screen:true} attaches the captured screen (FiveScreen) to this message as context
+        val sc = if (a.optBoolean("screen")) FiveScreen.take() else null
+        if (sc != null) {
+            if (a.optString("display").isBlank()) a.put("display", a.optString("text").trim().ifEmpty { Y.t("What is on my screen?", "Ekranımda ne var?") })
+            a.put("text", FiveLogic.screenPrompt(sc.app.ifEmpty { "?" }, sc.pkg, sc.text, sc.image != null, a.optString("text")))
+        }
+        val att = a.list("attachments").let { l -> if (sc?.image != null && Workspace.resolve(sc.image).isFile) l + sc.image else l }
         Learn.touch()
         if (runs.containsKey(c.id)) {
             // a turn is running: the message joins it at the next safe point (or starts the next turn)
@@ -230,6 +236,8 @@ object Bridge {
         "convos.load" -> {
             val c = Convos.load(a.str("id")) ?: throw IllegalArgumentException(Y.t("Conversation not found", "Sohbet bulunamadı"))
             val r = runs[c.id]
+            // a turn the app died in: close its open tool calls so the history is valid (the "Continue" banner asks run.resumable)
+            if (r == null) try { if (Agent.repair(c)) Convos.save(c) } catch (e: Throwable) { Diag.e("resume", "repair on load", e) }
             c.toJson().apply { remove("system") }.put("running", r != null).put("live", r?.text?.toString() ?: "").put("status", r?.status ?: "")
                 .put("followups", JSONObject().put("items", JSONArray(FollowUps.get(c.id))).put("labels", FollowUps.labels()))
                 .put("planning", Planning.state(c.id))
@@ -325,6 +333,31 @@ object Bridge {
             JSONArray(evs.map { e -> JSONObject().put("id", e.id).put("subject", e.subject).put("start", Exchange.parseTime(e.start)).put("end", Exchange.parseTime(e.end)).put("location", e.location)
                 .put("organizer", e.organizer?.short ?: "").put("allDay", e.allDay).put("response", e.response).put("cancelled", e.cancelled).put("meeting", e.meeting) })
         }
+        // ---- yaver 5: today brief, screen-aware assist, resume interrupted runs
+        "brief.today" -> FiveBrief.today()
+        "brief.refresh" -> { FiveBrief.refreshAsync(true); FiveBrief.snapshot() }
+        "screen.context.take" -> FiveScreen.take()?.toJson()   // null when there is no capture (ret sends JSON null)
+        "screen.context.clear" -> { FiveScreen.clear(); true }
+        "run.resumable" -> {
+            val c = Convos.load(a.str("convoId"))
+            if (c == null || runs.containsKey(c.id)) null
+            else try {
+                // Agent.resumeInfo's own fields plus the names the UI uses
+                (FiveHooks.resumeInfo ?: { x: Convo -> Agent.resumeInfo(x) }).invoke(c)?.also { j ->
+                    j.put("convoId", c.id).put("lastUser", j.optString("question")).put("interruptedAt", j.optLong("at"))
+                }
+            } catch (e: Throwable) { Diag.e("resume", "resumeInfo", e); null }
+        }
+        "run.resume" -> {
+            val id = a.str("convoId")
+            if (!Cfg.llmReady) throw IllegalStateException(Y.t("Choose a model first (Settings → Model).", "Önce bir model seçin (Ayarlar → Model)."))
+            if (Convos.load(id) == null) throw IllegalArgumentException(Y.t("Conversation not found", "Sohbet bulunamadı"))
+            if (runs.containsKey(id) || Convos.isLive(id)) JSONObject().put("started", false).put("running", true)
+            else {
+                Prefs.put("currentConvo", id)
+                JSONObject().put("started", Turns.start(id, FiveHooks.RESUME_MSG, Y.t("Continue the interrupted task", "Yarım kalan işe devam"), "resume")).put("convoId", id)
+            }
+        }
         "mail.respond" -> { Mail.use { it.respond(a.str("id"), a.str("response"), a.str("message")) }; true }
         else -> if (MailUi.handles(m)) MailUi.dispatch(m, a) else if (MailPlus.handles(m)) MailPlus.dispatch(m, a) else if (Parity.handles(m)) Parity.dispatch(m, a) else harness(m, a)
     }
@@ -402,6 +435,16 @@ object Bridge {
             fun add(name: String, email: String, extra: String) { if (email.isNotEmpty() && seen.add(email.lowercase())) out.put(JSONObject().put("name", name.ifEmpty { email }).put("email", email).put("extra", extra)) }
             try { MailIndex.people(q, 8).forEach { add(it.name, it.email, "") } } catch (_: Throwable) {}
             if (out.length() < 8 && q.trim().length >= 2) try { Mail.use { it.resolve(q, 8) }.forEach { add(it.name, it.email, listOf(it.title, it.dept).filter { s -> s.isNotBlank() }.joinToString(" · ")) } } catch (_: Throwable) {}
+            out
+        }
+        "mail.refs" -> {
+            // which of these words are e-mail handles (m + 7 letters/digits) — answers mention them; they become links
+            val out = JSONObject(); val arr = a.optJSONArray("tokens") ?: JSONArray()
+            for (i in 0 until minOf(arr.length(), 200)) {
+                val t = arr.optString(i); val id = Refs.known(t) ?: continue
+                val e = try { MailIndex.entry(id) } catch (_: Throwable) { null }
+                out.put(t, JSONObject().put("subject", e?.s ?: "").put("from", e?.fr?.let { it.name.ifEmpty { it.email } } ?: ""))
+            }
             out
         }
         "mail.title" -> {

@@ -30,8 +30,9 @@ object Diag {
 
     private fun write(level: String, tag: String, msg: String) {
         try {
-            val line = "${fmt.format(Date())} $level/$tag: ${scrub(msg).replace('\n', ' ').take(1200)}\n"
+            val body = scrub(msg).replace('\n', ' ').take(1200)
             synchronized(lock) {
+                val line = "${fmt.format(Date())} $level/$tag: $body\n"   // SimpleDateFormat is not thread-safe
                 val f = file() ?: return
                 if (f.length() > MAX) {
                     val keep = f.readText().takeLast((MAX / 2).toInt())
