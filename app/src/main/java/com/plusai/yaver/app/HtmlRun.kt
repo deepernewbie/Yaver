@@ -34,6 +34,10 @@ object HtmlRun {
         val errors = ArrayList<JSONObject>(); val console = ArrayList<JSONObject>(); val resources = ArrayList<JSONObject>(); val net = ArrayList<JSONObject>()
         val snaps = ArrayList<JSONObject>(); val actions = HashMap<Int, JSONObject>(); val missing = ArrayList<Pair<String, String>>()
         @Volatile var started = false; @Volatile var loaded = false; var timeout = false
+        /** files the page saved (downloads, window.yaver.save): path → bytes */
+        val saved = ArrayList<Pair<String, Long>>(); val saveErr = ArrayList<String>()
+        val open = HashMap<String, Triple<java.io.OutputStream, String, java.io.File>>()
+        val pending = java.util.concurrent.atomic.AtomicInteger(0); var savedBytes = 0L
     }
 
     private fun urlOf(vp: String) = BASE + vp.removePrefix(VPath.WS).split('/').joinToString("/") { Uri.encode(it) }
@@ -56,9 +60,21 @@ function mem(){var d={};return{getItem:function(k){return k in d?d[k]:null},setI
 window.alert=function(m){S("console",{level:"info",msg:"alert(): "+m})};window.confirm=function(m){S("console",{level:"info",msg:"confirm(): "+m+" → OK"});return true};window.prompt=function(m,d){S("console",{level:"info",msg:"prompt(): "+m});return d||""};
 function snap(label){var b=document.body,de=document.documentElement;S("snap",{label:label,title:document.title,text:b?b.innerText.slice(0,4000):"",elements:document.querySelectorAll("*").length,overflowX:de.scrollWidth>innerWidth+2?de.scrollWidth:0,height:de.scrollHeight,broken:[].slice.call(document.images).filter(function(i){return i.complete&&i.naturalWidth===0&&(i.currentSrc||i.src)}).map(function(i){return i.currentSrc||i.src}).slice(0,20),emptyLinks:[].slice.call(document.querySelectorAll("a[href='#'],a:not([href])")).length,noAlt:[].slice.call(document.images).filter(function(i){return !i.hasAttribute("alt")}).length})}
 window.addEventListener("load",function(){setTimeout(function(){snap("load")},$waitMs)});
-window.__yvAct=function(m){if(!m||m.__yp!==T||!m.act)return;var a=m.act,r={ok:true};try{var el=a.selector?document.querySelector(a.selector):null;if(a.selector&&!el)throw new Error("no element matches "+a.selector);
-if(a.click){el.scrollIntoView&&el.scrollIntoView();el.click()}else if(a.type!=null){el.focus();el.value=a.type;el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}))}else if(a.key){(el||document.activeElement||document.body).dispatchEvent(new KeyboardEvent("keydown",{key:a.key,bubbles:true}))}else if(a.eval){r.value=String((0,eval)(a.eval)).slice(0,1000)}}catch(err){r={ok:false,error:String(err&&err.message||err)}}
-setTimeout(function(){S("acted",{i:m.i,r:r});snap("after action "+(m.i+1))},a.wait||300)};
+var SV=0;function B64(u){var s="",C=32768;for(var i=0;i<u.length;i+=C)s+=String.fromCharCode.apply(null,u.subarray(i,i+C));return btoa(s)}
+function saveU8(name,u){var id="s"+(++SV);try{if(!YaverProbe.saveBegin(T,id,String(name||"download"),u.length))return}catch(e){return}var C=393216;for(var i=0;i<u.length;i+=C)YaverProbe.saveChunk(T,id,B64(u.subarray(i,i+C)));YaverProbe.saveEnd(T,id)}
+function saveAny(name,d){YaverProbe.pend(T,1);function done(){YaverProbe.pend(T,-1)}function bad(e){S("console",{level:"error",msg:"saving "+name+" failed: "+(e&&e.message||e)});done()}
+try{if(d instanceof Blob)return d.arrayBuffer().then(function(b){saveU8(name,new Uint8Array(b));done()},bad);if(d instanceof ArrayBuffer){saveU8(name,new Uint8Array(d));return done()}if(ArrayBuffer.isView(d)){saveU8(name,new Uint8Array(d.buffer,d.byteOffset,d.byteLength));return done()}
+var t=String(d==null?"":d);if(/^(data:|blob:)/.test(t))return fetch(t).then(function(r){return r.arrayBuffer()}).then(function(b){saveU8(name,new Uint8Array(b));done()},bad);saveU8(name,new TextEncoder().encode(t));done()}catch(e){bad(e)}}
+function dlName(a){var n=a.getAttribute("download");if(n)return n;var h=a.href||"";return /^data:/.test(h)?"download":(h.split("/").pop()||"download")}
+function grab(a){if(!a||a.__yvSaved)return false;var h=a.href||"";if(!a.hasAttribute("download")||!/^(blob:|data:)/.test(h))return false;a.__yvSaved=1;saveAny(dlName(a),h);return true}
+try{var AC=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=function(){if(grab(this))return;return AC.apply(this,arguments)}}catch(_){}
+document.addEventListener("click",function(e){var a=e.target&&e.target.closest&&e.target.closest("a[download]");if(a&&grab(a))e.preventDefault()},true);
+window.yaver={save:function(n,d){return saveAny(n,d)}};
+window.__yvSaveLinks=function(){var n=0;[].slice.call(document.querySelectorAll("a[download]")).forEach(function(a){if(grab(a))n++});return n};
+window.__yvAct=function(m){if(!m||m.__yp!==T||!m.act)return;var a=m.act,r={ok:true},later=false;function fin(){setTimeout(function(){S("acted",{i:m.i,r:r});snap("after action "+(m.i+1))},a.wait||300)}
+try{var el=a.selector?document.querySelector(a.selector):null;if(a.selector&&!el)throw new Error("no element matches "+a.selector);
+if(a.click){el.scrollIntoView&&el.scrollIntoView();el.click()}else if(a.type!=null){el.focus();el.value=a.type;el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}))}else if(a.key){(el||document.activeElement||document.body).dispatchEvent(new KeyboardEvent("keydown",{key:a.key,bubbles:true}))}else if(a.eval){var v=(0,eval)(a.eval);if(v&&typeof v.then==="function"){later=true;v.then(function(x){r.value=(x===undefined?"(promise resolved)":String(x)).slice(0,1000);fin()},function(e){r={ok:false,error:"promise rejected: "+String(e&&e.message||e)};fin()})}else r.value=String(v).slice(0,1000)}}catch(err){r={ok:false,error:String(err&&err.message||err)}}
+if(!later)fin()};
 S("start",{})})();</script>""".replace("\n", "")
 
     private var view: WebView? = null
@@ -69,7 +85,40 @@ S("start",{})})();</script>""".replace("\n", "")
     private var onLoad: CountDownLatch? = null
     private val waits = HashMap<Int, CountDownLatch>()
 
+    private const val MAX_SAVE = 300L * 1024 * 1024
+
+    private fun freePath(name0: String): String {
+        val name = name0.substringAfterLast('/').replace(Regex("[\\\\:*?\"<>|\\u0000-\\u001f]"), "_").trim().trimStart('.').ifEmpty { "download" }.take(120)
+        val dir = "${VPath.WS}/downloads"
+        val stem = name.substringBeforeLast('.', name); val ext = name.substringAfterLast('.', "").let { if (it.isEmpty() || it == name) "" else ".$it" }
+        var p = "$dir/$name"; var k = 2
+        while (VPath.exists(p)) p = "$dir/$stem-${k++}$ext"
+        return p
+    }
+
     class Probe {
+        @JavascriptInterface fun pend(t: String?, d: Int) { val r = cur ?: return; if (t == token) r.pending.addAndGet(d) }
+        @JavascriptInterface fun saveBegin(t: String?, id: String?, name: String?, size: Long): Boolean {
+            val r = cur ?: return false; if (t != token || id == null) return false
+            synchronized(r) {
+                if (r.savedBytes + size > MAX_SAVE) { r.saveErr.add("${name ?: "download"}: too large (${size / 1048576} MB)"); return false }
+                return try {
+                    val vp = freePath(name ?: "download"); val f = VPath.fileW(vp); f.parentFile?.mkdirs()
+                    r.open[id] = Triple(java.io.BufferedOutputStream(java.io.FileOutputStream(f), 1 shl 16), vp, f); r.pending.incrementAndGet(); true
+                } catch (e: Exception) { r.saveErr.add("${name ?: "download"}: ${e.message}"); false }
+            }
+        }
+        @JavascriptInterface fun saveChunk(t: String?, id: String?, b64: String?) {
+            val r = cur ?: return; if (t != token) return
+            val o = synchronized(r) { r.open[id] } ?: return
+            try { val b = android.util.Base64.decode(b64 ?: "", android.util.Base64.DEFAULT); o.first.write(b); synchronized(r) { r.savedBytes += b.size } } catch (e: Exception) { synchronized(r) { r.saveErr.add("${VPath.base(o.second)}: ${e.message}") } }
+        }
+        @JavascriptInterface fun saveEnd(t: String?, id: String?) {
+            val r = cur ?: return; if (t != token) return
+            val o = synchronized(r) { r.open.remove(id) } ?: return
+            try { o.first.close(); VPath.commit(o.second); synchronized(r) { r.saved.add(Pair(o.second, o.third.length())) } } catch (e: Exception) { synchronized(r) { r.saveErr.add("${VPath.base(o.second)}: ${e.message}") } }
+            r.pending.decrementAndGet()
+        }
         @JavascriptInterface fun send(t: String?, type: String?, json: String?) {
             val r = cur ?: return
             if (t != token) return
@@ -178,12 +227,23 @@ S("start",{})})();</script>""".replace("\n", "")
                 val l = CountDownLatch(1); synchronized(waits) { waits[i] = l }
                 val msg = JSONObject().put("__yp", tk).put("act", a).put("i", i)
                 onMain { view?.evaluateJavascript("window.__yvAct&&window.__yvAct($msg)", null) }
-                l.await(maxOf(1500L, a.optLong("wait", 300) + 1500), TimeUnit.MILLISECONDS)
+                val lim = maxOf(1500L, a.optLong("wait", 300) + 1500) + (if (a.has("eval")) 60000L else 0L)
+                val t0 = System.currentTimeMillis()
+                while (!l.await(200, TimeUnit.MILLISECONDS)) { cancel?.check(); if (System.currentTimeMillis() - t0 > lim) break }
                 synchronized(res) { if (res.actions[i] == null) res.actions[i] = JSONObject().put("ok", false).put("error", "no answer (the page may be frozen)") }
                 Thread.sleep(80)
             }
             Thread.sleep(250)
+            // download links the page made but nobody clicked are saved too; then wait for saves still in flight
+            if (res.loaded && view != null) {
+                onMain { view?.evaluateJavascript("window.__yvSaveLinks&&window.__yvSaveLinks()", null) }
+                Thread.sleep(300)
+                val t0 = System.currentTimeMillis()
+                while (res.pending.get() > 0 && System.currentTimeMillis() - t0 < 90000) { cancel?.check(); Thread.sleep(200) }
+                if (res.pending.get() > 0) synchronized(res) { res.saveErr.add("a save did not finish in time") }
+            }
         } finally {
+            synchronized(res) { for ((_, o) in res.open) { try { o.first.close(); o.third.delete() } catch (_: Exception) {} }; res.open.clear() }
             cur = null; token = ""
             try { onMain { view?.loadUrl("about:blank"); Unit } } catch (_: Throwable) {}
         }
@@ -236,6 +296,8 @@ S("start",{})})();</script>""".replace("\n", "")
         if (r.net.isNotEmpty()) L.add("\nNetwork requests that failed (${r.net.size}) — fetch()/XHR the page makes; data it depends on may be missing:\n" + r.net.take(8).joinToString("\n") { x -> "- ${local(x.optString("url"))} → ${if (x.optInt("status") > 0) "HTTP " + x.optInt("status") else x.optString("error").ifEmpty { "failed" }}" })
         if (external.isNotEmpty()) L.add("\nExternal resources that did not load (${external.size}) — may be offline/blocked here, not necessarily a bug:\n" + external.take(8).joinToString("\n") { "- <${it.optString("tag")}> ${it.optString("url")}" })
         if (failedActs.isNotEmpty()) L.add("\nActions that failed:\n" + failedActs.joinToString("\n") { "- action ${it.key + 1}: ${it.value.optString("error")}" })
+        if (r.saved.isNotEmpty()) L.add("\nFiles the page saved (${r.saved.size}) — in the workspace now:\n" + r.saved.joinToString("\n") { "- ${it.first} (${if (it.second < 1048576) "%.1f KB".format(it.second / 1024.0) else "%.1f MB".format(it.second / 1048576.0)})" })
+        if (r.saveErr.isNotEmpty()) L.add("\nSaving failed: " + r.saveErr.joinToString("; "))
         val evals = r.actions.entries.sortedBy { it.key }.filter { it.value.optBoolean("ok") && it.value.has("value") }
         if (evals.isNotEmpty()) L.add("\nValues:\n" + evals.joinToString("\n") { "- action ${it.key + 1} → ${it.value.optString("value")}" })
         if (cwarn.isNotEmpty()) L.add("\nconsole.warn (${cwarn.size}):\n" + cwarn.take(6).joinToString("\n") { "- " + clip(local(it.optString("msg")), 250) })
@@ -261,7 +323,7 @@ S("start",{})})();</script>""".replace("\n", "")
             .put("description", "Optional steps after load: click (selector), type (+selector), key, eval (JS expression, returns its value), wait (ms after the step)")
         Tools.add(Tool(
             "run_html",
-            "Run an HTML file from the workspace in a hidden browser view and report what goes wrong: JavaScript errors with file:line and the source line, unhandled promise rejections, console errors/warnings, missing local files (CSS/JS/images referenced but not in the workspace), broken images, horizontal overflow, and the visible text. Local CSS/JS/images and ES-module imports are loaded from the workspace. Optional actions exercise the page: [{\"click\":\"#btn\"}, {\"selector\":\"#name\",\"type\":\"Ayşe\"}, {\"key\":\"Enter\"}, {\"eval\":\"document.querySelectorAll('li').length\"}, {\"wait\":500}]. Use it after writing or changing an HTML page: fix every reported error with patch, then run again until it reports no errors. Also check a narrow screen with width 390.",
+            "Run an HTML file from the workspace in a hidden browser view and report what goes wrong: JavaScript errors with file:line and the source line, unhandled promise rejections, console errors/warnings, missing local files (CSS/JS/images referenced but not in the workspace), broken images, horizontal overflow, and the visible text. Local CSS/JS/images and ES-module imports are loaded from the workspace. Optional actions exercise the page: [{\"click\":\"#btn\"}, {\"selector\":\"#name\",\"type\":\"Ayşe\"}, {\"key\":\"Enter\"}, {\"eval\":\"document.querySelectorAll('li').length\"}, {\"wait\":500}]. A page can save files to the workspace (/workspace/downloads): download links/buttons it clicks (blob or data URLs, also links it only creates) and window.yaver.save(name, blob|ArrayBuffer|text) — useful for processing in the browser engine (Web Audio, canvas). An eval that returns a promise is awaited (up to 60 s). Use it after writing or changing an HTML page: fix every reported error with patch, then run again until it reports no errors. Also check a narrow screen with width 390.",
             P.props("path" to P.s("Path of the .html file"), "actions" to actionsSchema, "width" to toolInt("Viewport width in px (default 1280; use 390 for a phone)"), "wait" to toolInt("Milliseconds to wait after load before checking (default 1200)")),
             listOf("path")
         ) { a, ctx ->

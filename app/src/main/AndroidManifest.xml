@@ -49,6 +49,7 @@
     </queries>
 
     <application
+        android:largeHeap="true"
         android:name=".app.YaverApp"
         android:label="yaver"
         android:icon="@mipmap/ic_launcher"

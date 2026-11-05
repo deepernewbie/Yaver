@@ -38,6 +38,8 @@ object ShellHooks {
     @Volatile var archive: ArchiveHook? = null
     /** Called after files were unpacked (the original re-indexes the disk for search). */
     @Volatile var onFilesChanged: (() -> Unit)? = null
+    /** ffmpeg / ffprobe / media: the phone's audio/video codecs (Media.kt); args include the command, cwd resolves paths. */
+    @Volatile var media: ((List<String>, String, Cancel?) -> String)? = null
 }
 
 /**
@@ -335,6 +337,10 @@ class Shell private constructor() {
                 val r = archive().pack(a.drop(1).map { R(it) }, R(a[0]), ctx?.cancel)
                 return "created ${r.second} with ${r.first} files\n"
             }
+            "ffmpeg", "ffprobe", "media" -> {
+                val h = ShellHooks.media ?: throw ShErr("$cmd: audio/video tools are not available in this version of yaver")
+                return try { h(listOf(cmd) + args, cwd, ctx?.cancel) } catch (e: ShErr) { throw e } catch (e: CancelledException) { throw e } catch (e: Exception) { throw ShErr(e.message ?: e.javaClass.simpleName) }
+            }
             "python", "python3" -> return shellPython(args, stdin)
             "pip", "pip3" -> return CodeEngine.pip(args, ctx?.convo?.id, ctx?.cancel) + "\n"
             "node", "js" -> {
@@ -343,7 +349,7 @@ class Shell private constructor() {
                 return r.second + "\n"
             }
         }
-        throw ShErr("command not found (this is a virtual shell over yaver's workspace on the phone; run 'help'). For computation use python or execute_code.")
+        throw ShErr("command not found (this is a virtual shell over yaver's workspace on the phone; run 'help'). For computation use python or execute_code; for audio/video use ffmpeg/ffprobe/media here or the media tool.")
     }
 
     private fun archive(): ArchiveHook = ShellHooks.archive ?: throw ShErr("archives are not available in this version of yaver")
@@ -1002,7 +1008,7 @@ class Shell private constructor() {
         private val shells = ConcurrentHashMap<String, Shell>()
         fun of(convoId: String): Shell = shells.getOrPut(convoId) { Shell() }
 
-        const val HELP = "Virtual shell over yaver's disk on the phone (no real OS).\nDisk: /workspace (your files, cwd) · /.yaver = ~ (PERSONA.md, skills/<name>/ with scripts and templates, memories/ read-only, sessions/ read-only) · /tmp\nFiles: pwd cd ls[-la] tree cat head tail wc touch mkdir rm[-rf] rmdir mv cp[-r] ln stat file find[-name -type] du df realpath tee\nText: echo printf grep[-inrvlc] sort[-nru] uniq cut tr sed awk jq diff rev tac nl paste column fold shuf xargs base64 sha256sum sha1sum md5sum\nScripting: VAR=value  \$VAR \${VAR} \$? \$(cmd) `cmd` \$((1+2))  for x in a b *.csv; do …; done  while/until COND; do …; done  if COND; then …; elif …; else …; fi  test / [ ]  true false seq expr basename dirname sleep export break continue exit\nOperators: | ; && || > >> 2>/dev/null\nSystem: date whoami uname hostname id env printenv which clear\nNet & archives: curl/wget[-o] unzip [-d] tar -x|-t|-c [-C] gunzip zip [-r]\nCode: python -c|FILE (CPython/Pyodide; sees the same disk) pip install|list|uninstall node -e|FILE (JavaScript)\n"
+        const val HELP = "Virtual shell over yaver's disk on the phone (no real OS).\nDisk: /workspace (your files, cwd) · /.yaver = ~ (PERSONA.md, skills/<name>/ with scripts and templates, memories/ read-only, sessions/ read-only) · /tmp\nFiles: pwd cd ls[-la] tree cat head tail wc touch mkdir rm[-rf] rmdir mv cp[-r] ln stat file find[-name -type] du df realpath tee\nText: echo printf grep[-inrvlc] sort[-nru] uniq cut tr sed awk jq diff rev tac nl paste column fold shuf xargs base64 sha256sum sha1sum md5sum\nScripting: VAR=value  \$VAR \${VAR} \$? \$(cmd) `cmd` \$((1+2))  for x in a b *.csv; do …; done  while/until COND; do …; done  if COND; then …; elif …; else …; fi  test / [ ]  true false seq expr basename dirname sleep export break continue exit\nOperators: | ; && || > >> 2>/dev/null\nSystem: date whoami uname hostname id env printenv which clear\nNet & archives: curl/wget[-o] unzip [-d] tar -x|-t|-c [-C] gunzip zip [-r]\nCode: python -c|FILE (CPython/Pyodide; sees the same disk) pip install|list|uninstall node -e|FILE (JavaScript)\nAudio/video (the phone's codecs): ffprobe FILE · ffmpeg [-ss S] -i IN [-t D] [-ac 1] OUT.wav|OUT.m4a · media enhance FILE [OUT] [--strength 0..1] (noise reduction, clearer speech, even level)\n"
 
         fun register() {
             Tools.add(Tool(

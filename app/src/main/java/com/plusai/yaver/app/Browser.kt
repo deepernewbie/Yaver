@@ -56,6 +56,7 @@ object Browser {
             v.webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) { loading = true; lastEvent = System.currentTimeMillis() }
                 override fun onPageFinished(view: WebView?, url: String?) { loading = false; lastEvent = System.currentTimeMillis() }
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? = LocalView.serve(request)
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     val sc = request?.url?.scheme ?: return false
                     return !(sc == "http" || sc == "https" || sc == "about" || sc == "data" || sc == "blob" || sc == "javascript")
@@ -202,9 +203,24 @@ object Browser {
         return o
     }
 
+    /** A file on yaver's disk (/workspace/…, file://…, ~/…) as an address the browser can load (served read-only from the disk). */
+    fun localUrl(u0: String): String? {
+        val t = u0.trim()
+        val p = when {
+            t.startsWith("file://") -> t.removePrefix("file://")
+            t.startsWith("/") && !t.startsWith("//") -> t
+            t.startsWith("~/") || t.startsWith("workspace/") || t.startsWith(".yaver/") -> t
+            else -> return null
+        }
+        val vp = VPath.normTool(android.net.Uri.decode(p.substringBefore('#').substringBefore('?')))
+        if (!VPath.isFile(vp)) throw IllegalArgumentException("no such file $vp")
+        return LocalView.urlOf(vp) + t.substringAfter('?', "").let { if (it.isEmpty()) "" else "?$it" }
+    }
+
     /** The URL bar of the live view: open a page (also starts the browser) or go back. */
     fun userGo(url: String): JSONObject {
         var u = url.trim(); if (u.isEmpty()) throw IllegalArgumentException(Y.t("Enter an address", "Bir adres girin"))
+        localUrl(u)?.let { u = it }
         if (!Regex("^[a-z]+:", RegexOption.IGNORE_CASE).containsMatchIn(u)) u = if (u.contains('.') && !u.contains(' ')) "https://$u" else "https://duckduckgo.com/html/?q=" + java.net.URLEncoder.encode(u, "UTF-8")
         if (!Regex("^https?:", RegexOption.IGNORE_CASE).containsMatchIn(u)) throw IllegalArgumentException(Y.t("Only web addresses", "Yalnızca web adresleri"))
         val v = ensure(); onMain { v.loadUrl(u) }
@@ -264,6 +280,7 @@ object Browser {
             when (action) {
                 "open" -> {
                     var u = a.str("url").ifEmpty { throw IllegalArgumentException("url is required") }
+                    localUrl(u)?.let { u = it }
                     if (!Regex("^[a-z]+:").containsMatchIn(u)) u = if (u.contains('.') && !u.contains(' ')) "https://$u" else "https://duckduckgo.com/html/?q=" + java.net.URLEncoder.encode(u, "UTF-8")
                     ctx.progress(Y.t("Opening ", "Açılıyor: ") + (android.net.Uri.parse(u).host ?: u))
                     val v = ensure()

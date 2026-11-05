@@ -248,7 +248,7 @@ object Llm {
         val r = chat(msgs, null, m, cancel = cancel, maxTokens = maxTokens, stream = false, effort = "low")
         if (r.content.isNotBlank()) return r.content
         Diag.i("llm", "$purpose: empty answer (finish ${r.finish}, ${r.reasoning.length} reasoning chars) — retrying with a larger budget")
-        val big = maxOf(4000, maxTokens * 3)
+        val big = maxOf(8000, maxTokens * 4)   // free reasoning models think 4–5k tokens even at "low" effort
         val r2 = chat(msgs, null, m, cancel = cancel, maxTokens = big, stream = false, effort = "low")
         if (r2.content.isNotBlank()) return r2.content
         if (fallbackToMain && Cfg.model.isNotEmpty() && m != Cfg.model) {

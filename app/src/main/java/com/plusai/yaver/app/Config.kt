@@ -14,7 +14,7 @@ object Cfg {
     var fastModel: String get() = s("fastModel", ""); set(v) = ps("fastModel", v.trim())
     var visionModel: String get() = s("visionModel", ""); set(v) = ps("visionModel", v.trim())
     var temperature: Double get() = s("temperature", "0.3").toDoubleOrNull() ?: 0.3; set(v) = ps("temperature", v.toString())
-    var maxSteps: Int get() = s("maxSteps", "30").toIntOrNull() ?: 30; set(v) = ps("maxSteps", v.toString())
+    var maxSteps: Int get() = s("maxSteps", "40").toIntOrNull() ?: 40; set(v) = ps("maxSteps", v.toString())
     /** Most tokens the model may write in one reply (0 = the service's default). */
     var maxOut: Int get() = s("maxOut", "0").toIntOrNull() ?: 0; set(v) = ps("maxOut", v.toString())
     /** Context budget in tokens; 0 = automatic (from the model's window). */

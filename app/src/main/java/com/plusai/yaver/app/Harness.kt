@@ -424,6 +424,7 @@ Return JSON only:
         if (after.contains("[harness] You said you do not know, but your memory")) return "harness_intervention: the model answered 'I don't know' although its memory held the answer; it must check memory (memory action=search) before saying it does not know anything about the user"
         if (after.contains("[harness] You said you do not know")) return "harness_intervention: the model answered 'I don't know' without searching and had to be told to search the web first"
         if (after.contains("[harness] Your answer above is in")) return "harness_intervention: the model answered in the wrong language and had to rewrite"
+        if (after.contains("[harness] Iteration budget exhausted")) return "task_failure: yaver used all its steps without finishing the task" + (LOOP.find(after)?.let { " (it also got stuck in a loop: ${it.groupValues[1]})" } ?: "") + " — capture what blocked it (a missing capability of this phone environment, a tool it should have used, a wrong approach) and the approach that works, so the next attempt succeeds in a few steps"
         LOOP.find(after)?.let { return "harness_intervention: yaver got stuck in a loop (${it.groupValues[1]}) and had to be told to change approach" }
         if (after.contains("[verify-on-stop]")) return "harness_intervention: the final answer had unsupported claims and had to be verified"
         return ""
@@ -479,9 +480,12 @@ Return JSON only:
             Diag.i("learn", "$tag: LLM review → shouldRefine=$go global=$global${if (s(j, "rationale").isNotEmpty()) " — " + clip(s(j, "rationale"), 160) else if (out.isBlank()) " (empty reply)" else ""}")
         }
         if (reason.startsWith("standing_instruction") || reason.startsWith("harness_intervention")) global = true
-        if (!go && (reason.startsWith("standing_instruction") || reason.startsWith("user_correction"))) {
+        if (reason.startsWith("task_failure")) global = true
+        if (!go && (reason.startsWith("standing_instruction") || reason.startsWith("user_correction") || reason.startsWith("task_failure") || reason.startsWith("harness_intervention: yaver got stuck"))) {
             go = true
-            if (instructions.isEmpty()) instructions = "The user corrected yaver or gave a standing instruction. Capture the lesson as a short, concrete prompt note (what to do differently next time), global if it applies to future conversations."
+            if (instructions.isEmpty()) instructions = if (reason.startsWith("task_failure") || reason.startsWith("harness_intervention"))
+                "The task did not go well (steps ran out or yaver looped). Write one short, concrete lesson about this phone environment or approach that would have made it succeed quickly — e.g. which tool to use for this kind of task, what does not work here (and why), the order of steps. Generalize to the kind of task, not this file. If the failure was only a passing glitch with nothing to learn, apply no edits."
+                else "The user corrected yaver or gave a standing instruction. Capture the lesson as a short, concrete prompt note (what to do differently next time), global if it applies to future conversations."
             Diag.i("learn", "$tag: refining anyway — ${reason.substringBefore(':')}")
         }
         if (!go) return null

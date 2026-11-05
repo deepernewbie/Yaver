@@ -230,12 +230,14 @@
     search_all: ["search", "Searched everywhere", "Her yerde arandı", "query"],
     session_search: ["history", "Searched past chats", "Eski sohbetlerde arandı", "query"],
     write_document: ["file-type", "Made a document", "Belge oluşturuldu", "path"],
+    media: ["file-audio", "Audio / video", "Ses / video", "action"],
     vision_analyze: ["image", "Looked at a picture", "Resme bakıldı", "path"]
   };
   var BROWSER_STEPS = { navigate: ["open", "aç"], snapshot: ["look", "incele"], click: ["click", "tıkla"], type: ["type", "yaz"], back: ["back", "geri"], find: ["find", "bul"], download: ["download", "indir"], scroll: ["scroll", "kaydır"], press: ["key", "tuş"], select: ["choose", "seç"], wait: ["wait", "bekle"], screenshot: ["screenshot", "ekran görüntüsü"], close: ["close", "kapat"] };
   var ACTIONS = { list: ["list", "listele"], search: ["search", "ara"], read: ["read", "oku"], get_attachment: ["attachment", "ek"], draft: ["draft", "taslak"], send: ["send", "gönder"], send_now: ["send", "gönder"], mark_read: ["mark read", "okundu"], delete: ["delete", "sil"], move: ["move", "taşı"], archive: ["archive", "arşivle"], free: ["free time", "boş zaman"], create: ["create", "oluştur"], respond: ["respond", "yanıtla"], cancel: ["cancel", "iptal"], add: ["add", "ekle"], replace: ["update", "güncelle"], remove: ["remove", "kaldır"], calendars: ["calendars", "takvimler"], alarm: ["alarm", "alarm"], timer: ["timer", "zamanlayıcı"],
     open: ["open", "aç"], click: ["click", "tıkla"], type: ["type", "yaz"], select: ["choose", "seç"], check: ["tick", "işaretle"], press: ["key", "tuş"], scroll: ["scroll", "kaydır"], back: ["back", "geri"], forward: ["forward", "ileri"], reload: ["reload", "yenile"], wait: ["wait", "bekle"], text: ["read", "oku"], elements: ["look", "incele"], find: ["find", "bul"], screenshot: ["screenshot", "ekran görüntüsü"], user: ["your turn", "sizde"], close: ["close", "kapat"],
     set: ["set", "belirle"], update: ["update", "güncelle"], complete: ["complete", "tamamla"], block: ["blocked", "engellendi"], pause: ["pause", "duraklat"], resume: ["resume", "sürdür"], clear: ["clear", "temizle"], status: ["status", "durum"],
+    enhance: ["clean up", "temizle"], to_wav: ["to WAV", "WAV'a çevir"], to_m4a: ["to m4a", "m4a'ya çevir"], info: ["info", "bilgi"],
     view: ["view", "görüntüle"], edit: ["edit", "düzenle"], patch: ["edit", "düzenle"], reopen: ["reopen", "yeniden aç"], note: ["note", "not"], sync: ["sync", "eşitle"], connect: ["connect", "bağla"], spawn: ["start", "başlat"], message: ["message", "mesaj"], stop: ["stop", "durdur"], refine: ["refine", "iyileştir"], rollback: ["undo", "geri al"] };
   function stepInfo(name, args) {
     var bm = /^browser_(\w+)$/.exec(name || "");
@@ -1522,6 +1524,10 @@
       };
       showPage(0);
       toggle = docTextToggle();
+    } else if (k === "audio" || k === "video") {
+      var media = h(k, { class: k === "audio" ? "faudio" : "fvideo", controls: "", preload: "metadata", src: wsUrl(f.path) });
+      media.addEventListener("error", function () { if (!view.querySelector(".fnote")) view.appendChild(h("div", { class: "fnote sm" }, icon("info", "s"), h("span", null, T("This format does not play here — open it in another app.", "Bu biçim burada çalmıyor — başka bir uygulamada açın.")))); });
+      view.appendChild(h("div", { class: "fmedia" }, media));
     } else if (k === "doc" || k === "sheet" || k === "slides") {
       view.appendChild(h("div", { class: "fdoc" }, ftile(k), h("div", null, h("b", null, { doc: T("Word document", "Word belgesi"), sheet: T("Spreadsheet", "Elektronik tablo"), slides: T("Presentation", "Sunum") }[k]),
         h("span", null, T("Open it in Word, Excel or PowerPoint — or see its text here.", "Word, Excel veya PowerPoint ile açın — ya da metnini burada görün.")))));

@@ -136,7 +136,28 @@ class MainActivity : Activity() {
                 }
                 path.startsWith("/ws/") -> {
                     val f = Workspace.resolve(Uri.decode(path.removePrefix("/ws/")))
-                    if (!f.exists()) null else WebResourceResponse(Workspace.mime(f.name), null, FileInputStream(f))
+                    if (!f.isFile) null else {
+                        // audio/video players ask for byte ranges to seek
+                        val range = req.requestHeaders?.entries?.firstOrNull { it.key.equals("Range", true) }?.value
+                        val m = range?.let { Regex("bytes=(\\d*)-(\\d*)").find(it) }
+                        val len = f.length()
+                        if (m == null || len == 0L) WebResourceResponse(Workspace.mime(f.name), null, 200, "OK", mapOf("Accept-Ranges" to "bytes", "Content-Length" to len.toString()), FileInputStream(f))
+                        else {
+                            val a = m.groupValues[1].toLongOrNull(); val b = m.groupValues[2].toLongOrNull()
+                            val start = a ?: maxOf(0L, len - (b ?: len)); val end = if (a != null && b != null) minOf(b, len - 1) else len - 1
+                            if (start >= len || start > end) WebResourceResponse(Workspace.mime(f.name), null, 416, "Range Not Satisfiable", mapOf("Content-Range" to "bytes */$len"), ByteArrayInputStream(ByteArray(0)))
+                            else {
+                                val inp = FileInputStream(f); var skip = start; while (skip > 0) { val k = inp.skip(skip); if (k <= 0) break; skip -= k }
+                                val n = end - start + 1
+                                val body = object : java.io.FilterInputStream(inp) {
+                                    var left = n
+                                    override fun read(): Int { if (left <= 0) return -1; val r = super.read(); if (r >= 0) left--; return r }
+                                    override fun read(b: ByteArray, off: Int, l: Int): Int { if (left <= 0) return -1; val r = super.read(b, off, minOf(l.toLong(), left).toInt()); if (r > 0) left -= r; return r }
+                                }
+                                WebResourceResponse(Workspace.mime(f.name), null, 206, "Partial Content", mapOf("Accept-Ranges" to "bytes", "Content-Range" to "bytes $start-$end/$len", "Content-Length" to n.toString()), body)
+                            }
+                        }
+                    }
                 }
                 else -> null
             }

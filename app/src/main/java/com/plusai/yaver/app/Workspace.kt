@@ -66,6 +66,8 @@ object Workspace {
             "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            "m4a" -> "audio/mp4"; "mp3" -> "audio/mpeg"; "wav" -> "audio/wav"; "ogg", "oga", "opus" -> "audio/ogg"; "flac" -> "audio/flac"; "aac" -> "audio/aac"
+            "mp4", "m4v" -> "video/mp4"; "webm" -> "video/webm"; "3gp" -> "video/3gpp"
             else -> (try { MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) } catch (e: Throwable) { null }) ?: "application/octet-stream"
         }
     }

@@ -76,6 +76,7 @@ class ToolCtx(val convo: Convo, val cancel: Cancel, val background: Boolean, val
  * loop with compaction, argument checks, plan mode, loop monitor, empty-reply / wrong-language / "I don't know" handling,
  * verify-on-stop and the budget grace call; after the turn: learning, memory delta, follow-ups and background review.
  */
+private val MEDIA_EXT = Regex("\\.(m4a|mp3|aac|wav|ogg|oga|opus|flac|amr|3gp|3ga|wma|mp4|m4v|mov|webm|mkv|avi)$", RegexOption.IGNORE_CASE)
 private const val CONTINUE_MSG = "[harness] Your answer was cut off by the output limit. Continue it exactly where it stopped — do not repeat anything, do not add a preamble or a note about the cut; if you were inside a table, code block or list, keep its format."
 
 object Agent {
@@ -102,7 +103,7 @@ object Agent {
 
     // ---------------------------------------------------------------- toolsets (System-1 toolset gate)
     val TOOLSET_DESC: LinkedHashMap<String, String> = linkedMapOf(
-        "files" to "Read, write, patch and search files in the workspace",
+        "files" to "Read, write, patch and search files in the workspace; audio/video files (convert, clean up speech recordings)",
         "terminal" to "Virtual shell over the workspace (ls, cat, grep, find, mv, curl…)",
         "code" to "Run JavaScript or Python for computation, data processing and charts",
         "web" to "Web search, page text extraction, HTTP fetch for APIs, and multi-step deep research with a cited report",
@@ -119,7 +120,7 @@ object Agent {
     fun toolsetMembers(): Map<String, Set<String>> {
         val m = LinkedHashMap<String, MutableSet<String>>()
         for ((k, v) in Subagents.TOOLSETS) m.getOrPut(k) { LinkedHashSet() }.addAll(v)
-        m.getOrPut("files") { LinkedHashSet() }.addAll(listOf("patch", "search_files", "unpack_archive", "pack_archive", "folder", "search_all"))
+        m.getOrPut("files") { LinkedHashSet() }.addAll(listOf("patch", "search_files", "unpack_archive", "pack_archive", "folder", "search_all", "media"))
         m.getOrPut("terminal") { LinkedHashSet() }.add("terminal")
         m.getOrPut("code") { LinkedHashSet() }.addAll(listOf("execute_code", "run_html"))
         m.getOrPut("web") { LinkedHashSet() }.addAll(listOf("web_extract", "download_file", "page_images"))
@@ -141,7 +142,7 @@ object Agent {
     // ---------------------------------------------------------------- messages
     fun userMessage(text: String, images: List<String>, files: List<String>): JSONObject {
         var content = text
-        if (files.isNotEmpty()) content += "\n\n[Attached files saved in the workspace: ${files.joinToString(", ")} — read them with read_document]"
+        if (files.isNotEmpty()) content += "\n\n[Attached files saved in the workspace: ${files.joinToString(", ")} — " + (if (files.all { MEDIA_EXT.containsMatchIn(it) }) "audio/video: use the media tool (info, enhance, to_wav, to_m4a)]" else if (files.any { MEDIA_EXT.containsMatchIn(it) }) "read documents with read_document; audio/video with the media tool]" else "read them with read_document]")
         if (images.isNotEmpty()) content += "\n\n[Attached pictures (also saved in the workspace): ${images.joinToString(", ")}]"
         val m = JSONObject().put("role", "user").put("content", content).put("display", text).put("ts", System.currentTimeMillis())
         if (images.isNotEmpty()) m.put("images", JSONArray(images))
@@ -340,6 +341,15 @@ object Agent {
         return final
     }
 
+    /** A tool call that cannot run as sent: unclosed JSON, or a required argument missing / empty. */
+    private fun brokenCall(name: String, args: String?): Boolean {
+        if (LoopUtil.isCutArgs(args)) return true
+        val t = Tools.get(name) ?: return false
+        if (t.required.isEmpty()) return false
+        val j = LoopUtil.jsonTry((args ?: "").ifBlank { "{}" }) as? JSONObject ?: return true
+        return t.required.any { k -> !j.has(k) || j.isNull(k) || j.opt(k) == "" }
+    }
+
     /** The "N files changed" card of a turn (Changes.kt): kept on the turn's last assistant message. */
     private fun attachChanges(c: Convo) {
         val ch = Changes.end(c.id) ?: return
@@ -389,6 +399,7 @@ object Agent {
         var toolsets = toolsets0
         val members = toolsetMembers()
         var empty = 0
+        var brokenRetries = 0
         var langFixAt = -1
         var langFixed = false
         var memNudged = false
@@ -424,9 +435,25 @@ object Agent {
             Compactor.auto(c, tools, model, cancel, isSub, { t -> note(t); Diag.i("ctx", t) }, progress, st.userText)
             Llm.info.set(if (listener == null) null else { a, b, cc, d -> listener.onThinkInfo(a, b, cc, d) })
             Llm.onRetry.set(if (listener == null) null else { { listener.onStep() } })
-            val (r, sent) = Compactor.chatWithRetry(c, tools, model, cancel, isSub, st, { t -> note(t); Diag.i("ctx", t) }, progress) { tl ->
+            val (r0, sent) = Compactor.chatWithRetry(c, tools, model, cancel, isSub, st, { t -> note(t); Diag.i("ctx", t) }, progress) { tl ->
                 Llm.chat(requestMessages(c, systemExtra, isSub), if (empty >= 3 || tl.length() == 0) null else tl, model,
                     onDelta = { listener?.onDelta(it) }, onThink = { listener?.onThinking(it) }, cancel = cancel, maxTokens = Compactor.fitOutput(c, tl, model, outBudget), stream = if (empty >= 2) false else Cfg.stream)
+            }
+            // a broken tool call (arguments cut off, or a required argument missing — "{}" after a provider error mid-stream):
+            // ask the same question once more without streaming before the model sees an error and starts guessing
+            var r = r0
+            if (brokenRetries < 2 && r.toolCalls.isNotEmpty() && r.toolCalls.any { brokenCall(it.name, it.args) }) {
+                brokenRetries++
+                val what = r.toolCalls.filter { brokenCall(it.name, it.args) }.joinToString(", ") { it.name }
+                Diag.i("augment", "broken tool call ($what, finish ${r.finish}) — asking again without streaming")
+                if (!isSub) progress(Y.t("the tool call arrived broken — asking the model again", "araç çağrısı bozuk geldi — model yeniden soruluyor"))
+                val r2 = try {
+                    Llm.chat(requestMessages(c, systemExtra, isSub), if (sent.length() == 0) null else sent, model, cancel = cancel,
+                        maxTokens = Compactor.fitOutput(c, sent, model, maxOf(outBudget, 16000)), stream = false)
+                } catch (e: CancelledException) { throw e } catch (e: Throwable) { Diag.i("augment", "retry failed: ${e.message}"); null }
+                if (r2 != null && ((r2.toolCalls.isNotEmpty() && r2.toolCalls.none { brokenCall(it.name, it.args) }) || (r2.toolCalls.isEmpty() && r2.content.isNotBlank()))) {
+                    Diag.i("augment", "retry gave a complete reply"); r = r2
+                } else Diag.i("augment", "retry did not help")
             }
             // a tool call whose arguments are unclosed JSON was cut off, whatever finish_reason the provider reported
             // (some report "stop"/"tool_calls" after a long hidden reasoning ate max_tokens)

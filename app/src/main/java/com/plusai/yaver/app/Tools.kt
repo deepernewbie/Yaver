@@ -52,6 +52,7 @@ object Tools {
         CodeEngine.register()    // execute_code
         WebPlus.register()       // web_extract, fetch, download_file, page_images, browser_* aliases, browser_use
         HtmlRun.register()       // run_html
+        Media.register()         // media: audio/video with the phone's codecs (+ ffmpeg/ffprobe in the terminal)
         DocsPlus.register()      // read_document
         Rag.register()           // search_documents
         Archive.register()       // unpack_archive, pack_archive
