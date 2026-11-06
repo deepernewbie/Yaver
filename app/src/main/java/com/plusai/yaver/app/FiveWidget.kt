@@ -162,7 +162,8 @@ object FiveWidget {
 
     /** A non-waking, inexact alarm: delivered when the phone is next awake (Doze-friendly). */
     private fun scheduleTick(c: Context, at: Long) {
-        try { c.getSystemService(AlarmManager::class.java)?.set(AlarmManager.RTC, at, tickIntent(c)) } catch (e: Throwable) { Diag.e("widget", "tick", e) }
+        // a 1-minute window: on time while the phone is in use (a meeting rolls over when it ends), still non-waking
+        try { c.getSystemService(AlarmManager::class.java)?.setWindow(AlarmManager.RTC, at, 60_000L, tickIntent(c)) } catch (e: Throwable) { Diag.e("widget", "tick", e) }
     }
 
     fun cancelTick(c: Context) { try { c.getSystemService(AlarmManager::class.java)?.cancel(tickIntent(c)) } catch (_: Throwable) {} }

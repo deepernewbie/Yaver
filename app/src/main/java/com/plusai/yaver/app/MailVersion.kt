@@ -36,10 +36,19 @@ class ChangeKeyTransport(private val inner: MailTransport) : MailTransport {
         return ID_TAG.replace(xml) { m -> val ck = keys[m.groupValues[2]]; if (ck == null) m.value else "<t:${m.groupValues[1]} Id=\"${m.groupValues[2]}\" ChangeKey=\"${Xml.esc(ck)}\"/>" }
     }
 
+    /** Creating / changing / answering / cancelling a meeting or appointment: the brief and the widget must refresh. */
+    fun changesCalendar(xml: String): Boolean {
+        val o = op(xml)
+        if (o != "CreateItem" && o != "UpdateItem" && o != "DeleteItem") return false
+        return xml.contains("<t:CalendarItem") || xml.contains("SendMeetingInvitations") || xml.contains("SendMeetingCancellations") ||
+            xml.contains("<t:AcceptItem") || xml.contains("<t:DeclineItem") || xml.contains("<t:TentativelyAcceptItem") || xml.contains("calendar:")
+    }
+
     private fun asksForKey(e: Throwable) = (e.message ?: "").contains("ChangeKey", true) || (e as? MailException)?.code?.contains("ChangeKey", true) == true
 
     override fun call(inner: String, timeoutMs: Int, cancel: Cancel?): org.w3c.dom.Document {
         val first = if (needsUpFront(inner)) withKeys(inner, cancel) else inner
+        if (changesCalendar(inner)) try { FiveBrief.calendarChanged() } catch (_: Throwable) {}
         return try { this.inner.call(first, timeoutMs, cancel) } catch (e: Exception) {
             if (e is CancelledException || !asksForKey(e) || first !== inner) throw e
             Diag.i("mail", "${op(inner)}: the server wants ChangeKeys — retrying with them")

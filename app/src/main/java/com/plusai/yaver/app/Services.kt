@@ -98,6 +98,7 @@ class AgentService : Service() {
             if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             else startForeground(NOTIF_ID, notification())
             running = true
+            registerScreenOn()
         } catch (e: Throwable) {
             runCatching { File(filesDir, "last-crash.txt").writeText("Always-on service could not start:\n" + android.util.Log.getStackTraceString(e)) }
             intent?.getStringExtra("prompt")?.let { work(this, it, intent.getStringExtra("title") ?: "yaver", null) }
@@ -121,7 +122,25 @@ class AgentService : Service() {
         return if (Prefs.on("alwaysOn", true)) START_STICKY else START_NOT_STICKY
     }
 
+    /** The screen comes on: redraw the widget at once (times, the meeting that just ended) and refresh stale data. */
+    private var screenOn: android.content.BroadcastReceiver? = null
+    private fun registerScreenOn() {
+        if (screenOn != null) return
+        val r = object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                try { if (FiveWidget.hasWidgets(c)) { FiveWidget.updateSoon(); FiveBrief.refreshIfStale() } } catch (e: Throwable) { Diag.e("widget", "screen on", e) }
+            }
+        }
+        try {
+            val f = android.content.IntentFilter().apply { addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_USER_PRESENT) }
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(r, f, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(r, f)
+            screenOn = r
+        } catch (e: Throwable) { Diag.e("widget", "screen receiver", e) }
+    }
+
     override fun onDestroy() {
+        try { screenOn?.let { unregisterReceiver(it) } } catch (_: Throwable) {}
+        screenOn = null
         running = false
         timer?.shutdownNow()
         super.onDestroy()

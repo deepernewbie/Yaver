@@ -105,14 +105,39 @@ object FiveBrief {
 
     /** Today and tomorrow from the phone's own calendars (only when the calendar permission is already granted). */
     private fun phoneEvents(now: Long): List<FiveLogic.Ev> {
-        if (Y.app.checkSelfPermission(Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) return emptyList()
         return try {
+            if (Y.app.checkSelfPermission(Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) return emptyList()
             val from = FiveLogic.dayStart(now, TimeZone.getDefault())
             Phone.calList(from, from + 2 * 86400000L + 3600000L, "").map { o ->
                 FiveLogic.Ev("phone:" + o.optLong("id"), o.optString("title"), o.optLong("start"), o.optLong("end"), o.optString("location"), o.optBoolean("allDay"))
             }
         } catch (e: Throwable) { Diag.i("brief", "phone calendar: ${e.message}"); emptyList() }
     }
+
+    /**
+     * The calendar screen (or a tool) just read Exchange events for a range covering today and tomorrow: use them for
+     * the brief and the widget at once instead of waiting for the next refresh.
+     */
+    fun offerEvents(start: Long, end: Long, list: List<CalEvent>) {
+        if (refreshing.get()) return
+        val now = System.currentTimeMillis(); val tz = TimeZone.getDefault()
+        val today = FiveLogic.dayStart(now, tz)
+        if (start > today || end < FiveLogic.plusDays(today, 2, tz)) return
+        val evs = list.map { e -> FiveLogic.Ev(e.id, e.subject, Exchange.parseTime(e.start), Exchange.parseTime(e.end), e.location, e.allDay, e.cancelled) }
+            .filter { it.end > today && it.start < FiveLogic.plusDays(today, 2, tz) }
+        val old = source()
+        val s = Src(now, true, evs, "exchange", old?.mails ?: emptyList(), old?.unread ?: 0)
+        src = s; loaded = true
+        Y.bg {
+            try { file().parentFile?.mkdirs(); file().writeText(s.toJson().toString()) } catch (e: Throwable) { Diag.e("brief", "save", e) }
+            if (Bridge.host != null) try { Bridge.emit("brief", snapshot()) } catch (_: Throwable) {}
+            try { FiveWidget.updateAll(Y.app) } catch (e: Throwable) { Diag.e("brief", "widget", e) }
+        }
+    }
+
+    /** A meeting was created, changed, answered or deleted: refresh in a moment (several changes → one refresh). */
+    private val soon = Runnable { refreshAsync(true) }
+    fun calendarChanged() { try { Y.main.removeCallbacks(soon); Y.main.postDelayed(soon, 2500) } catch (_: Throwable) {} }
 
     fun refreshIfStale() { val s = source(); if (s == null || System.currentTimeMillis() - s.fetched > MAX_AGE) refreshAsync() }
 
@@ -148,8 +173,16 @@ object FiveBrief {
                 unread = try { MxEws.folderInfo("inbox", null).unread } catch (e: Throwable) { mails?.count { !it.read } ?: -1 }
             }
         }
-        if (events == null) events = phoneEvents(now)
-        val s = Src(now, connected, events, from, mails ?: (if (connected) old?.mails else null) ?: emptyList(), if (unread >= 0) unread else if (connected) (old?.unread ?: 0) else 0)
+        if (events == null) {
+            // the fetch failed (session expired, offline): keep the Exchange events already known when they still
+            // cover today — fetched today or yesterday, the window reaches two days ahead. Replacing them with the
+            // (often empty) phone calendar made the widget say "no meetings".
+            val tz = TimeZone.getDefault()
+            val keep = old?.takeIf { it.eventsFrom.startsWith("exchange") && it.events.isNotEmpty() && FiveLogic.dayStart(it.fetched, tz) >= FiveLogic.plusDays(FiveLogic.dayStart(now, tz), -1, tz) }
+            if (keep != null) { events = keep.events; from = "exchange-cached"; Diag.i("brief", "calendar not reachable — keeping ${keep.events.size} known events") }
+            else events = phoneEvents(now)
+        }
+        val s = Src(if (from == "exchange-cached") old!!.fetched else now, connected, events, from, mails ?: (if (connected) old?.mails else null) ?: emptyList(), if (unread >= 0) unread else if (connected) (old?.unread ?: 0) else 0)
         src = s; loaded = true
         try { file().parentFile?.mkdirs(); file().writeText(s.toJson().toString()) } catch (e: Throwable) { Diag.e("brief", "save", e) }
         val out = snapshot()

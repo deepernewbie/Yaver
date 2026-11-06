@@ -1,3 +1,10 @@
+# yaver 5.0.3: widget takvimi
+- **Asıl hata:** posta oturumu düşünce arka plandaki yenileme takvimi alamıyor, elindeki Exchange toplantılarını telefon takvimiyle (çoğu zaman boş) değiştiriyordu. Widget "toplantı yok" ya da eski bir görüntüyle kalıyordu. Artık alınamayan takvim silinmiyor; bilinen toplantılar, bugünü kapsadıkları sürece gösterilmeye devam ediyor.
+- **Uygulamadaki değişiklikler hemen yansıyor:** toplantı ya da randevu oluşturma, değiştirme, kabul/ret, iptal ve silme birkaç saniye içinde widget'a geçiyor.
+- **Takvim ekranı widget'ı da tazeliyor:** uygulamada takvime bakınca widget o güncel veriyi hemen alıyor.
+- **Ekranı açınca widget tazeleniyor:** biten toplantı düşüyor, saatler güncelleniyor, veri eskiyse arka planda yenileniyor.
+- **Toplantı geçişi zamanında:** toplantı başlayınca ya da bitince geçiş artık dakikasında oluyor; eskiden telefon kendini beklettiği kadar gecikebiliyordu.
+
 # yaver 5.0.2
 - **Yanıt, iletme ve toplantı yanıtı düzeldi:** "ChangeKey is required for this operation" hatası artık çıkmıyor. Exchange bu işlemlerde e-postanın sürüm anahtarını istiyordu ama yaver göndermiyordu. Artık bütün posta işlemlerinden önce bu anahtar otomatik ekleniyor. Sunucu başka bir işlemde de isterse anahtar eklenip bir kez daha deneniyor.
 - **Posta işlemleri test edildi:** yeni posta, yanıt, tümünü yanıtla, iletme, taslak kaydetme ve gönderme, toplantı daveti, randevu, tüm gün etkinliği, kabul/belki/ret, toplantı güncelleme, toplantı iptali, randevu silme, posta silme ve kalıcı silme sahte sunucuya karşı denendi (26 kontrol).

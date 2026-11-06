@@ -898,7 +898,9 @@ class Exchange(val t: MailTransport) {
         return Xml.children(items).map { c ->
             CalEvent(idOf(c)?.first ?: "", Xml.txt(c, "Subject").ifEmpty { "(no title)" }, Xml.txt(c, "Start"), Xml.txt(c, "End"), Xml.txt(c, "Location"),
                 box(Xml.kids(c, "Organizer").firstOrNull()), Xml.txt(c, "IsAllDayEvent") == "true", Xml.txt(c, "MyResponseType"), Xml.txt(c, "IsCancelled") == "true", Xml.txt(c, "IsMeeting") == "true", Xml.txt(c, "DateTimeCreated"))
-        }.sortedBy { parseTime(it.start) }
+        }.sortedBy { parseTime(it.start) }.also { list ->
+            if (cancel == null || max >= 100) try { FiveBrief.offerEvents(start, end, list) } catch (_: Throwable) {}
+        }
     }
 
     fun createEvent(subject: String, start: Long, end: Long, location: String, body: String, attendees: List<String>, cancel: Cancel? = null): String {

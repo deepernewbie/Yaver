@@ -39,7 +39,7 @@ object FiveLogic {
         timeInMillis = ms; set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
     }.timeInMillis
 
-    private fun plusDays(ms: Long, n: Int, tz: TimeZone): Long = Calendar.getInstance(tz).apply { timeInMillis = ms; add(Calendar.DAY_OF_MONTH, n) }.timeInMillis
+    fun plusDays(ms: Long, n: Int, tz: TimeZone): Long = Calendar.getInstance(tz).apply { timeInMillis = ms; add(Calendar.DAY_OF_MONTH, n) }.timeInMillis
 
     /** Today's remaining events (ongoing ones included) in time order, then tomorrow's first [tomorrowMax]. Cancelled events are left out. */
     fun pickEvents(evs: List<Ev>, now: Long, tz: TimeZone, tomorrowMax: Int = 2): List<Ev> {
