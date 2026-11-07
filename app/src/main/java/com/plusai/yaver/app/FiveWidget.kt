@@ -84,13 +84,39 @@ object FiveWidget {
         val brief = try { FiveBrief.snapshot() } catch (e: Throwable) { null }
         val now = System.currentTimeMillis()
         val w = FiveLogic.widgetText(brief, now, TimeZone.getDefault(), Y.tr)
-        val full = views(c, w, now, compact = false)
-        val rv = if (android.os.Build.VERSION.SDK_INT >= 31) {
-            // Android 12+: the launcher picks the layout for the widget's real size; a short widget drops the place line
-            RemoteViews(mapOf(android.util.SizeF(180f, 110f) to views(c, w, now, compact = true), android.util.SizeF(180f, 168f) to full))
-        } else full
-        mgr.updateAppWidget(ids, rv)
+        Diag.i("widget", "render: ${brief?.optJSONArray("events")?.length() ?: -1} events (${brief?.optString("eventsFrom")}) → \"${w.meetTitle.take(40)}\"")
+        // the richest form first; if a launcher or Android version refuses it, a simpler one — never a stale widget
+        val attempts = listOf<Pair<String, () -> RemoteViews>>(
+            "sized" to {
+                if (android.os.Build.VERSION.SDK_INT >= 31)
+                    // Android 12+: the launcher picks the layout for the widget's real size; a short widget drops the place line
+                    RemoteViews(mapOf(android.util.SizeF(180f, 110f) to views(c, w, now, compact = true), android.util.SizeF(180f, 168f) to views(c, w, now, compact = false)))
+                else views(c, w, now, compact = false)
+            },
+            "plain" to { views(c, w, now, compact = false) },
+            "basic" to { basic(c, w) }
+        )
+        var done = false
+        for ((name, make) in attempts) {
+            try { mgr.updateAppWidget(ids, make()); done = true; lastError = null; break }
+            catch (e: Throwable) { lastError = "$name: ${e.javaClass.simpleName}: ${e.message}"; Diag.e("widget", "render $name", e) }
+        }
+        if (!done) Diag.i("widget", "no form could be drawn")
         scheduleTick(c, FiveLogic.nextWidgetTick(brief, now))
+    }
+
+    /** The last drawing error (for the self-test), null when the last redraw worked. */
+    @Volatile var lastError: String? = null
+
+    /** The last-resort form: plain texts only, nothing a launcher could refuse. */
+    private fun basic(c: Context, w: FiveLogic.WidgetText): RemoteViews {
+        val rv = RemoteViews(c.packageName, R.layout.five_widget)
+        rv.setTextViewText(R.id.five_w_title, (if (w.meetTime.isNotEmpty()) w.meetTime + "  " else "") + w.meetTitle)
+        rv.setViewVisibility(R.id.five_w_time, View.GONE)
+        rv.setOnClickPendingIntent(R.id.five_w_card, open(c, 1, "nav", "calendar"))
+        rv.setOnClickPendingIntent(R.id.five_w_ask, open(c, 3, "assist", keyboard = true))
+        rv.setOnClickPendingIntent(R.id.five_w_mic, open(c, 4, "voice"))
+        return rv
     }
 
     private fun dp(c: Context, v: Int) = (v * c.resources.displayMetrics.density).toInt()

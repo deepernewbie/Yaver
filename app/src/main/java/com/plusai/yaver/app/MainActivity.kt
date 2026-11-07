@@ -102,6 +102,8 @@ class MainActivity : Activity() {
         Bridge.emit("resume", Bridge.state())
         Learn.touch()
         try { Folders.onForeground() } catch (e: Throwable) { Diag.e("folders", "foreground", e) }
+        // yaver 5.1: a time-zone change while yaver was closed moves local-time schedules; re-arm the schedule alarm
+        Y.bg { try { S51Sched.syncZone(); S51Sched.arm() } catch (e: Throwable) { Diag.e("s51", "resume", e) } }
     }
 
     override fun onPause() {

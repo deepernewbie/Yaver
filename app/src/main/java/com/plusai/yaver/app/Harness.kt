@@ -525,6 +525,8 @@ Return JSON only:
         try { idx = Learn.tag(c, turnStart, userText) } catch (e: Throwable) { Diag.e("learn", "tag", e) }
         try { Convos.save(c, touch = false) } catch (_: Throwable) {}
         if (cancel?.cancelled != true) checkpoint(c)
+        // yaver 5.1: judge the outcome in the background; done turns teach routes and learned skills (L51)
+        if (cancel?.cancelled != true) try { L51.afterTurn(c, turnStart, userText, cancel) } catch (e: Throwable) { Diag.e("l51", "afterTurn", e) }
         return idx
     }
 

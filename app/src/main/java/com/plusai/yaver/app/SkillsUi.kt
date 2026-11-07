@@ -61,6 +61,7 @@ object SkillsUi {
         return JSONObject().put("dir", d.name).put("path", "${VPath.SKILLS}/${d.name}").put("name", fm["name"]?.ifBlank { null } ?: d.name)
             .put("description", fm["description"] ?: "").put("body", body.replace(Regex("^\\n+"), "")).put("raw", raw).put("files", files)
             .put("uses", u?.optInt("n") ?: 0).put("last", u?.optLong("last") ?: 0L)
+            .put("status", (fm["status"] ?: "").trim().lowercase().let { if (it == "trial" || it == "disabled") it else "active" }).put("source", (fm["source"] ?: "").trim())
     }
 
     /** Saves name / description / body; other frontmatter keys are kept. */
@@ -105,6 +106,7 @@ object SkillsUi {
         if (!d.isDirectory) throw IllegalArgumentException(Y.t("Skill not found: ", "Yetenek bulunamadı: ") + dir)
         val n = d.walkTopDown().count { it.isFile }
         d.deleteRecursively()
+        try { L51.forgetSkill(d.name) } catch (_: Throwable) {}
         try { val u = usage(); u.remove(d.name); Prefs.put("skills.use", u.toString()) } catch (_: Throwable) {}
         changed("${VPath.SKILLS}/${d.name}")
         return JSONObject().put("deleted", d.name).put("files", n)

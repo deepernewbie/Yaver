@@ -839,7 +839,7 @@ object MemoryX {
             ), emptyList()
         ) { a, ctx ->
             if (a.str("action") == "search") format(search(a.str("query").ifEmpty { a.str("content") }, 10, cancel = ctx.cancel))
-            else apply(a, ctx.convo.id).toString()
+            else MemoryGuard.run(a, ctx)   // 5.1: user-said only, no sensitive data, procedures held for approval (H51Mem.kt)
         })
         Tools.add(Tool(
             "session_search",

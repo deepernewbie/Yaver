@@ -51,6 +51,7 @@ object Convos {
      */
     private val live = java.util.concurrent.ConcurrentHashMap<String, Convo>()
     private val MARKS = listOf("fb", "fbNote", "fbTold", "judged")
+    private val ADD_ONLY = listOf("outcome", "outcomeWhy")
 
     fun begin(c: Convo) { live[c.id] = c }
     fun end(c: Convo) { live.remove(c.id, c) }
@@ -65,6 +66,8 @@ object Convos {
             val a = src.messages.optJSONObject(i) ?: continue; val b = dst.messages.optJSONObject(i) ?: continue
             if (a.optLong("ts", -1) != b.optLong("ts", -1) || a.optString("role") != b.optString("role")) continue
             for (k in MARKS) { if (a.has(k)) { if (a.opt(k) != b.opt(k)) b.put(k, a.opt(k)) } else if (b.has(k)) b.remove(k) }
+            // written in the background after a turn (outcome judge): copied when present, never removed by a copy that lacks them
+            for (k in ADD_ONLY) if (a.has(k) && a.opt(k) != b.opt(k)) b.put(k, a.opt(k))
         }
     }
 
@@ -131,7 +134,7 @@ object Convos {
         // per-conversation harness state lives outside the convo file
         for ((what, f) in listOf<Pair<String, () -> Unit>>(
             "ctx" to { Compactor.forget(id) }, "state" to { ConvoState.delete(id) }, "harness" to { Harness.forgetConvo(id) },
-            "heartbeats" to { Heartbeats.clearConvo(id) }, "children" to { Children.clearConvo(id) }, "followups" to { FollowUps.clear(id) }
+            "heartbeats" to { Heartbeats.clearConvo(id) }, "children" to { Children.clearConvo(id) }, "followups" to { FollowUps.clear(id) }, "queue" to { H51Queue.drop(id) }
         )) try { f() } catch (e: Throwable) { Diag.e("convos", "delete $what of $id", e) }
     }
 

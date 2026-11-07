@@ -114,6 +114,7 @@
   var NAME_RX = /^(?:\.{0,2}\/)?(?:[\p{L}\p{N}_.+-]+\/)*[\p{L}\p{N}_.+-]+\.[A-Za-z0-9]{1,6}$/u;
   var IMG_RX = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
   function answerExtras(wrap, box, m, idx, msgs, isFinal) {
+    if (window.YV51) YV51.answer(wrap, box, m, idx, isFinal);
     /* `report.md`, `outputs/x.docx`: relative names become links when the file exists (tried as given, then uploads/) */
     var cands = [];
     box.querySelectorAll("code").forEach(function (c) {
@@ -229,7 +230,8 @@
       opt(PERM_ICON[permMode()] || "shield-check", T("Permissions", "İzinler") + ": " + permLabel(permMode()), permHelp(permMode()), function () { close(); permSheet(); }),
       opt(isDark() ? "sun" : "moon", T("Appearance", "Görünüm"), { system: T("Like the phone", "Telefon gibi"), light: T("Light", "Açık"), dark: T("Dark", "Koyu") }[curTheme()], function () { close(); themeSheet(); }),
       opt("cpu", "System-1", T("Switch the decision model quickly", "Karar modelini hızlıca değiştirin"), function () { close(); s1Switch(); }),
-      opt("globe", T("The agent's browser", "Ajanın tarayıcısı"), T("Watch the page yaver works on, live", "yaver'in çalıştığı sayfayı canlı izleyin"), function () { close(); browserPage(); }));
+      opt("globe", T("The agent's browser", "Ajanın tarayıcısı"), T("Watch the page yaver works on, live", "yaver'in çalıştığı sayfayı canlı izleyin"), function () { close(); browserPage(); }),
+      opt("alarm-clock", T("Scheduled", "Zamanlanmış işler"), T("Reminders, recurring and conditional tasks", "Hatırlatmalar, tekrarlayan ve koşullu işler"), function () { close(); if (window.YV51) YV51.schedulesPage(); }));
   }
   /* the original's quick System-1 switcher (#qS1) */
   function s1Switch() {
@@ -295,6 +297,7 @@
       ]));
       var by = St.byPurpose || {}, keys = Object.keys(by).sort(function (a, b) { return by[b] - by[a]; });
       box.appendChild(I.group(T("Usage", "Kullanım"), [
+        I.row({ icon: "gauge", label: T("Token usage", "Token kullanımı"), sub: T("By day and by model", "Güne ve modele göre"), onclick: function () { if (window.YV51) YV51.tokenPage(); } }),
         I.row({ icon: "activity", label: T("Model calls", "Model çağrıları"), sub: (St.llmCalls || 0) + T(" calls · ", " çağrı · ") + fmtTok(St.tokensIn) + T(" in · ", " giden · ") + fmtTok(St.tokensOut) + T(" out", " gelen") + (keys.length ? " · " + keys.slice(0, 4).map(function (k) { return k + " " + by[k]; }).join(", ") : ""), wrap: true, onclick: function () { statsSheet(St); } })
       ]));
       box.appendChild(I.group(T("Backup", "Yedek"), [exportRow(), importRow(),
@@ -393,6 +396,7 @@
   function skillsView(box, list) {
     box.appendChild(h("p", { class: "kexpl" }, T("Procedures yaver saved to reuse: each skill is a folder with instructions (SKILL.md) and helper files. yaver opens the right one when a task matches.", "yaver'in tekrar kullanmak için kaydettiği yöntemler: her yetenek talimatlar (SKILL.md) ve yardımcı dosyalar içeren bir klasördür. Görev uyduğunda yaver doğru olanı açar.")));
     box.appendChild(h("div", { class: "kbar2" }, h("button", { class: "btn sm p", onclick: newSkill }, icon("plus", "s"), T("New skill", "Yeni yetenek"))));
+    if (window.YV51) YV51.draftsBox(box);
     var lb = h("div", { class: "klist" });
     box.appendChild(lb);
     function draw(l) {
@@ -401,7 +405,8 @@
       l.forEach(function (s) {
         lb.appendChild(h("button", { class: "kcard", onclick: function () { skillPage(s.dir); } },
           h("div", { class: "kbad" }, h("span", { class: "bdg tp" }, icon("graduation-cap", "xs"), s.dir || s.name), (s.files || []).length > 1 ? h("span", { class: "bdg" }, (s.files.length) + T(" files", " dosya")) : null,
-            s.uses ? h("span", { class: "bdg" }, T(s.uses + "× used", s.uses + " kez")) : null),
+            s.uses ? h("span", { class: "bdg" }, T(s.uses + "× used", s.uses + " kez")) : null,
+            s.status === "trial" ? h("span", { class: "bdg dr" }, T("trial", "deneme")) : s.status === "disabled" ? h("span", { class: "bdg" }, T("off", "kapalı")) : null),
           h("div", { class: "ktext" }, h("b", null, s.name)), s.description ? h("div", { class: "kfacts clamp" }, s.description) : h("div", { class: "kfacts" }, T("(no description — yaver cannot tell when to use it)", "(açıklama yok — yaver ne zaman kullanacağını bilemez)"))));
       });
     }
@@ -675,4 +680,433 @@
   try { applyTheme(localStorage.getItem("yv.theme") || "system"); } catch (e) {}
   call("shortcuts.get").then(function (r) { P.shortcuts = r && r.items || null; if (P.shortcuts && (!S.convo || !(S.convo.messages || []).length)) I.renderThread(); }).catch(function () {});
   var tries = 0; (function waitState() { if (S.state) { applyTheme(curTheme()); renderChips(); return; } if (tries++ < 50) setTimeout(waitState, 100); })();
+})();
+
+/* ================================================================ yaver 5.1
+   Steer vs queue while a run is active, the stop wrap-up label, sources and metrics under answers, token usage,
+   memory approvals, learned (trial) skills, and the schedules page (reminders, recurring and conditional tasks). */
+(function () {
+  "use strict";
+  var I = window.YVI; if (!I) return;
+  var S = I.S, call = I.call, h = I.h, icon = I.icon, T = I.T, $ = I.$, clear = I.clear, toast = I.toast, sheet = I.sheet;
+  var Q = { steers: {}, early: {}, byText: {}, queue: {}, qAsked: {}, mode: {}, memSeen: {} };
+  function cid() { return S.convoId && S.convoId !== "_new" ? S.convoId : ""; }
+  function fail(e) { toast(e && e.message ? e.message : String(e)); }
+  function opt(ic, label, sub, fn, cls) { return h("button", { class: "opt" + (cls ? " " + cls : ""), onclick: fn }, icon(ic, "s"), h("div", null, label, sub ? h("small", null, sub) : null)); }
+  function rerender(id) { if (!id || id === S.convoId) I.renderThread(); }
+  function num(n) { n = +n || 0; return n.toLocaleString(S.lang === "tr" ? "tr-TR" : "en-US"); }
+  function ktok(n) { n = +n || 0; if (n >= 1e6) return (n / 1e6).toFixed(1).replace(".", S.lang === "tr" ? "," : ".") + "M"; if (n >= 1e4) return Math.round(n / 1e3) + "k"; if (n >= 1e3) return (n / 1e3).toFixed(1).replace(".", S.lang === "tr" ? "," : ".") + "k"; return String(n); }
+  function dur(ms) { var s = Math.max(0, Math.round((+ms || 0) / 1000)); if (s < 60) return s + T(" s", " sn"); var m = Math.floor(s / 60); s = s % 60; if (m < 60) return m + T(" min", " dk") + (s ? " " + s + T(" s", " sn") : ""); return Math.floor(m / 60) + T(" h", " sa") + (m % 60 ? " " + (m % 60) + T(" min", " dk") : ""); }
+
+  /* ---------------------------------------------------------------- steer vs queue */
+  function sendMode(id) { return Q.mode[id] || "steer"; }
+  function syncMode(running) {
+    var box = $("#smode"); if (!box) return;
+    var on = !!running && !!cid();
+    box.classList.toggle("hidden", !on);
+    if (!on) { clear(box); return; }
+    var cur = sendMode(S.convoId);
+    clear(box).appendChild(h("div", { class: "seg", role: "radiogroup", "aria-label": T("While yaver works", "yaver çalışırken") },
+      [["steer", "zap", T("Add now", "Şimdi ekle"), T("joins the running task", "çalışan göreve katılır")], ["queue", "list-todo", T("Queue", "Sıraya al"), T("runs after this task", "bu görevden sonra çalışır")]].map(function (o) {
+        return h("button", { class: "segb" + (cur === o[0] ? " on" : ""), role: "radio", "aria-checked": String(cur === o[0]), title: o[3], onclick: function () { Q.mode[S.convoId] = o[0]; syncMode(true); } }, icon(o[1], "xs"), h("span", null, o[2]));
+      })));
+  }
+  function steered(id, r, t, lm) {
+    if (!r || !r.steerId) return;
+    var st = Q.early[r.steerId] || "received"; delete Q.early[r.steerId];
+    Q.steers[r.steerId] = { convoId: id, text: t, state: st };
+    (Q.byText[id] = Q.byText[id] || {})[t] = r.steerId;
+    lm.steerId = r.steerId; lm.steerState = st;
+  }
+  function tagPending(id, o) { var sid = (Q.byText[id] || {})[o.content]; if (sid && Q.steers[sid]) { o.steerId = sid; o.steerState = Q.steers[sid].state; } }
+  function keepPending(id, q) { return q.some(function (t) { var sid = (Q.byText[id] || {})[t], x = sid && Q.steers[sid]; return x && (x.state === "received" || x.state === "next"); }); }
+  function steerCap(m) {
+    var st = m.steerState;
+    if (st === "delivered") return h("div", { class: "qcap done" }, icon("check-check", "xs"), T("Added to the task", "Göreve eklendi"));
+    if (st === "next") return h("div", { class: "qcap" }, icon("list-todo", "xs"), T("Queued as the next job", "Sonraki iş olarak sıraya alındı"));
+    if (st === "received") return h("div", { class: "qcap" }, icon("check", "xs"), T("Received", "Alındı"), h("span", { class: "qhint" }, T(" · hold to take back", " · geri almak için basılı tutun")));
+    return h("div", { class: "qcap" }, icon("clock", "xs"), T("Queued — yaver reads it at its next step", "Sırada — yaver bir sonraki adımında okuyacak"));
+  }
+  function forgetSteer(id, sid, text) {
+    var q = S.queued[id]; if (q) { var i = q.indexOf(text); if (i >= 0) q.splice(i, 1); if (!q.length) delete S.queued[id]; }
+    if (Q.byText[id]) delete Q.byText[id][text];
+    delete Q.steers[sid];
+    if (S.convo && S.convo.id === id) S.convo.messages = (S.convo.messages || []).filter(function (m) { return !(m.queued && m.steerId === sid); });
+  }
+  function steerMenu(m) {
+    var id = cid(), sid = m.steerId, text = String(m.display || m.content || "");
+    if (m.steerState === "delivered") { I.msgMenu("user", m, -1); return; }
+    function withdraw(edit) {
+      call("chat.withdraw", { convoId: id, steerId: sid }).then(function (r) {
+        if (!r || r.text == null) { toast(T("Already delivered", "Zaten iletildi")); var x = Q.steers[sid]; if (x) x.state = "delivered"; m.steerState = "delivered"; rerender(id); return; }
+        forgetSteer(id, sid, text); rerender(id);
+        if (edit) { var ta = $("#input"); ta.value = r.text; I.autosize(); I.syncSend(); ta.focus(); }
+        else toast(T("Taken back", "Geri alındı"));
+      }).catch(fail);
+    }
+    var s = sheet({ title: T("Message sent while yaver works", "yaver çalışırken gönderilen mesaj"), text: T("yaver has not read it yet.", "yaver henüz okumadı."), body: h("div", null,
+      opt("undo-2", T("Take back", "Geri al"), T("It will not reach the task", "Göreve ulaşmaz"), function () { s.close(); withdraw(false); }),
+      opt("pencil", T("Edit", "Düzenle"), T("Take it back into the message box", "Mesaj kutusuna geri al"), function () { s.close(); withdraw(true); }),
+      opt("copy", T("Copy", "Kopyala"), null, function () { s.close(); call("copy", { text: text }); toast(T("Copied", "Kopyalandı")); })) });
+  }
+  function optimisticQueue(id, t) { (Q.queue[id] = Q.queue[id] || []).push({ id: "tmp" + Date.now(), text: t, at: Date.now(), tmp: true }); }
+  function dropTmp(id, t) { Q.queue[id] = (Q.queue[id] || []).filter(function (x) { return !(x.tmp && x.text === t); }); }
+  function queued(id, r, t) {
+    var l = Q.queue[id] || []; var tmp = l.filter(function (x) { return x.tmp && x.text === t; })[0];
+    if (tmp) { if (r.queueId) { tmp.id = r.queueId; delete tmp.tmp; } }
+    else if (r.queueId && !l.some(function (x) { return x.id === r.queueId; })) l.push({ id: r.queueId, text: t, at: Date.now() });
+    Q.queue[id] = l; toast(T("Queued — it runs after this task", "Sıraya alındı — bu görevden sonra çalışır")); rerender(id);
+  }
+  function queueEl(th) {
+    var l = (Q.queue[cid()] || []).filter(function (x) { return x && x.text; });
+    if (!l.length) return;
+    var id0 = cid(), idle = !S.running[id0];
+    th.appendChild(h("div", { class: "qbar" }, icon("list-todo", "xs"), h("span", null, T(l.length + " queued", l.length + " sırada")),
+      idle ? h("button", { class: "qx", onclick: function () {
+        call("chat.queue.start", { convoId: id0 }).then(function (r) { if (r && r.started) { S.running[id0] = true; I.loadConvo(id0); } else toast(T("Nothing to start", "Başlatılacak bir şey yok")); }).catch(fail);
+      } }, T("Start queued", "Sıradakileri başlat")) : null,
+      h("button", { class: "qx ghost", onclick: function () {
+        call("chat.queue.clear", { convoId: id0 }).then(function () { Q.queue[id0] = []; rerender(id0); toast(T("Queue cleared", "Sıra temizlendi")); }).catch(fail);
+      } }, T("Clear", "Temizle"))));
+    th.appendChild(h("div", { class: "qlist", "aria-label": T("Queued messages", "Sıradaki mesajlar") }, l.map(function (x, i) {
+      return h("div", { class: "u qd" }, h("div", null,
+        h("div", { class: "bubble" }, x.text),
+        h("div", { class: "qcap" }, icon("list-todo", "xs"), h("span", null, T("In the queue · " + (i + 1), "Sırada · " + (i + 1))),
+          x.tmp ? null : h("button", { class: "qx", onclick: function () {
+            var id = cid();
+            call("chat.unqueue", { convoId: id, id: x.id }).then(function (r) {
+              Q.queue[id] = (Q.queue[id] || []).filter(function (y) { return y.id !== x.id; }); rerender(id);
+              if (r && r.ok === false) toast(T("It already started", "Zaten başladı")); else toast(T("Removed from the queue", "Sıradan kaldırıldı"));
+            }).catch(fail);
+          } }, T("Remove", "Kaldır")))));
+    })));
+  }
+  function onLoad(c) {
+    if (!c || !c.id) return;
+    if (true) {
+      Q.qAsked[c.id] = 1;
+      call("chat.queue", { convoId: c.id }).then(function (r) {
+        var items = (r && r.items) || [], before = JSON.stringify(Q.queue[c.id] || []);
+        Q.queue[c.id] = items; if (JSON.stringify(items) !== before && c.id === S.convoId) I.renderThread();
+      }).catch(function () {});
+    }
+  }
+  function runDone(id) { delete Q.mode[id]; setTimeout(function () { memCheck(id); }, 900); }
+
+  /* ---------------------------------------------------------------- events */
+  function onEvent(type, d) {
+    d = d || {};
+    if (type === "steer") {
+      var x = Q.steers[d.steerId];
+      if (!x) { Q.early[d.steerId] = d.state; return; }
+      if (d.state === "withdrawn") { forgetSteer(x.convoId, d.steerId, x.text); rerender(x.convoId); if (d.reason === "stopped") toast(T("Not sent — the task was stopped", "Gönderilmedi — görev durduruldu")); return; }
+      x.state = d.state;
+      if (S.convo && S.convo.id === x.convoId) (S.convo.messages || []).forEach(function (m) { if (m.steerId === d.steerId) m.steerState = d.state; });
+      rerender(x.convoId);
+    } else if (type === "queue") { Q.queue[d.convoId] = (d.items || []).concat((Q.queue[d.convoId] || []).filter(function (x) { return x.tmp && !(d.items || []).some(function (y) { return y.text === x.text; }); })); rerender(d.convoId); }
+    else if (type === "skill.drafted") { I.addSide(d.convoId || S.convoId || "_new", "skill", d, "skill:" + d.id); I.kbChanged(); }
+    else if (type === "skill.demoted") { if (d.text) toast(String(d.text).replace(/^\s*\p{Extended_Pictographic}\uFE0F?\s*/u, ""), function () { I.openKnowledge("skills"); }, 5000); I.kbChanged(); }
+    else if (type === "memory.pending") { memChip(d.items || []); I.kbChanged(); }
+    else if (type === "stopSummary") {
+      /* the model's rewrite of the wrap-up: replace that bubble's text in place */
+      if (!d.convoId || d.convoId !== S.convoId || !S.convo) return;
+      var hit = (S.convo.messages || []).filter(function (m) { return m.stopSummary && (!d.ts || m.ts === d.ts); }).pop();
+      if (hit && d.text) { hit.content = d.text; I.renderThread(); } else if (!S.running[d.convoId]) I.loadConvo(d.convoId);
+    }
+    else if (type === "schedules") {
+      if (I.topPage() === "schedules") drawSchedules();
+      if (d.convoId && d.convoId === S.convoId && !S.running[d.convoId]) I.loadConvo(d.convoId);
+    }
+  }
+
+  /* ---------------------------------------------------------------- side cards: learned skill, pending memory */
+  function sideEl(it) {
+    var d = it.d || {};
+    if (it.k === "skill") {
+      var st = d.decided;
+      return h("div", { class: "card skl" + (st ? " decided" : "") },
+        h("div", { class: "ch" }, icon("graduation-cap", "s"), h("b", null, d.updates ? T("Skill updated (trial)", "Beceri güncellendi (deneme)") : T("New skill learned", "Yeni beceri öğrenildi"))),
+        h("div", { class: "sk1" }, d.updates ? T("I improved the skill “" + d.name + "” from this task.", "Bu işten “" + d.name + "” becerisini geliştirdim.") : T("I saved this task as a trial skill: ", "Bu işi beceri olarak kaydettim (deneme): ") + (d.updates ? "" : d.name)),
+        d.description ? h("div", { class: "sk2" }, d.description) : null,
+        st ? null : h("div", { class: "sk3" }, T("I only start using it if you keep it.", "Onaylarsan kullanmaya başlarım.")),
+        st ? h("div", { class: "qcap done" }, icon(st === "keep" ? "check" : "trash-2", "xs"), st === "keep" ? T("Kept", "Tutuldu") : T("Deleted", "Silindi"))
+          : h("div", { class: "btnrow" },
+            h("button", { class: "btn sm ghost", onclick: function () { draftSheet(d); } }, icon("eye", "xs"), T("Show", "Göster")),
+            h("button", { class: "btn sm ghost", onclick: function () { decideSkill(it, "discard"); } }, icon("trash-2", "xs"), T("Delete", "Sil")),
+            h("button", { class: "btn sm p", onclick: function () { decideSkill(it, "keep"); } }, icon("check", "xs"), T("Keep", "Tut"))));
+    }
+    if (it.k === "mempending") {
+      return h("div", { class: "chiprow" }, h("button", { class: "nchip act", onclick: function () { I.openKnowledge("memory"); } }, icon("brain", "xs"),
+        h("span", null, T(d.count + " memory note(s) wait for your approval", d.count + " hafıza notu onayınızı bekliyor"))));
+    }
+    return null;
+  }
+  /* the proposed SKILL.md of a trial skill */
+  function draftSheet(d) {
+    call("skills.draftText", { id: d.id }).then(function (r) {
+      var t = r && r.text;
+      if (!t) { toast(T("The draft is gone", "Taslak artık yok")); return; }
+      var sh = sheet({ title: d.name, text: T("Trial skill — yaver does not use it until you keep it.", "Deneme beceri — siz tutana kadar yaver kullanmaz."), body: h("div", { class: "skdraft md" }, I.md(t)), actions: [[T("Close", "Kapat"), "p"]] });
+      sh.el.classList.add("tall");
+    }).catch(fail);
+  }
+  function decideSkill(it, what) {
+    var d = it.d;
+    call(what === "keep" ? "skills.confirm" : "skills.discard", { id: d.id }).then(function () {
+      d.decided = what; I.addSide(d.convoId || S.convoId, "skill", d, "skill:" + d.id);
+      toast(what === "keep" ? T("Skill kept", "Beceri tutuldu") : T("Skill deleted", "Beceri silindi")); I.kbChanged();
+    }).catch(fail);
+  }
+  function memChip(items) {
+    var id = cid(); if (!id) return;
+    var mine = items.filter(function (x) { return !x.convoId || x.convoId === id; });
+    var key = mine.map(function (x) { return x.id; }).join(",");
+    if (!mine.length || Q.memSeen[id] === key) return;
+    Q.memSeen[id] = key;
+    I.addSide(id, "mempending", { count: mine.length }, "mempending");
+  }
+  function memCheck(id) { if (id !== cid()) return; call("memory.pending").then(function (l) { memChip(l || []); }).catch(function () {}); }
+
+  /* memory page: "Waiting for approval" above the notes */
+  function pendingBox(box, target) {
+    if (target !== "memory") return;
+    var slot = h("div", { class: "pendbox" }); box.appendChild(slot);
+    call("memory.pending").then(function (l) {
+      l = l || []; if (!l.length || !slot.isConnected) return;
+      slot.appendChild(h("h4", { class: "ksec" }, icon("shield-check", "xs"), T("Waiting for approval", "Onay bekleyen"), h("small", null, String(l.length))));
+      slot.appendChild(h("p", { class: "kexpl" }, T("yaver wanted to remember these but they need your OK (procedures and things read from outside sources).", "yaver bunları hatırlamak istedi ama onayınız gerekiyor (yöntemler ve dış kaynaklardan okunanlar).")));
+      l.forEach(function (x) {
+        slot.appendChild(h("div", { class: "kcard pend" },
+          h("div", { class: "kbad" }, h("span", { class: "bdg dr" }, icon("clock", "xs"), x.target === "user" ? T("About you", "Hakkınızda") : T("Memory", "Hafıza")), x.at ? h("span", { class: "bdg" }, I.shortWhen(x.at)) : null),
+          h("div", { class: "ktext" }, String(x.content || "")),
+          h("div", { class: "btnrow" },
+            h("button", { class: "btn sm ghost", onclick: function () { call("memory.reject", { id: x.id }).then(function () { toast(T("Not saved", "Kaydedilmedi")); I.renderKb(); }).catch(fail); } }, icon("x", "xs"), T("Reject", "Reddet")),
+            h("button", { class: "btn sm p", onclick: function () { call("memory.approve", { id: x.id }).then(function () { toast(T("Saved to memory", "Hafızaya kaydedildi")); I.renderKb(); }).catch(fail); } }, icon("check", "xs"), T("Approve", "Onayla")))));
+      });
+    }).catch(function () {});
+  }
+
+  /* skills page: trial skills first */
+  function draftsBox(box) {
+    var slot = h("div", { class: "pendbox" }); box.appendChild(slot);
+    call("skills.drafts").then(function (l) {
+      l = l || []; if (!l.length || !slot.isConnected) return;
+      slot.appendChild(h("h4", { class: "ksec" }, icon("graduation-cap", "xs"), T("Learned from your tasks", "İşlerinizden öğrenilen"), h("small", null, String(l.length))));
+      l.forEach(function (x) {
+        slot.appendChild(h("div", { class: "kcard pend" },
+          h("div", { class: "kbad" }, h("span", { class: "bdg dr" }, icon("sparkle", "xs"), x.status === "disabled" ? T("off", "kapalı") : T("trial", "deneme")), x.updates ? h("span", { class: "bdg" }, T("update", "güncelleme")) : null, x.created ? h("span", { class: "bdg" }, I.shortWhen(x.created)) : null),
+          h("div", { class: "ktext" }, h("b", null, x.name)), x.description ? h("div", { class: "kfacts clamp" }, x.description) : null,
+          h("div", { class: "kfacts" }, T("Not used until you keep it.", "Onaylarsanız kullanılmaya başlar.")),
+          h("div", { class: "btnrow" },
+            h("button", { class: "btn sm ghost", onclick: function () { draftSheet(x); } }, icon("eye", "xs"), T("Show", "Göster")),
+            h("button", { class: "btn sm ghost", onclick: function () { call("skills.discard", { id: x.id }).then(function () { toast(T("Skill deleted", "Beceri silindi")); I.renderKb(); }).catch(fail); } }, icon("trash-2", "xs"), T("Delete", "Sil")),
+            h("button", { class: "btn sm p", onclick: function () { call("skills.confirm", { id: x.id }).then(function () { toast(T("Skill kept", "Beceri tutuldu")); I.renderKb(); }).catch(fail); } }, icon("check", "xs"), T("Keep", "Tut")))));
+      });
+    }).catch(function () {});
+  }
+
+  /* ---------------------------------------------------------------- under answers: stop wrap-up, sources, metrics, schedule */
+  var KIND_ICON = { web: "globe", mail: "mail", attachment: "paperclip", file: "file-text", doc: "file-text", search: "search", subagent: "users-round" };
+  function openSource(s) {
+    var ref = String(s.ref || "");
+    if (s.kind === "web") { var u = ref.split(/\s+/)[0]; if (/^https?:/i.test(u)) call("open.link", { url: u }).catch(fail); }
+    else if (s.kind === "mail" || s.kind === "attachment") I.openMail(ref.split("#")[0]);
+    else if (s.kind === "file" || s.kind === "doc") I.previewFile(ref);
+  }
+  function srcLabel(s) {
+    var t = String(s.title || "").trim(), ref = String(s.ref || "");
+    if (!t || t === ref) { if (s.kind === "web") t = ref.replace(/^https?:\/\/(www\.)?/i, "").split(/[/?#\s]/)[0]; else t = ref.split("/").pop(); }
+    return t || T("source", "kaynak");
+  }
+  function sourcesEl(list) {
+    var ok = (list || []).filter(function (s) { return s && (s.ref || s.title); }).slice(0, 8);
+    if (!ok.length) return null;
+    return h("div", { class: "srcrow" }, h("span", { class: "srch" }, icon("book-open", "xs"), T("Sources", "Kaynaklar")),
+      ok.map(function (s) {
+        var link = s.kind === "web" || s.kind === "mail" || s.kind === "attachment" || s.kind === "file" || s.kind === "doc";
+        var inner = [icon(KIND_ICON[s.kind] || "link", "xs"), h("span", null, srcLabel(s))];
+        return link ? h("button", { class: "srcchip", title: String(s.ref || ""), onclick: function () { openSource(s); } }, inner) : h("span", { class: "srcchip flat", title: String(s.ref || "") }, inner);
+      }));
+  }
+  function metricsLine(mt) {
+    var parts = [];
+    if (mt.ms) parts.push(dur(mt.ms));
+    if (mt.calls) parts.push(T(mt.calls + (mt.calls === 1 ? " model call" : " model calls"), mt.calls + " model çağrısı"));
+    if (mt.tools) parts.push(T(mt.tools + (mt.tools === 1 ? " tool" : " tools"), mt.tools + " araç"));
+    var tk = (+mt.tokensIn || 0) + (+mt.tokensOut || 0);
+    if (tk) parts.push((mt.estimated ? "~" : "") + ktok(tk) + T(" tokens", " token"));
+    return parts.join(" · ");
+  }
+  var OUTCOME = { done: ["circle-check", "Done", "Tamamlandı"], partial: ["circle-dot", "Partly done", "Kısmen yapıldı"], not_possible: ["ban", "Not possible", "Yapılamadı"], unknown: ["circle-help", "Unclear", "Belirsiz"] };
+  function metricsSheet(m) {
+    var mt = m.metrics || {}, oc = OUTCOME[m.outcome];
+    function r(k, v) { return [h("dt", null, k), h("dd", null, v)]; }
+    sheet({ title: T("About this answer", "Bu yanıt hakkında"), body: h("dl", { class: "dl" },
+      r(T("Time", "Süre"), dur(mt.ms)),
+      mt.firstMs > 0 ? r(T("First text after", "İlk metin"), dur(mt.firstMs)) : null,
+      r(T("Model calls", "Model çağrısı"), String(mt.calls || 0)),
+      r(T("Tool calls", "Araç çağrısı"), String(mt.tools || 0)),
+      r(T("Tokens sent", "Gönderilen token"), (mt.estimated ? "~" : "") + num(mt.tokensIn)),
+      r(T("Tokens received", "Alınan token"), (mt.estimated ? "~" : "") + num(mt.tokensOut)),
+      mt.model ? r(T("Model", "Model"), mt.model) : null,
+      oc ? r(T("Result", "Sonuç"), h("span", { class: "oc" }, icon(oc[0], "xs"), T(oc[1], oc[2]))) : null,
+      oc && m.outcomeWhy ? r(T("Why", "Neden"), String(m.outcomeWhy)) : null),
+      text: mt.estimated ? T("~ = estimated: the service did not report token counts.", "~ = tahmini: hizmet token sayısını bildirmedi.") : null,
+      actions: [[T("Token usage", "Token kullanımı"), "", function () { tokenPage(); }], [T("Close", "Kapat"), "p"]] });
+  }
+  function answer(wrap, box, m, idx, isFinal) {
+    if (m.interrupted) wrap.insertBefore(h("div", { class: "stoplbl cut" }, icon("minimize-2", "xs"), T("cut off", "kesildi")), box);
+    if (m.stopSummary) wrap.insertBefore(h("div", { class: "stoplbl" }, icon("circle-pause", "xs"), T("Stopped — summary", "Durduruldu — özet")), box);
+    if (m.schedule && m.schedule.title) wrap.insertBefore(h("button", { class: "stoplbl sch", onclick: function () { schedulesPage(); } }, icon(m.schedule.kind === "note" ? "info" : "alarm-clock", "xs"), h("span", null, (m.schedule.kind === "note" ? T("Schedule · ", "Zamanlama · ") + m.schedule.title : (m.schedule.kind === "condition" ? T("Condition met", "Koşul sağlandı") : T("Reminder", "Hatırlatma")) + (m.ts ? " · " + I.timeOf(m.ts) : "")))), box);
+    var acts = wrap.querySelector(".acts");
+    var src = m.sources && m.sources.length ? sourcesEl(m.sources) : null;
+    if (src) wrap.insertBefore(src, acts || null);
+    if (m.metrics && (m.metrics.calls || m.metrics.ms)) {
+      var line = metricsLine(m.metrics);
+      if (line) wrap.insertBefore(h("button", { class: "mline", "aria-label": T("Details: ", "Ayrıntılar: ") + line, onclick: function () { metricsSheet(m); } }, h("span", null, line)), acts || null);
+    }
+  }
+
+  /* ---------------------------------------------------------------- token usage page */
+  function tokenPage() {
+    if (I.topPage() === "tokens") return;
+    var days = 30;
+    I.pushPage("tokens", T("Token usage", "Token kullanımı"), function (body) {
+      function draw() {
+        clear(body).appendChild(I.loading());
+        call("usage.stats", { days: days }).then(function (r) {
+          clear(body); r = r || {};
+          var tot = r.total || {}, D = r.days || [], M = r.models || [];
+          body.appendChild(h("div", { class: "tabs", role: "tablist" }, [[7, T("7 days", "7 gün")], [30, T("30 days", "30 gün")], [90, T("90 days", "90 gün")]].map(function (o) {
+            return h("button", { class: "tab" + (days === o[0] ? " on" : ""), role: "tab", "aria-selected": String(days === o[0]), onclick: function () { days = o[0]; draw(); } }, o[1]);
+          })));
+          body.appendChild(h("div", { class: "kstats tk" },
+            kst(T("Tokens", "Token"), ktok((tot.tokensIn || 0) + (tot.tokensOut || 0)), T(ktok(tot.tokensIn) + " sent · " + ktok(tot.tokensOut) + " received", ktok(tot.tokensIn) + " giden · " + ktok(tot.tokensOut) + " gelen")),
+            kst(T("Model calls", "Model çağrısı"), num(tot.calls), T(num(tot.msgs) + " answers", num(tot.msgs) + " yanıt"))));
+          if (!D.length) { body.appendChild(h("div", { class: "kempty" }, icon("activity"), T("No answers recorded yet. Each finished answer adds its tokens here.", "Henüz kayıtlı yanıt yok. Her biten yanıt token sayısını buraya ekler."))); return; }
+          var max = Math.max.apply(null, D.map(function (d) { return (d.tokensIn || 0) + (d.tokensOut || 0); }).concat([1]));
+          body.appendChild(I.group(T("By day", "Güne göre"), D.map(function (d) {
+            var t = (d.tokensIn || 0) + (d.tokensOut || 0), dt = new Date(d.day + "T12:00:00");
+            return h("div", { class: "tkrow" }, h("div", { class: "tkh" }, h("b", null, I.dayLabel(dt.getTime()) + " · " + dt.toLocaleDateString(S.lang === "tr" ? "tr-TR" : undefined, { day: "numeric", month: "short" })), h("span", null, ktok(t) + T(" tokens · ", " token · ") + num(d.calls) + T(" calls", " çağrı"))),
+              h("div", { class: "tkbar" }, h("i", { class: "in", style: "width:" + ((d.tokensIn || 0) / max * 100).toFixed(1) + "%" }), h("i", { class: "out", style: "width:" + ((d.tokensOut || 0) / max * 100).toFixed(1) + "%" })));
+          }), h("span", { class: "tklegend" }, h("i", { class: "in" }), T("sent", "giden"), h("i", { class: "out" }), T("received", "gelen"))));
+          body.appendChild(I.group(T("By model", "Modele göre"), M.map(function (x) {
+            return I.row({ icon: "cpu", label: x.model, sub: ktok(x.tokensIn) + T(" sent · ", " giden · ") + ktok(x.tokensOut) + T(" received · ", " gelen · ") + num(x.calls) + T(" calls", " çağrı"), wrap: true, value: ktok((x.tokensIn || 0) + (x.tokensOut || 0)) });
+          }), T("Counted from the token numbers the model service reports with each answer (estimated when it does not).", "Model hizmetinin her yanıtla bildirdiği token sayılarından hesaplanır (bildirmediğinde tahmini).")));
+        }).catch(function (e) { I.errorView(clear(body), e); });
+      }
+      draw();
+    });
+  }
+  function kst(label, big, small) { return h("div", { class: "kst" }, h("span", null, label), h("div", null, h("b", null, big)), small ? h("small", { class: "kss" }, small) : null); }
+
+  /* ---------------------------------------------------------------- schedules page */
+  var DAYS = { tr: ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"], en: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] };
+  function ruleText(s) {
+    var r = s.rule || {}, d = DAYS[S.lang === "tr" ? "tr" : "en"];
+    if (r.type === "interval") { var m = Math.round((r.everyMs || 0) / 60000); return m % 1440 === 0 ? T("Every " + (m / 1440) + " day(s)", (m / 1440 === 1 ? "Her gün" : "Her " + m / 1440 + " günde")) : m % 60 === 0 ? T("Every " + (m / 60) + " h", (m / 60 === 1 ? "Saatte bir" : "Her " + m / 60 + " saatte")) : T("Every " + m + " min", "Her " + m + " dakikada"); }
+    if (r.type === "daily") return T("Every day ", "Her gün ") + r.time;
+    if (r.type === "weekly") { var ds = (r.days || []).slice().sort(); var wd = ds.join(",") === "1,2,3,4,5" ? T("Weekdays", "Hafta içi") : ds.join(",") === "6,7" ? T("Weekends", "Hafta sonu") : ds.map(function (x) { return d[x - 1]; }).join(", "); return wd + " " + r.time; }
+    return T("Once", "Bir kez");
+  }
+  function whenText(ms) { if (!ms) return ""; var dl = I.dayLabel(ms), now = Date.now(); return (ms - now < 7 * 864e5 && ms > now - 864e5 ? dl : new Date(ms).toLocaleDateString(S.lang === "tr" ? "tr-TR" : undefined, { day: "numeric", month: "short" })) + " " + I.timeOf(ms); }
+  var KIND = { reminder: ["bell", "Reminder", "Hatırlatma"], task: ["play", "Task", "Görev"], condition: ["radar", "Conditional task", "Koşullu görev"] };
+  var REASON = { condition_not_met: ["Condition not met", "Koşul sağlanmadı"], condition_unchanged: ["Unchanged — still met", "Değişmedi — hâlâ sağlanıyor"], cooldown: ["Skipped: cooldown", "Atlandı: bekleme süresi"] };
+  function lastText(l) {
+    if (!l || !l.status) return "";
+    var at = l.at ? " · " + I.shortWhen(l.at) : "", v = l.value ? T(" · value: ", " · değer: ") + l.value : "";
+    switch (l.status) {
+      case "done": return T("Last: done", "Son: tamamlandı") + v + at;
+      case "running": return T("Running now…", "Şu anda çalışıyor…");
+      case "checking": return T("Checking now…", "Şu anda kontrol ediliyor…");
+      case "skipped": return T("Last: ", "Son: ") + T((REASON[l.reason] || ["Skipped", ""])[0], (REASON[l.reason] || ["", "Atlandı"])[1]) + v + at;
+      case "check_failed": return T("Last: could not check", "Son: kontrol edilemedi") + at;
+      case "failed": return T("Last: failed", "Son: başarısız") + at;
+      case "unknown": return T("Last: result unknown, not repeated", "Son: sonuç bilinmiyor, tekrarlanmadı") + at;
+    }
+    return "";
+  }
+  function lastCls(l) { return !l ? "" : l.status === "done" ? "ok" : l.status === "failed" || l.status === "check_failed" || l.status === "unknown" ? "bad" : l.status === "skipped" ? "skip" : "run"; }
+  var SCH = { data: null };
+  function schedulesPage() {
+    I.closeDrawer();
+    if (I.topPage() === "schedules") { drawSchedules(); return; }
+    I.pushPage("schedules", T("Scheduled", "Zamanlanmış işler"), function (body) { body.appendChild(I.loading()); drawSchedules(); });
+  }
+  function schedBody() { var p = S.pages.filter(function (x) { return x.name === "schedules"; })[0]; return p && p.body; }
+  function drawSchedules() {
+    var body = schedBody(); if (!body) return;
+    call("schedules.list").then(function (r) {
+      r = r || {}; SCH.data = r; body = schedBody(); if (!body) return;
+      var keep = body.scrollTop; clear(body);
+      var all = r.items || [], act = all.filter(function (s) { return s.active; }), pau = all.filter(function (s) { return !s.active; });
+      if (r.exact === false) body.appendChild(h("div", { class: "warncard" }, icon("triangle-alert", "s"), h("div", null, h("b", null, T("Exact alarms are off", "Kesin alarm izni kapalı")),
+        h("span", null, T(" — schedules may run a few minutes late.", " — işler birkaç dakika gecikebilir.")), h("div", { class: "btnrow" }, h("button", { class: "btn sm", onclick: function () { call("system.open", { what: "exactAlarm" }).catch(fail); } }, T("Allow", "İzin ver"))))));
+      if (!all.length) {
+        body.appendChild(h("div", { class: "empty" }, h("div", { class: "ei" }, icon("alarm-clock")), h("h3", null, T("Nothing scheduled", "Planlanmış bir şey yok")),
+          h("p", null, T("Ask yaver, e.g. “every weekday at 8:30 summarize my unread mail”, “remind me at 4 pm to call Ayşe” or “tell me when the dollar goes over 35, at most once a day”.",
+            "yaver'e söyleyin, ör. “hafta içi her gün 8:30'da okunmamış postalarımı özetle”, “16:00'da Ayşe'yi aramamı hatırlat” ya da “dolar 35'i geçerse haber ver, en fazla günde bir”."))));
+        return;
+      }
+      body.appendChild(I.group(T("Active", "Etkin") + " · " + act.length, act.length ? act.map(schedRow) : [h("div", { class: "row muted" }, T("Nothing active", "Etkin iş yok"))]));
+      if (pau.length) body.appendChild(I.group(T("Paused", "Duraklatıldı") + " · " + pau.length, pau.map(schedRow), T("Finished one-time items leave this list after a week.", "Biten tek seferlik işler bir hafta sonra listeden çıkar.")));
+      body.scrollTop = keep;
+    }).catch(function (e) { var b = schedBody(); if (b) I.errorView(clear(b), e); });
+  }
+  function schedRow(s) {
+    var k = KIND[s.kind] || KIND.task, l = s.last, state;
+    if (s.runningNow) state = l && l.status === "checking" ? T("checking now…", "şu anda kontrol ediliyor…") : T("running now…", "şu anda çalışıyor…");
+    else if (s.done) state = T("done", "bitti");
+    else if (!s.enabled) state = T("paused", "duraklatıldı");
+    else state = T("next ", "sonraki ") + whenText(s.next);
+    var lt = lastText(l);
+    var canSwitch = !s.done && (s.enabled || s.canResume);
+    var sw = canSwitch ? h("button", { class: "sw" + (s.enabled ? " on" : ""), role: "switch", "aria-checked": String(!!s.enabled), "aria-label": s.enabled ? T("Pause", "Duraklat") : T("Resume", "Sürdür"), onclick: function (e) {
+      e.stopPropagation();
+      call(s.enabled ? "schedules.pause" : "schedules.resume", { id: s.id }).then(function () { toast(s.enabled ? T("Paused", "Duraklatıldı") : T("Resumed", "Sürdürülüyor")); drawSchedules(); }).catch(function (x) { fail(x); drawSchedules(); });
+    } }) : null;
+    return h("div", { class: "row sch", role: "button", tabindex: "0", onclick: function () { schedSheet(s); } },
+      h("div", { class: "tile k-" + s.kind }, icon(k[0])),
+      h("div", { class: "rt" }, h("b", null, s.title || T(k[1], k[2])),
+        h("span", { class: "wrap" }, ruleText(s) + " · " + state),
+        lt ? h("span", { class: "wrap last " + lastCls(l) }, lt) : null),
+      sw);
+  }
+  function schedSheet(s) {
+    var k = KIND[s.kind] || KIND.task, l = s.last || {};
+    function r(a, b) { return b ? [h("dt", null, a), h("dd", null, b)] : null; }
+    var up = (s.upcoming || []).map(whenText).join(" · ");
+    var sh = sheet({ title: s.title || T(k[1], k[2]), body: h("div", null,
+      h("dl", { class: "dl" },
+        r(T("Kind", "Tür"), T(k[1], k[2])),
+        r(T("Message", "Mesaj"), s.kind === "reminder" ? s.text : ""),
+        r(T("Checks", "Kontrol"), s.condition),
+        r(T("Does", "Yapacağı"), s.prompt || (s.kind === "condition" ? T("Tells you in the chat", "Sohbette size haber verir") : "")),
+        r(T("Repeat", "Tekrar"), ruleText(s) + (s.kind === "condition" ? " · " + (s.notify === "each_time" ? T("every time it is met", "her sağlandığında") : T("when it becomes true", "sağlandığı anda")) + (s.cooldownMs ? T(" · at most every ", " · en sık ") + dur(s.cooldownMs) : "") : "")),
+        r(T("Next", "Sonraki"), s.done ? T("done", "bitti") : !s.enabled ? T("paused", "duraklatıldı") : up),
+        r(T("Last result", "Son sonuç"), lastText(l) + (l.evidence ? "\n" + l.evidence : "") + (l.text ? "\n" + l.text : "")),
+        r(T("Baseline", "Karşılaştırma değeri"), s.baseline != null && s.kind === "condition" ? String(s.baseline) : ""),
+        r(T("Chat", "Sohbet"), s.convoTitle)),
+      opt("message-square", T("Open chat", "Sohbeti aç"), s.convoTitle || null, function () { sh.close(); if (s.convoId) { I.closeAllPages(); I.loadConvo(s.convoId); } else toast(T("It opens a chat when it first runs", "İlk çalıştığında bir sohbet açar")); }),
+      opt("play", T("Run now", "Şimdi çalıştır"), T("Its next time stays the same", "Sonraki zamanı değişmez"), function () { sh.close(); call("schedules.run", { id: s.id }).then(function () { toast(T("Started — the result comes to its chat", "Başladı — sonuç sohbetine gelecek")); setTimeout(drawSchedules, 600); }).catch(fail); }),
+      opt("calendar-clock", T("Change time", "Zamanı değiştir"), ruleText(s), function () { sh.close(); changeTime(s); }),
+      opt("trash-2", T("Delete", "Sil"), null, function () { sh.close(); sheet({ title: T("Delete this schedule?", "Bu zamanlama silinsin mi?"), text: s.title, actions: [[T("Cancel", "İptal")], [T("Delete", "Sil"), "danger", function () { call("schedules.delete", { id: s.id }).then(function () { toast(T("Deleted", "Silindi")); drawSchedules(); }).catch(fail); }]] }); }, "danger")) });
+  }
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  function localIso(ms) { var d = new Date(ms); return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes()); }
+  function changeTime(s) {
+    var r = s.rule || {};
+    function done(p) { p.then(function (x) { toast(T("New time: ", "Yeni zaman: ") + whenText(x && x.next)); drawSchedules(); }).catch(fail); }
+    if (r.type === "interval") {
+      I.optionsSheet(T("Repeat every", "Tekrar sıklığı"), [15, 30, 60, 120, 240, 720, 1440].map(function (m) { return [String(m), m < 60 ? T(m + " min", m + " dakika") : m < 1440 ? T(m / 60 + " h", m / 60 + " saat") : T("1 day", "1 gün")]; }), String(Math.round((r.everyMs || 0) / 60000)), function (v) { done(call("schedules.reschedule", { id: s.id, everyMin: +v })); });
+    } else if (r.type === "daily" || r.type === "weekly") {
+      I.editSheet({ title: T("New time", "Yeni saat"), type: "time", value: r.time || "09:00", help: ruleText(s), save: function (v) { if (!/^\d{1,2}:\d{2}$/.test(v)) { toast(T("Pick a time", "Bir saat seçin")); return false; } done(call("schedules.reschedule", { id: s.id, time: v })); } });
+    } else {
+      I.editSheet({ title: T("New time", "Yeni zaman"), type: "datetime-local", value: localIso(Math.max(s.next || 0, Date.now() + 36e5)), save: function (v) { var t = new Date(v).getTime(); if (!t) { toast(T("Pick a date and time", "Tarih ve saat seçin")); return false; } done(call("schedules.reschedule", { id: s.id, at: t })); } });
+    }
+  }
+
+  window.YV51 = { sendMode: sendMode, syncMode: syncMode, steered: steered, tagPending: tagPending, keepPending: keepPending, steerCap: steerCap, steerMenu: steerMenu,
+    optimisticQueue: optimisticQueue, dropTmp: dropTmp, queued: queued, queueEl: queueEl, onLoad: onLoad, runDone: runDone, onEvent: onEvent, sideEl: sideEl,
+    pendingBox: pendingBox, draftsBox: draftsBox, answer: answer, metricsLine: metricsLine, tokenPage: tokenPage, schedulesPage: schedulesPage, drawSchedules: drawSchedules, ruleText: ruleText, Q: Q };
 })();

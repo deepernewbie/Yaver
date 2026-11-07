@@ -291,6 +291,8 @@ object Agent {
                 at.chip?.let { note(it); Diag.i("memory", it) }
             }
             if (route.recall) content += try { MemoryX.recallBlock(text, c.id) } catch (_: Throwable) { "" }
+            // 5.1: a hint from earlier successful runs of a similar task (learning hook), for the model only
+            if (!isInternal && !background) H51.routeHint(text)?.let { h -> content += "\n\n[harness note — not written by the user] $h"; Diag.i("h51", "route hint: " + clip(h, 120)) }
             content += Lang.onUserMessage(c, text, isInternal)
             content += "\n\n" + Prompt.nowNote()
             um = userMessage(Refs.short(content), images, files).put("display", display ?: text)
@@ -309,6 +311,7 @@ object Agent {
         // this instance is the conversation while the turn runs: saves of other copies (👍/👎, rename) are merged into it
         Convos.save(c)
         Convos.begin(c)
+        val rec = if (!isSub) H51.begin(c, turnStart, userText, !isInternal && !background) else null
 
         val ctx = ToolCtx(c, cancel, background, listener, depth).also { it.userText = userText }
         val turn = GateTurn(userText, Lang.name(Lang.fixed() ?: c.lang))
@@ -319,8 +322,11 @@ object Agent {
         if (!isSub) Changes.begin(c.id)
         try {
             final = loop(c, ctx, st, turn, turnStart, isSub, noTools, model, toolsets, allowedTools, if (maxSteps > 0) maxSteps else Cfg.maxSteps, systemExtra, note, progress)
+            if (!isSub) H51.finish(c, rec, final)
         } catch (e: CancelledException) {
             closeOpenCalls(c, Y.t("(not run: stopped by the user)", "(çalıştırılmadı: kullanıcı durdurdu)"))
+            // 5.1: a short wrap-up of what was done / found / left, kept in the history for a later "continue"
+            if (!isSub) { H51.stopSummary(c); H51Queue.hold(c.id) }   // queued messages wait for "start queued" after a Stop
             c.messages.put(JSONObject().put("role", "assistant").put("content", Y.t("⏹ Stopped.", "⏹ Durduruldu.")).put("local", true))
             if (!isSub) attachChanges(c)
             Convos.save(c)
@@ -340,6 +346,7 @@ object Agent {
         } finally {
             Llm.info.set(prevInfo); Llm.onRetry.set(null); Llm.retryNote.set(null)   // pooled worker threads must not keep this turn's listener
             Trace.convo.set(prevTrace)
+            if (!isSub) H51.end(c)
         }
         try {
             if (!isSub) attachChanges(c)
@@ -413,10 +420,11 @@ object Agent {
         var memNudged = false
         var idkNudged = false
         var restrict: Set<String>? = null      // tools actually sent after a slim retry
+        val rec = if (isSub) null else H51.turn(c.id)
         fun turnMsgs() = Gates.turnMsgs(c, turnStart)
 
         fun toolsNow(): JSONArray {
-            if (noTools) return JSONArray()
+            if (noTools || rec?.gateNoTools == true) return JSONArray()
             val all = Tools.schemas(isSub)
             val listed = members.values.flatten().toSet()
             val ts = toolsets
@@ -438,18 +446,42 @@ object Agent {
         for (iter in 0 until maxIter) {
             cancel.check()
             turn.iter = iter
-            if (!isSub && iter > 0) deliverPending(c, st, turn)
+            // also at iteration 0: a message steered in during setup joins before the first call (instead of cutting it)
+            if (!isSub) deliverPending(c, st, turn)
             val tools = toolsNow()
             Compactor.auto(c, tools, model, cancel, isSub, { t -> note(t); Diag.i("ctx", t) }, progress, st.userText)
-            Llm.info.set(if (listener == null) null else { a, b, cc, d -> listener.onThinkInfo(a, b, cc, d) })
-            Llm.onRetry.set(if (listener == null) null else { { listener.onStep() } })
+            Llm.info.set(if (listener == null && rec == null) null else { a, b, cc, d -> rec?.toolStreaming = b.isNotEmpty(); listener?.onThinkInfo(a, b, cc, d) })
+            Llm.onRetry.set(if (listener == null && rec == null) null else { { rec?.shown?.setLength(0); listener?.onStep() } })
             Llm.retryNote.set(if (isSub) null else progress)
+            // 5.1: the call has its own cancel, so a message steered in can cut a streaming answer without stopping the turn
+            val callCancel = H51.callCancel(rec, cancel)
             // after two empty replies: no streaming and low reasoning effort (reasoning models spent the budget thinking), then no tools
-            val (r0, sent) = Compactor.chatWithRetry(c, tools, model, cancel, isSub, st, { t -> note(t); Diag.i("ctx", t) }, progress) { tl ->
-                Llm.chat(requestMessages(c, systemExtra, isSub), if (empty >= 3 || tl.length() == 0) null else tl, model,
-                    onDelta = { listener?.onDelta(it) }, onThink = { listener?.onThinking(it) }, cancel = cancel, maxTokens = Compactor.fitOutput(c, tl, model, outBudget),
-                    stream = if (empty >= 2) false else Cfg.stream, effort = if (empty >= 2) "low" else null)
+            var got: Pair<LlmResult, JSONArray>? = null
+            try {
+                got = Compactor.chatWithRetry(c, tools, model, cancel, isSub, st, { t -> note(t); Diag.i("ctx", t) }, progress) { tl ->
+                    val req = requestMessages(c, systemExtra, isSub)
+                    val tsent = if (empty >= 3 || tl.length() == 0) null else tl
+                    Llm.chat(req, tsent, model,
+                        onDelta = { listener?.onDelta(it); H51.delta(rec, it) }, onThink = { listener?.onThinking(it) }, cancel = callCancel, maxTokens = Compactor.fitOutput(c, tl, model, outBudget),
+                        stream = if (empty >= 2) false else Cfg.stream, effort = if (empty >= 2) "low" else null)
+                        .also { H51.called(rec, req.toString().length + (tsent?.toString()?.length ?: 0), it) }
+                }
+            } catch (e: CancelledException) {
+                if (!H51.wasCut(rec, cancel)) throw e
             }
+            if (got == null) {
+                // a steer cut the streaming answer: keep what the user already saw (text only), then the steer joins
+                val part = H51.takeCut(rec)
+                if (part.isNotBlank() && Turns.hasPending(c.id)) {
+                    c.messages.put(JSONObject().put("role", "assistant").put("content", part).put("interrupted", true).put("ts", System.currentTimeMillis()))
+                    Convos.save(c)
+                }
+                contFrom = -1
+                listener?.onStep()
+                continue
+            }
+            val (r0, sent) = got
+            rec?.gateNoTools = false
             // a broken tool call (arguments cut off, or a required argument missing — "{}" after a provider error mid-stream):
             // ask the same question once more without streaming before the model sees an error and starts guessing
             val offered = names(sent).toSet()
@@ -466,6 +498,13 @@ object Agent {
                 if (r2 != null && ((r2.toolCalls.isNotEmpty() && r2.toolCalls.none { brokenCall(it.name, it.args) }) || (r2.toolCalls.isEmpty() && r2.content.isNotBlank()))) {
                     Diag.i("augment", "retry gave a complete reply"); r = r2; st.lastFinish = r2.finish
                 } else Diag.i("augment", "retry did not help")
+            }
+            // 5.1 intent gate (weak models): a short chatty message must not start actions — drop the calls, ask again without tools
+            if (!isSub && r.toolCalls.isNotEmpty() && H51.intentChat(rec, c, r.toolCalls, cancel)) {
+                note(Y.t("intent gate · this is just chat — answering without tools", "niyet kapısı · bu bir sohbet — araçsız yanıtlanıyor"))
+                rec?.gateNoTools = true
+                listener?.onStep()
+                continue
             }
             // a tool call whose arguments are unclosed JSON was cut off, whatever finish_reason the provider reported
             // (some report "stop"/"tool_calls" after a long hidden reasoning ate max_tokens)
@@ -601,8 +640,9 @@ object Agent {
         Compactor.auto(c, null, model, cancel, isSub, { t -> note(t); Diag.i("ctx", t) }, progress, st.userText)
         // a failing wrap-up call (provider error, empty reply) must not turn the whole task into an error, nor leave an
         // empty assistant row (and a blank answer) behind
-        val r = try { Llm.chat(requestMessages(c, systemExtra, isSub), null, model, onDelta = { listener?.onDelta(it) }, cancel = cancel, maxTokens = Compactor.fitOutput(c, null, model, Cfg.maxOut)) }
+        val r = try { Llm.chat(requestMessages(c, systemExtra, isSub), null, model, onDelta = { listener?.onDelta(it); H51.delta(rec, it) }, cancel = cancel, maxTokens = Compactor.fitOutput(c, null, model, Cfg.maxOut)) }
             catch (e: CancelledException) { throw e } catch (e: Throwable) { Diag.e("agent", "budget wrap-up call failed", e); null }
+        H51.called(rec, 0, r)
         val tr = (Lang.fixed() ?: c.lang ?: Lang.ui()) == "tr"
         val text = (r?.content ?: "").ifBlank { if (tr) "Bu iş için adım sınırına ulaştım ve bitiremedim. Devam etmemi isterseniz söyleyin." else "I reached the step limit for this task before finishing. Ask me to continue if you want me to go on." }
         c.messages.put(JSONObject().put("role", "assistant").put("content", text).put("ts", System.currentTimeMillis()))
@@ -626,7 +666,8 @@ object Agent {
     /** One tool call checked before it runs: [args] to run it with, or [early] = the result to store instead. */
     private class Prep(val t: ToolCall, val tool: Tool?, val args: JSONObject?, val early: String?)
     /** What a tool run produced (on whichever thread it ran). */
-    private class Ran(val result: String, val log: List<String>, val ms: Long)
+    /** [ran]: the tool itself ran and returned (no exception, not refused before running) — decided from the execution, never from the text. */
+    private class Ran(val result: String, val log: List<String>, val ms: Long, val ran: Boolean = false)
 
     /** Argument checks, the allowed-tools filter, on-demand toolsets, plan mode and the permission preset (agent thread). */
     private fun prepare(
@@ -647,10 +688,11 @@ object Agent {
         val t0 = System.currentTimeMillis()
         val plog = java.util.Collections.synchronizedList(ArrayList<String>())
         if (worker) { ctx.bindLog(plog); Trace.convo.set(c.id) } else ctx.toolLog = plog
+        var ranOk = false
         val result = try {
             p.early ?: run {
                 currentTool.set(p.t.name); currentArgs.set(p.args)
-                p.tool!!.run(Refs.expand(p.args!!), ctx)
+                p.tool!!.run(Refs.expand(p.args!!), ctx).also { ranOk = true }
             }
         } catch (e: CancelledException) {
             if (!worker) throw e
@@ -663,14 +705,17 @@ object Agent {
             if (worker) { ctx.bindLog(null); Trace.convo.set(null) } else ctx.toolLog = null
         }
         val lines = synchronized(plog) { plog.filter { it.isNotEmpty() }.distinct() }
-        return Ran(result, lines, System.currentTimeMillis() - t0)
+        return Ran(result, lines, System.currentTimeMillis() - t0, ranOk)
     }
 
     /** Stores a call's result row (agent thread, in the order of the calls). */
     private fun store(c: Convo, ctx: ToolCtx, st: LoopState, t: ToolCall, ran: Ran) {
         var result = ran.result
-        val ok = !(result.startsWith("Error") || result.startsWith("Not executed"))
-        result = LoopUtil.finishResult(Refs.short(result), t.name, t.args, st)
+        // 5.1: outside text (web, mail, files, search, helper agents) is tagged <untrusted source ref> centrally here, for every
+        // call that actually ran — a document whose text starts with "Error:" or "<untrusted" is still wrapped
+        val tagged = ran.ran && H51.sourceOf(t.name, LoopUtil.jsonTry(Loop5.fixArgs(t.args.ifBlank { "{}" })) as? JSONObject ?: JSONObject()) != null
+        val ok = ran.ran && (tagged || !(result.startsWith("Error") || result.startsWith("Not executed")))
+        result = LoopUtil.finishResult(Refs.short(result), t.name, t.args, st) { s -> if (tagged) H51.untrusted(t.name, t.args, s) else s }
         try { Trace.tool(c.id, t.name, t.args, result, ok, ran.ms, ctx.depth) } catch (_: Throwable) {}
         val tm = JSONObject().put("role", "tool").put("tool_call_id", t.id).put("name", t.name).put("content", result).put("ok", ok).put("ms", ran.ms)
         val lines = ran.log
@@ -823,6 +868,14 @@ object Agent {
         return "🧠 " + Y.t("Background review", "Arka plan") + " · $name" + if (failed) " (${clip(why.ifEmpty { res }, 80)})" else ""
     }
 
+    /** The text a skill_manage call would write (all string arguments except the action / name). */
+    fun skillText(a: JSONObject): String {
+        val sb = StringBuilder()
+        fun walk(v: Any?) { when (v) { is String -> sb.append(v).append('\n'); is JSONObject -> for (k in v.keys()) if (k != "action" && k != "name") walk(v.opt(k)); is JSONArray -> for (i in 0 until v.length()) walk(v.opt(i)) } }
+        walk(a)
+        return sb.toString()
+    }
+
     /** After a turn: System-1 (or every 10 turns) decides whether to save memories / skills; a small tool loop does it. */
     fun backgroundReview(c: Convo, turnStart: Int) {
         if (turnStart >= c.messages.length() || Cfg.model.isEmpty()) return
@@ -851,7 +904,9 @@ object Agent {
                 if (r.toolCalls.isEmpty()) break
                 for (t in r.toolCalls) {
                     val args = LoopUtil.jsonTry(t.args) as? JSONObject ?: JSONObject()
-                    val res = try { if (t.name !in allowed) "Error: tool ${t.name} is not enabled" else Tools.get(t.name)!!.run(args, ctx) } catch (e: Throwable) { "Error: " + (e.message ?: e.toString()) }
+                    // 5.1: skill text written here gets the same hygiene as memory (no sensitive data, nothing only read from outside)
+                    val guard = if (t.name == "skill_manage") MemoryGuard.provenanceError(skillText(args), c.messages, "A skill") else null
+                    val res = try { if (t.name !in allowed) "Error: tool ${t.name} is not enabled" else guard ?: Tools.get(t.name)!!.run(args, ctx) } catch (e: Throwable) { "Error: " + (e.message ?: e.toString()) }
                     msgs.put(JSONObject().put("role", "tool").put("tool_call_id", t.id).put("content", res))
                     val n = bgReviewNote(t.name, args, res)
                     Diag.i("review", n)

@@ -49,6 +49,9 @@ object FiveLogic {
         val live = evs.filter { !it.cancelled }.distinctBy { it.id + "@" + it.start }.sortedWith(compareBy<Ev>({ it.start }, { if (it.allDay) 0 else 1 }))
         val rest = live.filter { it.start < tomorrow && it.end > now }
         val next = live.filter { it.start >= tomorrow && it.start < after }.take(tomorrowMax)
+        // nothing left today or tomorrow (an evening, a Friday): the first meeting of the coming week, so the widget
+        // shows what is next instead of an empty card
+        if (rest.isEmpty() && next.isEmpty()) return live.filter { it.start >= after && it.start < plusDays(today, 8, tz) && !it.allDay }.take(1)
         return rest + next
     }
 
@@ -106,7 +109,12 @@ object FiveLogic {
         val meetWhen: String; val meetTitle: String
         if (e == null) {
             meetWhen = ""
-            meetTitle = if (brief == null) t("Loading your day…", "Gününüz yükleniyor…") else t("No more meetings today", "Bugün başka toplantı yok")
+            meetTitle = when {
+                brief == null -> t("Loading your day…", "Gününüz yükleniyor…")
+                // the mailbox is set up but the calendar could not be read: say so — "no meetings" would be wrong
+                brief.optBoolean("mailConfigured") && brief.optString("eventsFrom", "phone") == "phone" -> t("Calendar not loaded · tap", "Takvim alınamadı · dokunun")
+                else -> t("No more meetings today", "Bugün başka toplantı yok")
+            }
         } else {
             val s = e.optLong("start"); val en = e.optLong("end")
             val day = if (dayStart(s, tz) >= tomorrow) t("Tomorrow ", "Yarın ") else ""
@@ -133,6 +141,7 @@ object FiveLogic {
             val mins = ((st - now) / 60000L).toInt()
             meetRel = when {
                 st <= now -> t("now", "şimdi")
+                dayStart(st, tz) >= plusDays(tomorrow, 1, tz) -> SimpleDateFormat("EEEE", locale(tr)).apply { timeZone = tz }.format(st)
                 dayStart(st, tz) >= tomorrow -> t("tomorrow", "yarın")
                 mins < 60 -> t("in $mins min", "$mins dk sonra")
                 else -> { val hh = mins / 60; val mm = mins % 60; if (mm == 0) t("in $hh h", "$hh sa sonra") else t("in $hh h $mm min", "$hh sa $mm dk sonra") }

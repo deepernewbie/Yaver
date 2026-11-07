@@ -12,7 +12,9 @@ import java.io.File
 object Skills {
     const val GUIDANCE = "When you work out a non-trivial workflow, record it with skill_manage for future reuse. If a listed skill matches the task, load it with skill_view before starting."
 
-    class Skill(val name: String, val dir: String, val description: String, val file: File, val files: List<String>)
+    /** [status]: "active", "trial" (learned from one successful task, waiting for the user's "Keep" — hidden from the agent; L51) or "disabled" (hidden from the agent).
+     *  [source]: "learned" for skills yaver drafted itself (L51), "" otherwise. */
+    class Skill(val name: String, val dir: String, val description: String, val file: File, val files: List<String>, val status: String = "active", val source: String = "")
 
     /** Called after a skill is created, patched or deleted (the UI may refresh its skills list). */
     @Volatile var onChange: (() -> Unit)? = null
@@ -32,15 +34,21 @@ object Skills {
     private fun walk(d: File): List<String> =
         d.walkTopDown().filter { it.isFile }.map { it.relativeTo(d).path }.sorted().toList()
 
-    fun list(): List<Skill> {
+    /** Every skill, disabled ones included (skills screen). */
+    fun listAll(): List<Skill> {
         val r = root
         if (!r.isDirectory) return emptyList()
         return (r.listFiles() ?: emptyArray()).filter { it.isDirectory && File(it, "SKILL.md").isFile }.sortedBy { it.name }.map { d ->
             val f = File(d, "SKILL.md")
             val (fm, _) = parse(try { f.readText() } catch (_: Exception) { "" })
-            Skill(fm["name"]?.ifBlank { null } ?: d.name, d.name, fm["description"] ?: "", f, walk(d))
+            val st = (fm["status"] ?: "").trim().lowercase().let { if (it == "trial" || it == "disabled") it else "active" }
+            Skill(fm["name"]?.ifBlank { null } ?: d.name, d.name, fm["description"] ?: "", f, walk(d), st, (fm["source"] ?: "").trim())
         }
     }
+
+    /** The skills the agent may use: trial skills (learned, not yet kept by the user) and disabled ones are left out —
+     *  never listed, auto-loaded by System-1 or loadable with skill_view until the user taps "Keep" (L51.confirm). */
+    fun list(): List<Skill> = listAll().filter { it.status == "active" }
 
     fun get(name: String): Skill {
         val l = list()
@@ -55,9 +63,10 @@ object Skills {
         return "## Skills (load with skill_view before doing a matching task)\n" + l.joinToString("\n") { "- ${it.name}: ${it.description}" } + "\n\n"
     }
 
-    /** For a settings/skills screen. */
-    fun listJson(): JSONArray = JSONArray(list().map {
+    /** For a settings/skills screen (all skills; "status": active|trial|disabled, "source": learned|""). */
+    fun listJson(): JSONArray = JSONArray(listAll().map {
         JSONObject().put("name", it.name).put("dir", it.dir).put("path", vdir(it)).put("description", it.description).put("files", JSONArray(it.files))
+            .put("status", it.status).put("source", it.source)
     })
 
     fun slug(name: String) = name.lowercase().replace(Regex("[^a-z0-9-]+"), "-").replace(Regex("^-|-$"), "")
@@ -139,7 +148,7 @@ object Skills {
                 "delete" -> {
                     if (!dir.exists()) throw IllegalArgumentException("skill \"$slug\" not found")
                     if (!ctx.approve(Y.t("Delete skill", "Yeteneği sil") + ": " + slug, listOf(Y.t("Reason", "Neden") to Y.t("deletes a skill", "bir yeteneği siler")), danger = true)) return@Tool ctx.denied("delete skill $slug")
-                    dir.deleteRecursively(); onChange?.invoke()
+                    dir.deleteRecursively(); try { L51.forgetSkill(slug) } catch (_: Throwable) {}; onChange?.invoke()
                     "Deleted skill $slug"
                 }
                 else -> throw IllegalArgumentException("unknown action")

@@ -173,6 +173,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Y.init(context)
         try { Schedule.rearmAll(context) } catch (_: Throwable) {}
+        try { S51Sched.start(context); S51Sched.arm(context) } catch (e: Throwable) { Diag.e("boot", "schedules", e) }
         try { Heartbeats.arm(context) } catch (e: Throwable) { Diag.e("boot", "heartbeats", e) }
         try { MailKeepAlive.arm(context) } catch (e: Throwable) { Diag.e("boot", "keepalive", e) }
         if (Prefs.on("alwaysOn", true)) AgentService.start(context)

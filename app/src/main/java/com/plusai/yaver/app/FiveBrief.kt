@@ -79,6 +79,7 @@ object FiveBrief {
                 FiveLogic.pickTasks(tasks(), MxText.dayPlus(2)),
                 nextAlarm(now)
             ) { id -> try { Refs.ref(id) } catch (_: Throwable) { id } }
+                .put("eventsFrom", s?.eventsFrom ?: "phone").put("fetched", s?.fetched ?: 0L).put("mailConfigured", Cfg.mailConfigured)
         } catch (e: Throwable) {
             Diag.e("brief", "snapshot", e)
             FiveLogic.assemble(now, false, emptyList(), emptyList(), 0, emptyList(), null) { it }
@@ -122,11 +123,16 @@ object FiveBrief {
         if (refreshing.get()) return
         val now = System.currentTimeMillis(); val tz = TimeZone.getDefault()
         val today = FiveLogic.dayStart(now, tz)
-        if (start > today || end < FiveLogic.plusDays(today, 2, tz)) return
-        val evs = list.map { e -> FiveLogic.Ev(e.id, e.subject, Exchange.parseTime(e.start), Exchange.parseTime(e.end), e.location, e.allDay, e.cancelled) }
-            .filter { it.end > today && it.start < FiveLogic.plusDays(today, 2, tz) }
+        val after = FiveLogic.plusDays(today, 8, tz)
+        // any read that includes part of the coming week (a day, week or month view): its events replace the
+        // cached ones inside its range, the cached ones outside it stay
+        if (end <= now || start >= after) return
+        val fresh = list.map { e -> FiveLogic.Ev(e.id, e.subject, Exchange.parseTime(e.start), Exchange.parseTime(e.end), e.location, e.allDay, e.cancelled) }
         val old = source()
-        val s = Src(now, true, evs, "exchange", old?.mails ?: emptyList(), old?.unread ?: 0)
+        val keep = (old?.takeIf { it.eventsFrom.startsWith("exchange") }?.events ?: emptyList()).filter { it.end <= start || it.start >= end }
+        val evs = (keep + fresh).filter { it.end > today && it.start < after }.sortedBy { it.start }
+        val s = Src(if (start <= today + 60_000L && end >= FiveLogic.plusDays(today, 2, tz)) now else (old?.fetched ?: now), true, evs, "exchange", old?.mails ?: emptyList(), old?.unread ?: 0)
+        Diag.i("brief", "calendar view gave ${fresh.size} events → widget has ${evs.size}")
         src = s; loaded = true
         Y.bg {
             try { file().parentFile?.mkdirs(); file().writeText(s.toJson().toString()) } catch (e: Throwable) { Diag.e("brief", "save", e) }
@@ -138,6 +144,17 @@ object FiveBrief {
     /** A meeting was created, changed, answered or deleted: refresh in a moment (several changes → one refresh). */
     private val soon = Runnable { refreshAsync(true) }
     fun calendarChanged() { try { Y.main.removeCallbacks(soon); Y.main.postDelayed(soon, 2500) } catch (_: Throwable) {} }
+
+    /** For the mail self-test: refresh now (worker thread), redraw the widgets, and say what came out. */
+    fun selfTest(): String {
+        val ok = refreshing.compareAndSet(false, true)
+        try { if (ok) refreshNow() } finally { if (ok) refreshing.set(false) }
+        val s = source(); val snap = snapshot()
+        val n = snap.optJSONArray("events")?.length() ?: 0
+        val drawn = try { FiveWidget.updateAll(Y.app); if (FiveWidget.hasWidgets(Y.app)) Y.t("widget redrawn", "widget çizildi") else Y.t("no widget placed", "ana ekranda widget yok") } catch (e: Throwable) { Y.t("widget FAILED: ", "widget ÇİZİLEMEDİ: ") + (e.message ?: e.javaClass.simpleName) }
+        val from = when (s?.eventsFrom) { "exchange" -> "Exchange"; "exchange-cached" -> Y.t("Exchange (kept, not reachable now)", "Exchange (eldeki, şu an ulaşılamadı)"); else -> Y.t("phone calendar", "telefon takvimi") }
+        return Y.t("$n events today/tomorrow from $from; $drawn", "bugün/yarın $n etkinlik ($from); $drawn") + (FiveWidget.lastError?.let { " · $it" } ?: "")
+    }
 
     fun refreshIfStale() { val s = source(); if (s == null || System.currentTimeMillis() - s.fetched > MAX_AGE) refreshAsync() }
 
@@ -161,7 +178,7 @@ object FiveBrief {
         if (Cfg.mailConfigured && !Mail.needsSignIn) {
             try {
                 val start = FiveLogic.dayStart(now, TimeZone.getDefault())
-                events = Mail.use { ex -> ex.events(start, start + 2 * 86400000L + 3600000L) }
+                events = Mail.use { ex -> ex.events(start, FiveLogic.plusDays(start, 8, TimeZone.getDefault())) }   // a week: the widget shows the next meeting even on a Friday evening
                     .map { e -> FiveLogic.Ev(e.id, e.subject, Exchange.parseTime(e.start), Exchange.parseTime(e.end), e.location, e.allDay, e.cancelled) }
                 from = "exchange"; connected = true
             } catch (e: Throwable) { Diag.i("brief", "calendar: ${e.message}") }

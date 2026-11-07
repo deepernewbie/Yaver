@@ -330,6 +330,7 @@ class ScheduleReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Y.init(context)
         if (intent.action == Heartbeats.ACTION) { Heartbeats.onAlarm(context); return }
+        if (intent.action == S51Sched.ACTION) { S51Sched.onAlarm(context); return }
         Schedule.fire(context, intent.getIntExtra("id", 0))
     }
 }
@@ -400,17 +401,8 @@ object PhoneTools {
             }
         })
 
-        Tools.add(Tool(
-            "phone_reminder", "A reminder that pops up as a notification at a time, even when yaver is closed. action=add (at = local time like 2026-11-02T09:30, or in_minutes; title; text; optional prompt = a request yaver runs at that time, its answer arrives as a notification), list, cancel (id).",
-            P.props("action" to P.s("add | list | cancel", "add", "list", "cancel"), "at" to P.s("When"), "in_minutes" to P.n("Minutes from now"), "title" to P.s("Title"), "text" to P.s("Text"), "prompt" to P.s("Optional request for yaver to run then"), "id" to P.n("Id to cancel")),
-            listOf("action")
-        ) { a, _ -> schedTool(a, false) })
-
-        Tools.add(Tool(
-            "schedule_task", "Run a request again and again in the background: every N minutes (every_minutes, at least 15) or daily at a time (daily_at \"08:00\"). Results arrive as notifications (e.g. a morning briefing, checking a web page, a weekly report). action=add (prompt, title, every_minutes or daily_at), list, cancel (id).",
-            P.props("action" to P.s("add | list | cancel", "add", "list", "cancel"), "prompt" to P.s("What yaver should do each time"), "title" to P.s("Short name"), "every_minutes" to P.n("Interval in minutes"), "daily_at" to P.s("HH:MM"), "id" to P.n("Id to cancel")),
-            listOf("action")
-        ) { a, _ -> schedTool(a, true) })
+        // reminders, scheduled and conditional tasks (yaver 5.1): schedule_task + phone_reminder
+        S51Sched.register()
 
         Tools.add(Tool("phone_notify", "Show a notification on the phone now.", P.props("title" to P.s("Title"), "text" to P.s("Text")), listOf("text")) { a, _ ->
             if (Notifier.show(Y.app, a.str("title").ifEmpty { "yaver" }, a.str("text")) < 0) "Notifications are switched off for yaver." else "Notification shown."
@@ -456,41 +448,5 @@ object PhoneTools {
         Tools.add(Tool("phone_speak", "Read text aloud through the phone's speaker. action=stop stops.", P.props("text" to P.s("What to say"), "action" to P.s("say | stop", "say", "stop")), emptyList()) { a, _ ->
             if (a.str("action") == "stop") { Speaker.stop(); "Stopped." } else { Speaker.speak(a.str("text")); "Speaking." }
         })
-    }
-
-    private fun schedTool(a: JSONObject, task: Boolean): String {
-        val kind = if (task) "task" else "reminder"
-        when (a.str("action")) {
-            "list" -> {
-                val all = Schedule.all()
-                val l = (0 until all.length()).map { all.getJSONObject(it) }.filter { it.optString("kind") == kind }
-                return if (l.isEmpty()) "(none)" else l.sortedBy { it.optLong("next") }.joinToString("\n") {
-                    "#${it.optInt("id")} ${it.optString("title")} · next ${MailTools.fmt(it.optLong("next"))}" +
-                        (if (task) (if (it.optString("daily").isNotEmpty()) " · daily at ${it.optString("daily")}" else " · every ${it.optLong("every")} min") else "") +
-                        (if (it.optString("prompt").isNotEmpty()) " · yaver will: ${it.optString("prompt").take(100)}" else "")
-                }
-            }
-            "cancel" -> { val o = Schedule.remove(a.int("id", 0)) ?: throw IllegalArgumentException("no such id"); return "Cancelled \"${o.optString("title")}\"." }
-        }
-        val o = JSONObject().put("kind", kind).put("title", a.str("title").ifEmpty { if (task) a.str("prompt").take(40) else Y.t("Reminder", "Hatırlatma") })
-            .put("text", a.str("text")).put("prompt", a.str("prompt"))
-        if (task) {
-            if (a.str("prompt").isEmpty()) throw IllegalArgumentException("prompt is required")
-            val daily = a.str("daily_at")
-            if (daily.isNotEmpty()) {
-                if (!daily.matches(Regex("\\d{1,2}:\\d{2}"))) throw IllegalArgumentException("daily_at must look like 08:00")
-                o.put("daily", daily).put("next", Schedule.nextDaily(daily))
-            } else {
-                val every = a.int("every_minutes", 0)
-                if (every < 15) throw IllegalArgumentException("every_minutes must be at least 15 (or use daily_at)")
-                o.put("every", every).put("next", System.currentTimeMillis() + every * 60000L)
-            }
-        } else {
-            val at = if (a.int("in_minutes", 0) > 0) System.currentTimeMillis() + a.int("in_minutes", 0) * 60000L else ms(a.str("at").ifEmpty { throw IllegalArgumentException("give at or in_minutes") }, "time")
-            if (at < System.currentTimeMillis() - 60000) throw IllegalArgumentException("that time is in the past")
-            o.put("next", at)
-        }
-        val r = Schedule.add(o)
-        return (if (task) "Scheduled" else "Reminder set") + " #${r.optInt("id")} \"${r.optString("title")}\" — next ${MailTools.fmt(r.optLong("next"))}" + if (r.optString("prompt").isNotEmpty()) "; yaver will then: ${r.optString("prompt")}" else ""
     }
 }

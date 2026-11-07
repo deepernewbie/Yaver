@@ -1,3 +1,56 @@
+# yaver 5.1 (Mika'dan esinlenen özellikler)
+
+## Durdurma, araya girme, sıra
+- **Durdurunca özet:** Durdur'a basınca yaver ne yaptığını (gönderilen veya taslağa kaydedilen e-postalar, yazılan dosyalar, oluşturulan etkinlikler), ne bulduğunu ve neyin kaldığını kısaca yazar. "Devam" dediğinde kaldığı yerden sürer.
+- **İş sürerken yazarken iki seçenek:**
+  - "Şimdi ekle": mesaj mevcut işe eklenir.
+  - "Sıraya al": mesaj bu iş bitince sıradaki iş olarak başlar.
+
+  Mesajın altında durumu görünür: "Alındı", "Göreve eklendi", "Sonraki iş olarak sıraya alındı".
+- **Geri al / Düzenle:** henüz modele iletilmemiş bir mesaja uzun basınca geri alabilir ya da düzenleyebilirsin.
+- **Kesilen cevap saklanır:** araya girdiğin anda ekranda görünen yarım cevap, "kesildi" etiketiyle sohbette kalır; model senin gördüğünü bilir.
+- **Sıradaki işler kendiliğinden başlamaz** şu iki durumda:
+  - uygulama yeniden açıldığında sırada iş varsa,
+  - Durdur'dan sonra.
+
+  Bu durumlarda "Sıradakileri başlat / Temizle" çıkar.
+
+## Cevabın altında
+- **Kaynaklar:** cevabın gerçekten dayandığı web sayfası, e-posta ve dosyalar en çok 6 tane olarak listelenir. Bu listeyi model değil sistem çıkarır, uydurulamaz. Dokununca açılır.
+- **İş özeti:** "12 sn · 4 model çağrısı · 7 araç · 18k token". Dokununca ayrıntı ve işin sonucu (tamamlandı / kısmen / yapılamadı) görünür.
+- **Token kullanımı sayfası:** Ayarlar'da; güne ve modele göre.
+
+## Başarıdan öğrenme
+- **Arka planda değerlendirme:** her araçlı iş bitince arka planda "tamamlandı mı" diye değerlendirilir. Sadece gerçekten araç kullanan işlerde ve öğrenme açıkken yapılır; tek bir hafif model çağrısıdır.
+- **Beceri taslağı:** birkaç adımlı ve başarılı bir iş, beceri taslağı olarak kaydedilir: "Bu işi beceri olarak kaydettim (deneme) — Göster / Tut / Sil".
+  - Sen "Tut" demeden yaver bu beceriyi kullanmaz.
+  - Aynı türden bir iş gelirse yeni bir beceri açılmaz, mevcut olan güncellenir.
+  - Onaylanmış bir beceri üst üste başarısız olursa kapanır ya da önceki sürümüne döner.
+- **Önceki işlerden ipucu:** benzer bir iş daha önce başarıyla yapıldıysa, adımları modele ipucu olarak verilir. Hiçbir adım otomatik tekrarlanmaz.
+- **Taslaklarda güvenlik:** şifre, kod, kart numarası, kişisel bilgi ya da e-postadan kopyalanmış metin içeren taslaklar atılır.
+
+## Zamanlanmış ve koşullu işler
+- **Üç tür:**
+  - **Hatırlatma:** modeli çağırmadan, bildirimle ve sohbete mesajla gelir.
+  - **Görev:** zamanı gelince yaver çalışır.
+  - **Koşullu görev:** "dolar 35'i geçerse", "50'den fazla düşerse", "her yağmurda", "en fazla günde bir" gibi.
+- Koşul kontrolü yalnızca okuma yapar. Kontrol hata verirse bu "koşul sağlanmadı" sayılmaz; değer bir önceki kontrolle karşılaştırılır.
+- Sonuç her zaman işi oluşturduğun sohbete gelir. Aynı zamanlama asla iki kez çalışmaz. Uygulama kapanırsa sonuç "bilinmiyor, tekrarlanmadı" olarak işaretlenir.
+- **"Zamanlanmış işler" sayfası:** Etkin ve Duraklatıldı bölümleri, son sonuç, duraklat/sürdür, şimdi çalıştır, zamanı değiştir, sil.
+- Eski hatırlatmalar yeni sisteme kayıpsız taşınır.
+
+## Güvenlik ve hafiza
+- **Dış metin işaretlenir:** web, e-posta, ek, belge, arama ve alt ajan çıktıları hep "güvenilmez" olarak işaretlenir. Metnin içine yazılmış sahte etiketler etkisiz kalır.
+- **Hafıza:** yaver hafızasına yalnızca senin söylediğini yazar; bir e-postadan ya da sayfadan gelen bilgiyi, açıkça "hatırla / aklında tut" demedikçe yazmaz. Şifre, doğrulama kodu, IBAN ve kart numarası, TC kimlik no ve API anahtarı engellenir. "Nasıl yapılır" türü notlar senin onayını bekler ("Onay bekleyen" bölümünde).
+- **Sohbet mi, iş mi:** zayıf modellerde "merhaba nasılsın" gibi sohbet mesajlarında gereksiz araç kullanımı engellenir.
+
+# yaver 5.0.4: widget takvimi (2)
+- **Haftanın ilk toplantısı:** bugün ve yarın boşsa (akşam, cuma günü) widget artık 7 gün içindeki ilk toplantıyı gösteriyor, ör. "Pazartesi · 09:30–10:00". Eskiden yalnızca bugünün kalanı ve yarın gösteriliyordu.
+- **"Alınamadı" ile "toplantı yok" ayrıldı:** takvim alınamadıysa widget "Takvim alınamadı · dokunun" yazıyor. Dokununca takvim açılıyor ve widget o veriyle hemen düzeliyor.
+- **Takvim ekranı her görünümde widget'ı besliyor:** gün, hafta ve ay görünümünün hepsi. Eskiden gün görünümü ve varsayılan başlangıç saati yüzünden bu veri reddediliyordu.
+- **Widget çizilemezse:** daha basit bir biçimle yeniden deneniyor; hata tanı günlüğüne yazılıyor.
+- **"Posta bağlantısını sına" testine "Bugün kartı ve widget" adımı eklendi:** kaç etkinlik bulunduğunu, nereden geldiğini ve widget'ın çizilip çizilmediğini söylüyor.
+
 # yaver 5.0.3: widget takvimi
 - **Asıl hata:** posta oturumu düşünce arka plandaki yenileme takvimi alamıyor, elindeki Exchange toplantılarını telefon takvimiyle (çoğu zaman boş) değiştiriyordu. Widget "toplantı yok" ya da eski bir görüntüyle kalıyordu. Artık alınamayan takvim silinmiyor; bilinen toplantılar, bugünü kapsadıkları sürece gösterilmeye devam ediyor.
 - **Uygulamadaki değişiklikler hemen yansıyor:** toplantı ya da randevu oluşturma, değiştirme, kabul/ret, iptal ve silme birkaç saniye içinde widget'a geçiyor.

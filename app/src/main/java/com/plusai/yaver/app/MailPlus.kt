@@ -694,6 +694,7 @@ object MailPlus {
             if (id.isNotEmpty()) Mail.use(cancel) { it.remove(id, true, cancel) }
             if (tr) "“${newest.subject.take(30)}” üzerinden" else "on “${newest.subject.take(30)}”"
         }
+        step(if (tr) "Bugün kartı ve widget" else "Today card and widget") { FiveBrief.selfTest() }
         step(if (tr) "Randevu oluşturma ve silme" else "Create and delete an appointment") {
             val at = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, 1); set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
             val id = Mail.use(cancel) { it.createEvent("yaver test", at, at + 15 * 60000L, "", "yaver test — safe to delete", emptyList(), cancel) }

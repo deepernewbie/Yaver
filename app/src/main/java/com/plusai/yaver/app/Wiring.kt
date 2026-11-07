@@ -104,6 +104,16 @@ object Wiring {
         OSync.skillsDir = { Skills.root }
         OSync.memMetaExport = { JSONObject(MemoryX.meta().toString()) }
         OSync.memMetaImport = { mm -> MemoryX.importMeta(mm.toString()) }
+
+        // ---- yaver 5.1: schedules (claimed windows of a dead process → "unknown"; old reminders move over; alarm)
+        try { S51Sched.start(Y.app) } catch (e: Throwable) { Diag.e("s51", "start", e) }
+        wire51()
+    }
+
+    /** yaver 5.1: queued messages start like chat.send; learned skills give the router a hint. */
+    private fun wire51() {
+        Turns.startNext = { id, t, d, f -> Bridge.sendQueued(id, t, d, f) }
+        H51Hooks.routeHint = { L51.routeHint(it) }
     }
 
     /** Yes/no probabilities from System-1 for a list of instructions (null when the gate is off or failed). */

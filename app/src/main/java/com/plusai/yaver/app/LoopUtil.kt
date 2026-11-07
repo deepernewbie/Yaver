@@ -101,6 +101,11 @@ object LoopUtil {
             }
             if (role == "tool") o.put("tool_call_id", m.optString("tool_call_id"))
             if (m.has("name") && m.optString("name").isNotEmpty()) o.put("name", m.optString("name"))
+            // two user messages in a row (a steer delivered right after the turn's message): joined, some servers reject the pair
+            val prev = if (out.length() > 0) out.optJSONObject(out.length() - 1) else null
+            if (role == "user" && prev != null && prev.optString("role") == "user" && prev.opt("content") is String && o.opt("content") is String) {
+                prev.put("content", prev.optString("content") + "\n\n" + o.optString("content")); continue
+            }
             out.put(o)
         }
         closeOpen()
@@ -289,8 +294,9 @@ object LoopUtil {
     }
 
     /** What the original appended to every tool result: spill + repeat reminder. */
-    fun finishResult(result: String, name: String, rawArgs: String?, state: LoopState): String =
-        Spill.maybe(result, name) + repeatReminder(state, name, rawArgs)
+    /** Spill (oversized output → file), then [wrap] (the <untrusted> tag, H51.untrusted), then the repeat reminder outside the tag. */
+    fun finishResult(result: String, name: String, rawArgs: String?, state: LoopState, wrap: (String) -> String = { it }): String =
+        wrap(Spill.maybe(result, name)) + repeatReminder(state, name, rawArgs)
 }
 
 /** Spill: oversized tool output is saved in full in the workspace; the model gets a preview and the path. */

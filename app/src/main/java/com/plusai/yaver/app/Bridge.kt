@@ -49,6 +49,8 @@ object Bridge {
     private val TRANSIENT = setOf("delta", "think", "progress", "tool", "toolEnd", "step")
 
     fun emit(type: String, data: JSONObject) {
+        // yaver 5.1: a run ended — scheduled windows and the token-use record (S51Bridge)
+        if (type == "run" && data.optString("phase") == "done") try { S51Bridge.onRunDone(data.optString("convoId"), if (data.isNull("error")) null else data.optString("error")) } catch (_: Throwable) {}
         val payload = data.toString()
         synchronized(pendingLaunches) {
             if (!uiReady || host == null) {
@@ -193,15 +195,14 @@ object Bridge {
             // a turn is running: the message joins it at the next safe point (or starts the next turn)
             val t = a.optString("text").trim() + if (att.isNotEmpty()) "\n[Attached files saved in the workspace: ${att.joinToString(", ")}]" else ""
             if (t.isBlank()) throw IllegalStateException(Y.t("yaver is still working on this chat.", "yaver bu sohbette hâlâ çalışıyor."))
-            Turns.steer(c.id, t)
-            return JSONObject().put("convoId", c.id).put("title", c.title).put("queued", true)
+            return steerOrQueue(c, t, a, att)
         }
         val images = att.filter { Workspace.isImage(it) }
         val files = att.filter { !Workspace.isImage(it) }
         val text = a.optString("text").trim().ifEmpty { Y.t("(see the attachments)", "(eklere bakın)") }
         val speak = a.optBoolean("speak")
         val run = Run(Cancel())
-        if (runs.putIfAbsent(c.id, run) != null) { Turns.steer(c.id, text); return JSONObject().put("convoId", c.id).put("title", c.title).put("queued", true) }
+        if (runs.putIfAbsent(c.id, run) != null) return steerOrQueue(c, text, a, att)
         if (!c.background) Prefs.put("currentConvo", c.id)
         Y.bg {
             var answer = ""
@@ -217,6 +218,28 @@ object Bridge {
                 Notifier.show(Y.app, c.title, (err ?: answer).replace(Regex("[*#`>]"), "").trim().take(900), "open_convo", c.id)
         }
         return JSONObject().put("convoId", c.id).put("title", c.title)
+    }
+
+    /**
+     * yaver 5.1: a message while a turn runs. mode "queue" → Turns.enqueue (its own turn after this one, returns queueId);
+     * otherwise steer into the running turn (returns steerId when the harness gives ids).
+     */
+    private fun steerOrQueue(c: Convo, t: String, a: JSONObject, att: List<String>): JSONObject {
+        val out = JSONObject().put("convoId", c.id).put("title", c.title)
+        if (a.optString("mode") == "queue") {
+            val qid = Turns.enqueue(c.id, a.optString("text").trim().ifEmpty { t }, a.optString("display").trim().ifEmpty { null }, att)
+            return out.put("queued", true).put("mode", "queue").put("queueId", qid)
+        }
+        val sid = Turns.steer(c.id, t, a.optString("display").trim().ifEmpty { null })
+        return out.put("steered", true).put("queued", true).put("mode", "steer").put("steerId", sid)
+    }
+
+    /** Turns.startNext: a queued message starts like a normal chat.send. */
+    fun sendQueued(convoId: String, text: String, display: String?, files: List<String>) {
+        val a = JSONObject().put("convoId", convoId).put("text", text).put("attachments", JSONArray(files))
+        if (!display.isNullOrBlank()) a.put("display", display)
+        if (!runs.containsKey(convoId)) emit("run", JSONObject().put("convoId", convoId).put("phase", "start").put("internal", JSONObject.NULL).put("label", JSONObject.NULL).put("text", display ?: text).put("fromQueue", true))
+        try { send(a) } catch (e: Throwable) { emit("run", JSONObject().put("convoId", convoId).put("phase", "done").put("error", e.message ?: e.toString())) }
     }
 
     // ---------------------------------------------------------------- dispatch (worker thread)
@@ -253,8 +276,6 @@ object Bridge {
         "copy" -> { Phone.onMain { Y.app.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("yaver", a.optString("text"))) }; true }
         "memory.get" -> JSONObject().put("user", JSONArray(MemoryX.entries("user"))).put("notes", JSONArray(MemoryX.entries("memory")))
         "memory.set" -> { MemoryX.save(if (a.str("target") == "user") "user" else "memory", a.list("list")); true }
-        "schedule.list" -> Schedule.all()
-        "schedule.cancel" -> { Schedule.remove(a.optInt("id")); true }
         "workspace.list" -> CoreTools.tree(VPath.WS).ifEmpty { "" }
         // the Files screen (FilesUi): the virtual disk, as the agent sees it
         "files.list" -> FilesUi.list(a)
@@ -328,7 +349,7 @@ object Bridge {
             path
         }
         "mail.events" -> {
-            val start = if (a.has("start")) a.optLong("start") else java.util.Calendar.getInstance().apply { set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0) }.timeInMillis
+            val start = if (a.has("start")) a.optLong("start") else java.util.Calendar.getInstance().apply { set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0) }.timeInMillis
             val evs = Mail.use { it.events(start, start + a.int("days", 7) * 86400000L) }
             JSONArray(evs.map { e -> JSONObject().put("id", e.id).put("subject", e.subject).put("start", Exchange.parseTime(e.start)).put("end", Exchange.parseTime(e.end)).put("location", e.location)
                 .put("organizer", e.organizer?.short ?: "").put("allDay", e.allDay).put("response", e.response).put("cancelled", e.cancelled).put("meeting", e.meeting) })
@@ -359,7 +380,7 @@ object Bridge {
             }
         }
         "mail.respond" -> { Mail.use { it.respond(a.str("id"), a.str("response"), a.str("message")) }; true }
-        else -> if (MailUi.handles(m)) MailUi.dispatch(m, a) else if (MailPlus.handles(m)) MailPlus.dispatch(m, a) else if (Parity.handles(m)) Parity.dispatch(m, a) else harness(m, a)
+        else -> if (S51Bridge.handles(m)) S51Bridge.dispatch(m, a) else if (MailUi.handles(m)) MailUi.dispatch(m, a) else if (MailPlus.handles(m)) MailPlus.dispatch(m, a) else if (Parity.handles(m)) Parity.dispatch(m, a) else harness(m, a)
     }
 
     // ---------------------------------------------------------------- harness methods (planning, learning, memory, context…)

@@ -382,12 +382,12 @@
         var files = [].concat(m.images || [], m.files || []);
         var scr = m.screen || screenOf(m.content);
         var bub = h("div", { class: "bubble" }, m.display != null && m.display !== "" ? m.display : stripScreen(m.content || ""));
-        longPress(bub, function () { msgMenu("user", m, idx); });
+        longPress(bub, function () { if (m.queued && m.steerId && window.YV51) YV51.steerMenu(m); else msgMenu("user", m, idx); });
         th.appendChild(h("div", { class: "u" }, h("div", null,
           bub,
           scr ? h("div", { class: "scrtag" }, icon("smartphone", "xs"), scr === "Ekran" || scr === "Screen" || scr === "?" ? T("Screen", "Ekran") : T("Screen: ", "Ekran: ") + scr) : null,
-          m.queued ? h("div", { class: "qcap" }, icon("clock", "xs"), T("Queued — yaver reads it at its next step", "Sırada — yaver bir sonraki adımında okuyacak")) : null,
-          m.steer && !m.queued ? h("div", { class: "qcap done" }, icon(S.delivered && S.delivered[m.ts] ? "check-check" : "check", "xs"), S.delivered && S.delivered[m.ts] ? T("Delivered mid-run", "Çalışırken iletildi") : T("Sent mid-run", "Çalışırken gönderildi")) : null,
+          m.queued ? (window.YV51 ? YV51.steerCap(m) : h("div", { class: "qcap" }, icon("clock", "xs"), T("Queued — yaver reads it at its next step", "Sırada — yaver bir sonraki adımında okuyacak"))) : null,
+          m.steer && !m.queued ? h("div", { class: "qcap done" }, icon("check-check", "xs"), T("Added to the task", "Göreve eklendi")) : null,
           files.length ? h("div", { class: "files" }, files.map(function (f) {
             return /\.(png|jpe?g|gif|webp|bmp)$/i.test(f) ? h("img", { class: "thumb", src: wsUrl(f), onclick: function () { previewFile(f); } })
               : h("button", { class: "chipfile", onclick: function () { previewFile(f); } }, icon((FK[kindOf(f)] || FK.other)[0], "xs"), h("span", null, f.split("/").pop()));
@@ -432,6 +432,8 @@
       t.appendChild(live);
       t.appendChild(h("div", { class: "status", id: "lstatus" }, h("div", { class: "spin" }), h("span", null, S.liveStatus || (S.liveTool ? stepInfo(S.liveTool.name, S.liveTool.args).label + "…" : (S.live ? T("Writing…", "Yazıyor…") : (waitText() || T("Thinking…", "Düşünüyor…")))))));
     }
+    /* 5.1: messages queued to run after this task, under everything */
+    if (window.YV51) YV51.queueEl(th);
     // collapse long traces
     var divs = th.querySelectorAll(".ctxdiv");
     if (divs.length) { var dv = divs[divs.length - 1], el = dv.previousElementSibling; while (el) { el.classList.add("forgotten"); el = el.previousElementSibling; } }
@@ -516,7 +518,7 @@
         S.delivered = S.delivered || {};
         (c.messages || []).forEach(function (m) { if (m.steer && m.ts && q.some(function (t) { return String(m.display || m.content || "").indexOf(t) >= 0; })) S.delivered[m.ts] = 1; });
         q = q.filter(function (t) { return !users.some(function (u) { return u.indexOf(t) >= 0; }); });
-        if (q.length && (c.running || Date.now() - (S.doneAt[c.id] || 0) < 4000)) { S.queued[c.id] = q; c.messages = (c.messages || []).concat(q.map(function (t) { return { role: "user", content: t, display: t, queued: true }; })); }
+        if (q.length && (c.running || Date.now() - (S.doneAt[c.id] || 0) < 4000 || (window.YV51 && YV51.keepPending(c.id, q)))) { S.queued[c.id] = q; c.messages = (c.messages || []).concat(q.map(function (t) { var o = { role: "user", content: t, display: t, queued: true }; if (window.YV51) YV51.tagPending(c.id, o); return o; })); }
         else delete S.queued[c.id];
       }
       if (c.running) { S.running[c.id] = true; S.live = c.live || ""; S.liveStatus = c.status || ""; } else delete S.running[c.id];
@@ -524,6 +526,7 @@
       if (fuItems && fuItems.length && !(S.fu[c.id] && S.fu[c.id].state === "loading")) S.fu[c.id] = { state: "ready", items: fuItems, labels: (c.followups && c.followups.labels) || null };
       else if (fuItems && !fuItems.length && S.fu[c.id] && S.fu[c.id].state === "ready") delete S.fu[c.id];
       if (c.planning) S.plan[c.id] = c.planning;
+      if (window.YV51) YV51.onLoad(c);
       renderThread(); syncSend();
       if (!c.running) { refreshCtx(c.id); checkResumable(c.id); }
     }).catch(function () { S.convo = null; S.convoId = ""; renderThread(); });
@@ -594,6 +597,9 @@
     if (!steering) { S.live = ""; S.liveTool = null; S.liveStatus = ""; }
     renderThread(); syncSend();
     var args = { convoId: tmpId === "_new" ? "" : tmpId, text: t, attachments: atts.map(function (a) { return a.path; }), speak: speak };
+    var qmode = steering && window.YV51 ? YV51.sendMode(tmpId) : "";
+    var qmsg = null;
+    if (qmode === "queue") { args.mode = "queue"; qmsg = S.convo.messages.pop(); YV51.optimisticQueue(tmpId, t); renderThread(); }
     if (opts.label) args.label = opts.label;
     if (opts.internal) args.internal = true;
     if (opts.display) args.display = opts.display;
@@ -601,9 +607,12 @@
     var sentAt = Date.now();
     call("chat.send", args).then(function (r) {
       r = r || {};
+      if (r.mode === "queue") { if (window.YV51) YV51.queued(r.convoId || tmpId, r, t); return; }
+      /* asked to queue, but the task had ended meanwhile: it started as a normal message — drop the queue placeholder, show the bubble */
+      if (qmsg && window.YV51) { YV51.dropTmp(tmpId, t); if (S.convoId === tmpId && S.convo) S.convo.messages = (S.convo.messages || []).concat([qmsg]); }
       if (r.steered || r.queued) {
         var lm = S.convo && S.convo.messages && S.convo.messages[S.convo.messages.length - 1];
-        if (lm && lm.role === "user" && lm.content === t) { lm.queued = true; if (S.convoId === tmpId) renderThread(); }
+        if (lm && lm.role === "user" && lm.content === t) { lm.queued = true; if (window.YV51) YV51.steered(r.convoId || tmpId, r, t, lm); if (S.convoId === tmpId) renderThread(); }
         /* the core keeps it outside the chat until its next step: remember it so a reload does not hide it */
         var qid = r.convoId || tmpId; (S.queued[qid] = S.queued[qid] || []).push(t);
         if (r.convoId && S.convoId === "_new") { moveSide("_new", r.convoId); S.convoId = r.convoId; S.convo.id = r.convoId; }
@@ -617,6 +626,7 @@
       if (finished && S.convoId === r.convoId) { S.live = ""; S.liveTool = null; S.liveStatus = ""; loadConvo(r.convoId); if (S.doneErr && S.doneErr[r.convoId]) toast(S.doneErr[r.convoId]); }
       updateTitle(); refreshConvos();
     }).catch(function (e) {
+      if (qmsg && window.YV51) YV51.dropTmp(tmpId, t);
       if (!steering) delete S.running[tmpId];
       renderThread(); syncSend(); toast(e.message);
     });
@@ -708,6 +718,7 @@
     if (running && !has) { b.className = "send stop"; b.appendChild(icon("square", "xs")); b.setAttribute("aria-label", T("Stop", "Durdur")); b.disabled = false; }
     else if (has) { b.className = "send"; b.appendChild(icon("arrow-up")); b.setAttribute("aria-label", T("Send", "Gönder")); b.disabled = false; }
     else { b.className = "send"; b.appendChild(icon("mic")); b.setAttribute("aria-label", T("Speak", "Konuş")); b.disabled = false; }
+    if (window.YV51) YV51.syncMode(running);
   }
 
   /* ------------------------------------------------------------ events from the core */
@@ -733,7 +744,7 @@
     if (type === "run") {
       var id = d.convoId;
       if (d.phase === "done") {
-        delete S.running[id];
+        delete S.running[id]; if (window.YV51) YV51.runDone(id);
         S.doneAt[id] = Date.now(); S.doneErr = S.doneErr || {}; S.doneErr[id] = d.error || "";
         if (id === S.convoId) { S.live = ""; S.liveTool = null; S.liveStatus = ""; loadConvo(id); if (d.error) toast(d.error); }
         refreshConvos(); return;
@@ -779,7 +790,7 @@
     }
     /* "memory" with a label = a chip for that chat (Agent); without one = the store changed (Outlook restore/merge) */
     else if (type === "memory") { if (d.label && d.convoId) addSide(d.convoId, "memory", d); kbChanged(); }
-    else if (type === "skills") kbChanged();
+    else if (type === "skills") { kbChanged(); if (window.YV51) YV51.onEvent(type, d); }
     else if (type === "refine") {
       if (d.convoId || S.convoId) addSide(d.convoId || S.convoId, "refine", d, d.id ? "refine:" + d.id : null);
       else toast(d.title || "", function () { openKnowledge("lessons"); });
@@ -802,6 +813,7 @@
     else if (type === "memory.changed") kbChanged();
     else if (type === "s1") { /* System-1 stats changed; the log sheet loads fresh when opened */ }
     else if (type === "mail.triage" || type === "mail.index" || type === "mail.draft") onMailEvent(type, d);
+    else if (window.YV51) YV51.onEvent(type, d);
   }
 
   /* ------------------------------------------------------------ chat extras: side items */
@@ -824,6 +836,7 @@
       case "sub": return h("div", { class: "chiprow" }, h("button", { class: "nchip act sub " + (d.status || ""), onclick: function () { if (d.childConvoId) loadConvo(d.childConvoId); } },
         d.status === "running" || d.status === "starting" ? h("span", { class: "spin xs" }) : icon(d.status === "error" ? "circle-alert" : d.status === "stopped" ? "circle-pause" : "users-round", "xs"),
         h("span", null, T("Helper ", "Yardımcı ") + d.name + " · " + subStatus(d.status) + (d.runs ? " · " + d.runs + T(" runs", " tur") : ""))));
+      case "skill": case "mempending": case "sched": return window.YV51 ? YV51.sideEl(it) : null;
       case "btw": return h("div", { class: "card btw" }, h("div", { class: "ch" }, icon("message-circle-question", "s"), h("b", null, "btw"), h("span", null, d.question)),
         d.phase === "answer" ? h("div", { class: d.error ? "err" : "" }, md(d.answer || "")) : h("div", { class: "status" }, h("div", { class: "spin" }), T("Thinking…", "Düşünüyor…")));
     }
@@ -2857,7 +2870,7 @@
       window.YVP ? YVP.permRow() : row({ icon: "shield-check", label: T("Ask before actions", "İşlemlerden önce sor"), sub: T("Deleting, moving, overwriting. Sending mail is always confirmed.", "Silme, taşıma, üzerine yazma. E-posta gönderimi her zaman onaylatılır."), wrap: true, toggle: st.askRisky, onToggle: function (on) { setCfg("askRisky", on); } }),
       row({ icon: "brain", label: T("Memory", "Hafıza"), sub: T("What yaver knows about you", "yaver'in sizin hakkınızda bildikleri"), onclick: function () { openKnowledge(); } }),
       row({ icon: "square-kanban", label: T("Tasks", "Görevler"), sub: T("Your work task board", "İş görev panonuz"), value: S.overdue ? T(S.overdue + " overdue", S.overdue + " gecikmiş") : "", onclick: function () { openTasks(); } }),
-      row({ icon: "clock", label: T("Reminders and scheduled tasks", "Hatırlatmalar ve zamanlanmış görevler"), onclick: openSchedule })
+      row({ icon: "clock", label: T("Reminders and scheduled tasks", "Hatırlatmalar ve zamanlanmış görevler"), sub: T("Reminders, recurring and conditional tasks", "Hatırlatmalar, tekrarlayan ve koşullu işler"), onclick: openSchedule })
     ]));
     wrap.appendChild(h("div", { id: "s-extras" }));
     wrap.appendChild(h("div", { id: "s-parity" }));
@@ -3063,6 +3076,7 @@
 
   function memoryView(box, target, r) {
     var tiered = target === "memory", st = r.stats || {}, all = r.entries || [];
+    if (window.YV51) YV51.pendingBox(box, target);
     if (tiered) box.appendChild(h("div", { class: "kstats" },
       kstat(T("Active", "Aktif"), String(st.active || 0), "/ " + (st.activeMax || "—"), st.activeMax ? (st.active || 0) / st.activeMax : null, "ac"),
       kstat(T("Drafts on trial", "Denemedeki taslaklar"), String(st.drafts || 0), "/ " + (st.draftMax || "—"), st.draftMax ? (st.drafts || 0) / st.draftMax : null, "dr"),
@@ -3441,8 +3455,8 @@
   /* ------------------------------------------------------------ settings: learning, context, System-1, folders, mail assistant */
   function nz(p) { return p.then(function (x) { return x; }, function () { return null; }); }
   function loadExtras() {
-    return Promise.all([nz(call("learn.state")), nz(call("ctx.stats", { convoId: S.convoId && S.convoId !== "_new" ? S.convoId : "" })), nz(call("s1.state")), nz(call("folders.state")), nz(call("mailx.settings")), nz(call("osync.state"))]).then(function (r) {
-      S.x = { learn: r[0], ctx: r[1], s1: r[2], mailx: r[4], osync: r[5] };
+    return Promise.all([nz(call("learn.state")), nz(call("ctx.stats", { convoId: S.convoId && S.convoId !== "_new" ? S.convoId : "" })), nz(call("s1.state")), nz(call("folders.state")), nz(call("mailx.settings")), nz(call("osync.state")), nz(call("learn.skills"))]).then(function (r) {
+      S.x = { learn: r[0], ctx: r[1], s1: r[2], mailx: r[4], osync: r[5], skills51: r[6] };
       if (r[3]) S.folders = r[3];
       renderExtras();
     });
@@ -3461,6 +3475,7 @@
         row({ icon: "sparkles", label: T("Learn from experience", "Deneyimden öğren"), sub: T("Lessons from your corrections, 👍/👎 and reviews", "Düzeltmelerinizden, 👍/👎 ve gözden geçirmelerden dersler"), toggle: learnOn, onToggle: function (on) { setX("learn.set", { learn: on, every: every }); } }),
         learnOn ? row({ icon: "repeat", label: T("Review the conversation every", "Sohbeti gözden geçir"), value: T(every + " turns", "her " + every + " turda"), onclick: function () { optionsSheet(T("Review every", "Gözden geçirme sıklığı"), [3, 6, 10, 15, 20].map(function (n) { return [String(n), T(n + " turns", n + " turda bir")]; }), String(every), function (v) { setX("learn.set", { learn: true, every: +v }); }); } }) : null,
         row({ icon: "lightbulb", label: T("Next-step suggestions", "Sonraki adım önerileri"), sub: T("After each answer, 4 likely follow-ups (one small call to the fast model)", "Her yanıttan sonra 4 olası devam (hızlı modele küçük bir çağrı)"), wrap: true, toggle: fu, onToggle: function (on) { setX("followups.set", { on: on }, function () { S.state.followups = on; }); } }),
+        X.skills51 && X.skills51.available !== false ? row({ icon: "graduation-cap", label: T("Learn skills from tasks", "İşlerden beceri öğren"), sub: T("After a multi-step task, yaver may save it as a trial skill — you keep or delete it", "Çok adımlı bir işten sonra yaver onu deneme beceri olarak kaydedebilir — tutar ya da silersiniz"), wrap: true, toggle: !!X.skills51.on, onToggle: function (on) { setX("learn.skills", { on: on }); } }) : null,
         row({ icon: "brain", label: T("Memory and lessons", "Hafıza ve dersler"), sub: T("What yaver knows and learned", "yaver'in bildikleri ve öğrendikleri"), onclick: function () { openKnowledge(); } })
       ]);
       lg.id = "s-learn"; box.appendChild(lg);
@@ -3590,6 +3605,7 @@
 
   /* ------------------------------------------------------------ memory, schedule */
   function openSchedule() {
+    if (window.YV51) { YV51.schedulesPage(); return; }
     closeDrawer();
     if (topPage() === "schedule") return;
     pushPage("schedule", T("Reminders and scheduled tasks", "Hatırlatmalar ve zamanlanmış görevler"), function (body) {
@@ -3657,6 +3673,7 @@
       h("div", { class: "scrchip hidden", id: "scrchip" }),
       h("div", { class: "atts hidden", id: "atts" }),
       h("div", { class: "cchips", id: "cchips" }),
+      h("div", { class: "smode hidden", id: "smode" }),
       h("div", { class: "crow" },
         h("button", { class: "ib", "aria-label": T("Attach", "Ekle"), onclick: pick }, icon("paperclip")),
         ta,
@@ -3904,7 +3921,8 @@
     COMMANDS: COMMANDS, pickModel: pickModel, editFile: typeof editFile === "function" ? editFile : null, timeOf: timeOf, bytes: bytes, wsUrl: wsUrl, kbChanged: kbChanged,
     renderSettings: renderSettings, renderShell: renderShell, closeDrawer: closeDrawer, openDrawer: openDrawer, stop: stop,
     chatMenu: chatMenu, ctxSheet: ctxSheet, openSchedule: openSchedule, openSetup: openSetup, openMail: openMail, composeSheet: composeSheet, newTaskSheet: newTaskSheet, taskSheet: taskSheet, peopleSheet: peopleSheet, gatesLogSheet: gatesLogSheet, eventSheet: eventSheet, onEvent: function (t, d) { onEvent(t, d); }, renderPlanBar: renderPlanBar, sheets: sheets,
-    loadBrief: loadBrief, BRIEF: BRIEF, openEventById: openEventById, msgMenu: msgMenu, renderMailList: renderMailList };
+    loadBrief: loadBrief, BRIEF: BRIEF, openEventById: openEventById, msgMenu: msgMenu, renderMailList: renderMailList,
+    longPress: longPress, longWhen: longWhen, shortWhen: shortWhen, dayLabel: dayLabel, loading: loading, errorView: errorView, renderKb: renderKb };
 
   /* ------------------------------------------------------------ start */
   function start() {

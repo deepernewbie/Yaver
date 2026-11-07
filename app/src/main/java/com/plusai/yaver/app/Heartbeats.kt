@@ -34,18 +34,90 @@ object Turns {
     /** Notes shown in the chat (UI.note); default: a Bridge event. */
     @Volatile var note: (String, String) -> Unit = { id, text -> Bridge.emit("note", JSONObject().put("convoId", id).put("text", text)) }
 
-    private class Item(val text: String, val display: String?)
+    /** [user]: typed by the user (only those cut a streaming answer); heartbeats / reports / agents are not. */
+    private class Item(val text: String, val display: String?, val user: Boolean, val id: String = H51.newId("s"))
     private val pending = ConcurrentHashMap<String, MutableList<Item>>()
+
+    /** Steer state events for the UI: received | delivered (given to the model) | next (became the next turn) | withdrawn. */
+    private fun steerEvent(convoId: String, id: String, state: String, reason: String? = null) {
+        val o = JSONObject().put("convoId", convoId).put("steerId", id).put("state", state)
+        if (reason != null) o.put("reason", reason)
+        H51.emit("steer", o)
+    }
     // runs started here (their end is handled by start itself); weak so finished runs are dropped
     private val own: MutableSet<Bridge.Run> = Collections.synchronizedSet(Collections.newSetFromMap(java.util.WeakHashMap()))
 
     fun isRunning(convoId: String) = Bridge.runs.containsKey(convoId)
 
     /** Queue a message for the running turn of [convoId]; delivered at the next safe point or right after the turn. */
-    fun steer(convoId: String, text: String, display: String? = null) {
-        pending.getOrPut(convoId) { Collections.synchronizedList(ArrayList()) }.add(Item(text, display))
+    fun steer(convoId: String, text: String, display: String? = null, user: Boolean = true): String {
+        val item = Item(text, display, user)
+        pending.getOrPut(convoId) { Collections.synchronizedList(ArrayList()) }.add(item)
+        steerEvent(convoId, item.id, "received")
         watch()
+        // a streaming answer that already showed text is cut by the user's message; the shown text is kept (Agent loop)
+        if (user) try { H51.steerArrived(convoId) } catch (e: Throwable) { Diag.e("turns", "steer cut", e) }
+        return item.id
     }
+
+    /** Takes back a steered message that the model has not received yet: its text, or null when already delivered. */
+    fun withdraw(convoId: String, steerId: String): String? {
+        val l = pending[convoId] ?: return null
+        val item = synchronized(l) { l.firstOrNull { it.id == steerId }?.also { l.remove(it) } } ?: return null
+        steerEvent(convoId, steerId, "withdrawn")
+        return item.text
+    }
+
+    // ---- queue: messages that run as the next turns of a conversation (persistent FIFO) ----
+    /**
+     * Starts a queued message as a new turn, like chat.send would (convoId, text, display, attachments). Set by the
+     * bridge; null = Bridge.dispatch("chat.send", {convoId, text, display, attachments}).
+     */
+    @Volatile var startNext: ((String, String, String?, List<String>) -> Unit)? = null
+    private val qlock = Any()
+
+    fun enqueue(convoId: String, text: String, display: String?, files: List<String>): String {
+        val id = H51Queue.add(convoId, text, display, files)
+        H51Queue.changed(convoId)
+        watch()
+        // nothing running any more (the run ended meanwhile): start it now (unless the user stopped this chat)
+        if (!isRunning(convoId) && !Convos.isLive(convoId)) Y.bg { Thread.sleep(300); if (!isRunning(convoId) && !hasPending(convoId)) startQueued(convoId, auto = true) }
+        return id
+    }
+    fun queued(convoId: String): JSONArray = H51Queue.json(convoId)
+    fun unqueue(convoId: String, id: String): Boolean = H51Queue.remove(convoId, id).also { if (it) H51Queue.changed(convoId) }
+
+    /**
+     * The next queued message of [convoId] as a new turn, when nothing runs there. [auto] (end of a run, monitor):
+     * only messages queued in this process, and not after the user pressed Stop in this chat. Manual (the UI's
+     * "start queued" → chat.queue.start): any message, and it lifts the stop hold. The item is removed only once the
+     * model is set up and the chat exists, and put back when the start fails.
+     */
+    fun startQueued(convoId: String, auto: Boolean = false): Boolean = synchronized(qlock) {
+        if (isRunning(convoId) || Convos.isLive(convoId)) return false
+        val head = H51Queue.items(convoId).firstOrNull() ?: return false
+        if (auto && (H51Queue.isHeld(convoId) || head.at < H51Queue.processStart)) return false
+        if (!Cfg.llmReady || Convos.load(convoId) == null) { Diag.i("turns", "$convoId: queued message waits (no model, or the chat is gone)"); return false }
+        if (!auto) H51Queue.release(convoId)
+        val it = H51Queue.pop(convoId) ?: return false
+        Diag.i("turns", "$convoId: queued message ${it.id} starts as the next turn")
+        try {
+            val f = startNext
+            if (f != null) f(convoId, it.text, it.display, it.files)
+            else Bridge.dispatch("chat.send", JSONObject().put("convoId", convoId).put("text", it.text).put("display", it.display ?: "").put("attachments", JSONArray(it.files)))
+        } catch (e: Throwable) {
+            Diag.e("turns", "queued message could not start", e)
+            H51Queue.pushFront(convoId, it)
+            H51Queue.changed(convoId)
+            note(convoId, Y.t("Queued message not sent: ", "Sıradaki mesaj gönderilemedi: ") + (e.message ?: e.toString()))
+            return false
+        }
+        H51Queue.changed(convoId)
+        true
+    }
+
+    /** A user steer is waiting (only those cut a streaming answer). */
+    fun hasUserPending(convoId: String) = pending[convoId]?.let { l -> synchronized(l) { l.any { it.user } } } == true
 
     fun hasPending(convoId: String) = pending[convoId]?.isNotEmpty() == true
 
@@ -57,6 +129,7 @@ object Turns {
         val l = pending[convoId] ?: return null
         val items = synchronized(l) { val c = ArrayList(l); l.clear(); c }
         if (items.isEmpty()) return null
+        for (it in items) steerEvent(convoId, it.id, "delivered")
         val ln = note?.invoke(items.map { it.text }) ?: langNote(convoId)
         val content = STEER_PREFIX + "\n" + items.joinToString("\n\n") { it.text } + ln.trim().let { if (it.isNotBlank()) "\n\n$it" else "" }
         return JSONObject().put("role", "user").put("content", content).put("display", items.joinToString("\n\n") { it.display ?: it.text })
@@ -65,7 +138,7 @@ object Turns {
 
     /** Children.deliver: steer into running work, or start a new turn. */
     fun deliver(convoId: String, text: String, label: String?) {
-        if (isRunning(convoId)) steer(convoId, text, label) else if (!start(convoId, text, label, "agent")) Diag.i("turns", "could not deliver to $convoId: " + clip(text, 200))
+        if (isRunning(convoId)) steer(convoId, text, label, user = false) else if (!start(convoId, text, label, "agent")) Diag.i("turns", "could not deliver to $convoId: " + clip(text, 200))
     }
 
     private fun listener(id: String, run: Bridge.Run) = listenerFor?.invoke(id, run) ?: object : AgentListener {
@@ -85,7 +158,7 @@ object Turns {
         if (!Cfg.llmReady) return false
         val c = Convos.load(convoId) ?: return false
         val run = Bridge.Run(Cancel())
-        if (Bridge.runs.putIfAbsent(c.id, run) != null) { steer(c.id, text, label); return true }
+        if (Bridge.runs.putIfAbsent(c.id, run) != null) { steer(c.id, text, label, user = internal == null && label == null); return true }
         own.add(run)
         watch()
         Bridge.emit("run", JSONObject().put("convoId", c.id).put("phase", "start").put("internal", internal ?: JSONObject.NULL).put("label", label ?: JSONObject.NULL).put("text", label ?: text))
@@ -115,7 +188,9 @@ object Turns {
     fun afterTurn(convoId: String, aborted: Boolean) {
         Y.bg {
             if (flushPending(convoId, aborted)) return@bg
-            if (aborted) return@bg
+            // queued messages run next; after a Stop they wait for the user ("start queued" in the UI)
+            if (aborted) { H51Queue.hold(convoId); return@bg }
+            if (startQueued(convoId, auto = true)) return@bg
             Thread.sleep(600)
             if (isRunning(convoId)) return@bg
             try { if (continueGoal?.invoke(convoId) == true) return@bg } catch (e: Throwable) { Diag.e("turns", "goal", e) }
@@ -128,9 +203,10 @@ object Turns {
         val l = pending[convoId] ?: return false
         val rest = synchronized(l) { val c = ArrayList(l); l.clear(); c }
         if (rest.isEmpty()) return false
-        if (aborted) { note(convoId, Y.t("Not sent — the task was stopped: ", "Gönderilmedi — görev durduruldu: ") + rest.joinToString(" · ") { clip(it.display ?: it.text, 80) }); return false }
+        if (aborted) { for (it in rest) steerEvent(convoId, it.id, "withdrawn", "stopped"); note(convoId, Y.t("Not sent — the task was stopped: ", "Gönderilmedi — görev durduruldu: ") + rest.joinToString(" · ") { clip(it.display ?: it.text, 80) }); return false }
+        for (it in rest) steerEvent(convoId, it.id, "next")
         // queued user messages become the next ordinary turn; injected ones (heartbeats, reports) stay internal
-        val user = rest.all { it.display == null }
+        val user = rest.all { it.user }
         val label = if (!user && rest.all { it.display != null }) rest.joinToString(" · ") { it.display!! } else null
         if (!start(convoId, rest.joinToString("\n\n") { it.text }, label, if (user) null else "agent")) Diag.i("turns", "dropped ${rest.size} queued message(s) for $convoId (no model or conversation gone)")
         return true
@@ -149,7 +225,9 @@ object Turns {
                     for ((id, r) in seen) if (now[id] !== r && r !in own) afterTurn(id, r.cancel.cancelled)
                     seen = now
                     // queued messages for conversations that are not running (the turn ended before we noticed)
-                    for ((id, l) in pending) if (l.isNotEmpty() && !Bridge.runs.containsKey(id)) Y.bg { if (!isRunning(id)) flushPending(id, false) }
+                    for ((id, l) in pending) if (l.isNotEmpty() && !Bridge.runs.containsKey(id)) Y.bg { if (!isRunning(id) && !flushPending(id, false)) startQueued(id, auto = true) }
+                    // queued messages of conversations where nothing runs (the run ended before we noticed, or after a restart)
+                    for (id in H51Queue.ids()) if (!Bridge.runs.containsKey(id) && !Convos.isLive(id) && !hasPending(id)) Y.bg { if (!isRunning(id)) startQueued(id, auto = true) }
                 } catch (_: InterruptedException) { break } catch (e: Throwable) { Diag.e("turns", "monitor", e) }
             }
         }, "yaver-turns").apply { isDaemon = true; start() }
@@ -243,7 +321,7 @@ object Heartbeats {
         }
         for ((cid, h) in fire) {
             val text = text(h) + Turns.langNote(cid).let { if (it.isNotBlank()) "\n\n$it" else "" }
-            if (Turns.isRunning(cid)) Turns.steer(cid, text, "💓 heartbeat · ${h.optString("label")}")
+            if (Turns.isRunning(cid)) Turns.steer(cid, text, "💓 heartbeat · ${h.optString("label")}", user = false)
             else Turns.start(cid, text, "Heartbeat · ${h.optString("label")} (every ${fmtEvery(h.optLong("every"))})", "heartbeat")
         }
     }
@@ -511,7 +589,7 @@ object Autonomous {
         val task = flags.replace(FLAG, " ").replace(Regex("\\s+"), " ").trim()
         enable(convoId, flags)
         val msg = "🤖 " + status(convoId)
-        if (task.isNotEmpty()) { if (Turns.isRunning(convoId)) Turns.steer(convoId, task) else Turns.start(convoId, task, null, null) }
+        if (task.isNotEmpty()) { if (Turns.isRunning(convoId)) Turns.steer(convoId, task, user = false) else Turns.start(convoId, task, null, null) }
         else if (!Turns.isRunning(convoId) && (Convos.load(convoId)?.messages?.length() ?: 0) > 0) Y.bg { try { next(convoId) } catch (e: Throwable) { Turns.note(convoId, "Autonomous: " + e.message) } }
         return msg
     }
