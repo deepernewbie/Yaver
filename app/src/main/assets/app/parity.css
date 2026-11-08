@@ -232,3 +232,9 @@ h4.sub { margin: 16px 0 8px; font-size: 13px; color: var(--muted); }
 .card.skl .sk3 { margin-top: 6px; font-size: 12.5px; color: var(--muted); }
 .skdraft { font-size: 13.5px; overflow-wrap: anywhere; }
 .skdraft pre { white-space: pre-wrap; }
+/* "Şimdi ekle / Sıraya al" chip: in the composer chip row, a touch more compact so three chips stay on one line */
+.cchip.smode { padding: 0 9px 0 8px; gap: 4px; }
+@media (max-width: 400px) {
+  .cchips { gap: 5px; }
+  .cchips .cchip { padding: 0 8px; gap: 4px; font-size: 12px; }
+}

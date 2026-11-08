@@ -53,6 +53,7 @@
     var m = permMode(), plan = !!((S.plan[cid()] || {}).planMode);
     box.appendChild(h("button", { class: "cchip" + (m !== "auto" ? " on " + m : ""), "aria-label": T("Permissions", "İzinler") + ": " + permLabel(m), onclick: permSheet }, icon(PERM_ICON[m] || "shield-check", "xs"), h("span", null, permLabel(m))));
     box.appendChild(h("button", { class: "cchip" + (plan ? " on plan" : ""), "aria-pressed": String(plan), onclick: function () { I.runCommand(plan ? "/plan off" : "/plan"); setTimeout(renderChips, 600); } }, icon("map", "xs"), h("span", null, plan ? T("Plan mode on", "Plan modu açık") : T("Plan first", "Önce planla"))));
+    if (window.YV51) window.YV51.syncMode();   /* the "Şimdi ekle / Sıraya al" chip lives in this row while yaver works */
   }
 
   /* ================================================================ files changed in a turn (diff + revert) */
@@ -700,16 +701,25 @@
 
   /* ---------------------------------------------------------------- steer vs queue */
   function sendMode(id) { return Q.mode[id] || "steer"; }
+  /* one chip in the composer's chip row, next to "Otomatik" / "Önce planla", only while yaver works:
+     "Şimdi ekle" (the message joins the running task) ⇄ "Sıraya al" (it runs after this task) */
+  var lastRunning = false;
   function syncMode(running) {
-    var box = $("#smode"); if (!box) return;
-    var on = !!running && !!cid();
-    box.classList.toggle("hidden", !on);
-    if (!on) { clear(box); return; }
-    var cur = sendMode(S.convoId);
-    clear(box).appendChild(h("div", { class: "seg", role: "radiogroup", "aria-label": T("While yaver works", "yaver çalışırken") },
-      [["steer", "zap", T("Add now", "Şimdi ekle"), T("joins the running task", "çalışan göreve katılır")], ["queue", "list-todo", T("Queue", "Sıraya al"), T("runs after this task", "bu görevden sonra çalışır")]].map(function (o) {
-        return h("button", { class: "segb" + (cur === o[0] ? " on" : ""), role: "radio", "aria-checked": String(cur === o[0]), title: o[3], onclick: function () { Q.mode[S.convoId] = o[0]; syncMode(true); } }, icon(o[1], "xs"), h("span", null, o[2]));
-      })));
+    if (running !== undefined) lastRunning = !!running;
+    var old = $("#smode"); if (old) { clear(old); old.classList.add("hidden"); }
+    var row = $("#cchips"); if (!row) return;
+    var prev = row.querySelector(".cchip.smode"); if (prev) prev.remove();
+    if (!lastRunning || !cid()) return;
+    var q = sendMode(S.convoId) === "queue";
+    row.appendChild(h("button", {
+      class: "cchip smode" + (q ? " on" : ""), "aria-pressed": String(q),
+      "aria-label": T("While yaver works: ", "yaver çalışırken: ") + (q ? T("queue my message", "mesajımı sıraya al") : T("add my message to the task", "mesajımı göreve ekle")),
+      title: q ? T("runs after this task — tap to add to the task instead", "bu görevden sonra çalışır — göreve eklemek için dokunun") : T("joins the running task — tap to queue it instead", "çalışan göreve katılır — sıraya almak için dokunun"),
+      onclick: function () {
+        Q.mode[S.convoId] = q ? "steer" : "queue"; syncMode();
+        toast(q ? T("Your message will join the running task", "Mesajın çalışan göreve eklenecek") : T("Your message will run after this task", "Mesajın bu görevden sonra çalışacak"));
+      }
+    }, icon(q ? "list-todo" : "zap", "xs"), h("span", null, q ? T("Queue", "Sıraya al") : T("Add now", "Şimdi ekle"))));
   }
   function steered(id, r, t, lm) {
     if (!r || !r.steerId) return;

@@ -1,3 +1,6 @@
+# yaver 5.1.1
+- **"Şimdi ekle / Sıraya al" artık ayrı bir anahtar değil**, "Otomatik" ve "Önce planla"nın yanında aynı tarzda tek bir çip. Yalnızca yaver çalışırken görünüyor, dokundukça ikisi arasında geçiyor; seçilen mod kısa bir bildirimle söyleniyor. Dar ekranda (360 px) üç çip tek satıra sığsın diye çipler biraz küçüldü.
+
 # yaver 5.1 (Mika'dan esinlenen özellikler)
 
 ## Durdurma, araya girme, sıra
