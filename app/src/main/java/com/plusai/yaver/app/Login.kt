@@ -178,6 +178,7 @@ class MailLoginActivity : Activity() {
             }
         }
         // the session already ended: start from a clean slate, or the gateway keeps answering with the dead session
+        SilentLogin.visible = true; SilentLogin.abort()
         if (Mail.needsSignIn || intent.getBooleanExtra("fresh", false)) { Diag.i("login", "session had ended: clearing the gateway cookies first"); MailSession.clear(origin) }
         web.loadUrl(startUrl())
         web.postDelayed(ticker, 3000)
@@ -269,9 +270,8 @@ class MailLoginActivity : Activity() {
         done = true
         CookieManager.getInstance().flush()
         hint.text = Y.t("Signed in — connecting yaver…", "Oturum açıldı — yaver bağlanıyor…")
-        Mail.signedIn()
         Y.bg {
-            val err = try { Mail.connect(); null } catch (e: Throwable) { e.message ?: e.toString() }
+            val err = try { Mail.signedIn(); Mail.connect(); null } catch (e: Throwable) { e.message ?: e.toString() }
             Y.ui {
                 if (isFinishing) return@ui
                 if (err == null) {
@@ -285,7 +285,7 @@ class MailLoginActivity : Activity() {
         }
     }
 
-    override fun onDestroy() { try { web.destroy() } catch (_: Throwable) {}; super.onDestroy() }
+    override fun onDestroy() { SilentLogin.visible = false; try { web.destroy() } catch (_: Throwable) {}; super.onDestroy() }
 }
 
 /** yaver's own browser for links. */

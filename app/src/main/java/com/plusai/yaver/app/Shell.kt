@@ -1048,6 +1048,10 @@ object CodeEngine {
     private val jobs = ConcurrentHashMap<Int, Job>()
     private val seq = AtomicInteger(0)
     private val PTC_BLOCKED = setOf("execute_code", "clarify", "delegate_task", "present_plan")
+    /** tools that change something on the phone itself: from code only their read-only actions are allowed (a code loop once set 76 alarms) */
+    private val PTC_PHONE_ACT = setOf("phone_alarm", "phone_open", "phone_notify", "phone_speak")
+    private val PTC_PHONE_READ = setOf("next", "list", "get", "read")
+    fun ptcPhoneBlocked(name: String, a: JSONObject): Boolean = name in PTC_PHONE_ACT && !(name == "phone_alarm" && a.optString("action").lowercase() in PTC_PHONE_READ)
 
     private fun pyDir() = File(Y.app.filesDir, "python").apply { mkdirs() }
     private fun cacheIndexFile() = File(pyDir(), "cache.json")
@@ -1129,6 +1133,7 @@ object CodeEngine {
             throw IllegalArgumentException("unknown tool $name. Available: ${names.joinToString(", ")}")
         }
         if (name in PTC_BLOCKED) throw IllegalArgumentException("$name cannot be called from code" + if (name == "delegate_task") " — use spawn(goal, {context}) instead" else "")
+        if (ptcPhoneBlocked(name, a)) throw IllegalArgumentException("$name changes things on the phone and cannot be called from code — call it directly as a tool, once, only for what the user asked")
         return t.run(a, ctx)
     }
 

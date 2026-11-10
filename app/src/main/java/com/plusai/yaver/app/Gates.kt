@@ -250,6 +250,9 @@ class GateTurn(var userText: String, var lang: String? = null) {
     var iter = 0
     var loopNudgeAt = 0
     var stopNudged = false
+    /** when the turn started and how many "this is taking long" notes went out (yaver 5.1.2) */
+    var started = System.currentTimeMillis()
+    var budgetNudges = 0
 }
 
 class Route {
@@ -446,6 +449,7 @@ object Gates {
         val A = grams(a); val B = grams(b); if (A.isEmpty() || B.isEmpty()) return 0.0
         var n = 0; for (x in A) if (x in B) n++; return n.toDouble() / maxOf(A.size, B.size)
     }
+    private val PROBE_RX = Regex("(?i)unknown (tool|action|target)|is not a function|is not defined|not supported|no such (tool|action)|Error: ")
     private val ERR_RX = Regex("^\\s*(Error|Traceback|ERROR)|\\nTraceback \\(most recent call last\\)|Uncaught |exit [1-9]")
 
     /** Cheap loop check that works without System-1. */
@@ -462,13 +466,31 @@ object Gates {
         }
         val lastRes = tools.takeLast(4).map { content(it) }
         if (why == null && lastRes.size == 4 && lastRes.all { ERR_RX.containsMatchIn(it) }) why = "the last four tool calls all failed"
+        // probing: most recent results are errors or "unknown …" answers (also inside execute_code output), in varied forms
+        val last8 = tools.takeLast(8).map { content(it) }
+        if (why == null && last8.size == 8 && last8.count { ERR_RX.containsMatchIn(it) || PROBE_RX.containsMatchIn(it) } >= 6) why = "most of your last eight tool calls failed or hit unknown tools/actions — you are probing instead of working"
         if (why == null) return null
         turn.loopNudgeAt = turn.iter
         return "[harness note] Loop check: $why. Stop repeating this approach. In one line, say why it is not working, then try a clearly different approach — or, if something outside your control blocks you (missing access, network, a package that cannot run here), tell the user plainly what is blocked and what you can offer instead."
     }
 
     /** gateLoop: returns a nudge to append ("\n\n" + nudge) to the last tool result, or null. Not for subagents. */
+    /**
+     * A turn that runs very long: after 20 min and 12 model calls, and again after 40 min and 24, tell the model to wrap up.
+     * (A weak model once spent 89 minutes and 875k tokens on "when is my alarm".)
+     */
+    fun budgetNote(turn: GateTurn, now: Long = System.currentTimeMillis()): String? {
+        val mins = (now - turn.started) / 60000L
+        val need = if (turn.budgetNudges == 0) 20L to 12 else if (turn.budgetNudges == 1) 40L to 24 else return null
+        if (mins < need.first || turn.iter < need.second) return null
+        turn.budgetNudges++
+        return "[harness note] Time check: this request has run for $mins minutes and ${turn.iter} steps. " +
+            (if (turn.budgetNudges == 1) "Unless you are clearly about to finish, stop exploring now and answer the user with what you have; say plainly what you could not find or do."
+             else "Answer the user NOW in plain text without further tool calls: what you found, and what you could not do.")
+    }
+
     fun loop(c: Convo, turn: GateTurn, turnMsgs: List<JSONObject>, cancel: Cancel? = null): String? {
+        budgetNote(turn)?.let { return it }
         loopHeuristic(turn, turnMsgs)?.let { return it }
         if (!S1.enabled("loop") || turn.iter < 3 || turn.iter % 2 != 0) return null
         val trail = turnMsgs.filter { role(it) == "assistant" && calls(it).isNotEmpty() }.takeLast(6)

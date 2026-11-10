@@ -90,5 +90,9 @@ object WebOwa {
         return r
     }
 
-    fun reset() { Y.main.post { try { view?.destroy() } catch (_: Throwable) {}; view = null; viewOrigin = "" } }
+    fun reset() {
+        ready = null
+        // requests still waiting on the old page end now instead of at their timeout (a new sign-in is waiting behind them)
+        for ((_, w) in waits) { if (w.second[0] == null) w.second[0] = Resp(-1, false, "", "the mail page was restarted"); w.first.countDown() }
+        Y.main.post { try { view?.destroy() } catch (_: Throwable) {}; view = null; viewOrigin = "" } }
 }

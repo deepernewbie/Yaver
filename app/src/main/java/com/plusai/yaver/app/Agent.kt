@@ -460,7 +460,8 @@ object Agent {
             try {
                 got = Compactor.chatWithRetry(c, tools, model, cancel, isSub, st, { t -> note(t); Diag.i("ctx", t) }, progress) { tl ->
                     val req = requestMessages(c, systemExtra, isSub)
-                    val tsent = if (empty >= 3 || tl.length() == 0) null else tl
+                    // 5.1.2: after the second "time check" the model answers without tools
+                    val tsent = if (empty >= 3 || tl.length() == 0 || (!isSub && turn.budgetNudges >= 2)) null else tl
                     Llm.chat(req, tsent, model,
                         onDelta = { listener?.onDelta(it); H51.delta(rec, it) }, onThink = { listener?.onThinking(it) }, cancel = callCancel, maxTokens = Compactor.fitOutput(c, tl, model, outBudget),
                         stream = if (empty >= 2) false else Cfg.stream, effort = if (empty >= 2) "low" else null)

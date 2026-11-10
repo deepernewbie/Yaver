@@ -87,9 +87,15 @@ class KeepAliveReceiver : BroadcastReceiver() {
 object SilentLogin {
     @Volatile private var lastTry = 0L
     @Volatile var running = false
+    /** the visible sign-in page is open: a hidden sign-in now would clear the gateway cookies under the user */
+    @Volatile var visible = false
+    @Volatile private var abortNow: (() -> Unit)? = null
+
+    /** Stops a hidden sign-in that is running (the user opened the sign-in page). */
+    fun abort() { abortNow?.let { Diag.i("relogin", "stopped: the sign-in page was opened"); it() } }
 
     fun canTry(): Boolean = Cfg.mailAutoSubmit && Cfg.mailPass.isNotEmpty() && Cfg.mailUser.isNotEmpty() && Mail.owaOrigin != null &&
-        Looper.myLooper() != Looper.getMainLooper() && !running && System.currentTimeMillis() - lastTry > 10 * 60_000L
+        Looper.myLooper() != Looper.getMainLooper() && !running && !visible && System.currentTimeMillis() - lastTry > 10 * 60_000L
 
     /**
      * Signs in again on a hidden page. Blocking (background thread only); true when the mailbox works again.
@@ -110,6 +116,7 @@ object SilentLogin {
         var checking = false
 
         fun finish(result: Boolean) { if (done.count > 0L) { ok = result; done.countDown() } }
+        abortNow = { finish(false) }
 
         lateinit var step: () -> Unit
         step = step@{
@@ -185,7 +192,7 @@ object SilentLogin {
             }
         } catch (e: CancelledException) {
         } finally {
-            running = false
+            running = false; abortNow = null
             Y.main.post { try { view?.stopLoading(); view?.destroy() } catch (_: Throwable) {}; view = null }
         }
         Diag.i("relogin", if (ok) "signed in again silently" else "silent sign-in did not finish${if (needCode) " (the gateway asks for an authenticator code)" else ""}")

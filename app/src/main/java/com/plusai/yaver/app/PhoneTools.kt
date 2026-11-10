@@ -70,7 +70,11 @@ object Phone {
         return out
     }
 
+    /** yaver's own screen is in front — Android silently drops activity starts from apps in the background */
+    fun onScreen(): Boolean = Bridge.host?.let { it.resumedNow && !it.isFinishing } == true
+
     fun launch(i: Intent) {
+        if (!onScreen()) throw IllegalStateException("yaver is not on the screen right now, so Android does not let it open another app — nothing was done. Tell the user to open yaver and ask again.")
         try {
             onMain {
                 val a = PermGate.activity
@@ -178,6 +182,52 @@ object Phone {
         return "opened ${hit.loadLabel(pm)}"
     }
 
+    /**
+     * The next alarm the phone will ring (any alarm app), as Android reports it — the only alarm data apps may read;
+     * the full alarm list of the Clock app is private to it.
+     */
+    fun nextAlarmAt(): Long = try { Y.app.getSystemService(android.app.AlarmManager::class.java)?.nextAlarmClock?.triggerTime ?: 0L } catch (_: Throwable) { 0L }
+
+    /**
+     * Did the Clock app really add the alarm? Android only shows the NEXT alarm, so: [expect] = when the new alarm
+     * would first ring; [before]/[after] = the next alarm before and after asking (0 = none).
+     * "yes" — the next alarm is now the new one; "hidden" — an earlier alarm rings first, so it can't be seen;
+     * "no" — the new one would be next but the next alarm did not change to it.
+     */
+    fun alarmCheck(expect: Long, before: Long, after: Long): String = when {
+        after != 0L && Math.abs(after - expect) < 60_000L -> "yes"
+        after != 0L && after < expect - 60_000L -> "hidden"
+        else -> "no"
+    }
+
+    /** when an alarm at h:m (on [days] 1=Sun..7=Sat, empty = once) rings first, from [now] */
+    fun alarmFirstRing(h: Int, m: Int, days: List<Int>, now: Long = System.currentTimeMillis()): Long {
+        val c = java.util.Calendar.getInstance(); c.timeInMillis = now
+        c.set(java.util.Calendar.HOUR_OF_DAY, h); c.set(java.util.Calendar.MINUTE, m); c.set(java.util.Calendar.SECOND, 0); c.set(java.util.Calendar.MILLISECOND, 0)
+        if (c.timeInMillis <= now) c.add(java.util.Calendar.DAY_OF_MONTH, 1)
+        if (days.isNotEmpty()) repeat(7) { if (c.get(java.util.Calendar.DAY_OF_WEEK) !in days) c.add(java.util.Calendar.DAY_OF_MONTH, 1) }
+        return c.timeInMillis
+    }
+
+    fun nextAlarm(): String {
+        val ac = try { Y.app.getSystemService(android.app.AlarmManager::class.java)?.nextAlarmClock } catch (_: Throwable) { null }
+            ?: return Y.t("none set", "kurulu alarm yok")
+        val at = ac.triggerTime
+        val loc = if (Y.tr) Locale("tr", "TR") else Locale.US
+        val now = System.currentTimeMillis()
+        val cal = java.util.Calendar.getInstance()
+        val today = cal.apply { timeInMillis = now; set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0) }.timeInMillis
+        val day = when {
+            at < today + 86400000L -> Y.t("today", "bugün")
+            at < today + 2 * 86400000L -> Y.t("tomorrow", "yarın")
+            else -> java.text.SimpleDateFormat("EEEE d MMMM", loc).format(java.util.Date(at))
+        }
+        val mins = ((at - now) / 60000L).coerceAtLeast(0)
+        val left = if (mins < 60) Y.t("in $mins min", "$mins dk sonra") else Y.t("in ${mins / 60} h ${mins % 60} min", "${mins / 60} sa ${mins % 60} dk sonra")
+        val app = try { ac.showIntent?.creatorPackage } catch (_: Throwable) { null }
+        return "$day " + java.text.SimpleDateFormat("HH:mm", loc).format(java.util.Date(at)) + " ($left)" + (app?.let { " · $it" } ?: "")
+    }
+
     fun info(): String {
         val sb = StringBuilder()
         val bi = Y.app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -198,6 +248,7 @@ object Phone {
         } catch (_: Throwable) {}
         val assistant = Settings.Secure.getString(Y.app.contentResolver, "assistant") ?: ""
         sb.append("yaver is the default assistant: ${assistant.contains(Y.app.packageName)}\n")
+        sb.append("next alarm: ${nextAlarm()}\n")
         sb.append("always on: ${AgentService.running}")
         return sb.toString()
     }
@@ -336,6 +387,8 @@ class ScheduleReceiver : BroadcastReceiver() {
 }
 
 object PhoneTools {
+    /** alarms set per conversation turn ("convo#index of the user's message" → times) — see phone_alarm */
+    private val alarmsThisTurn = LinkedHashMap<String, HashSet<String>>()
     private fun ms(v: String, name: String): Long {
         if (v.matches(Regex("\\d{10,13}"))) return if (v.length <= 10) v.toLong() * 1000 else v.toLong()
         return MailTools.parseLocal(v).takeIf { it > 0 } ?: throw IllegalArgumentException("could not read the $name \"$v\" — use local ISO like 2026-11-02T09:30")
@@ -374,30 +427,76 @@ object PhoneTools {
         })
 
         Tools.add(Tool(
-            "phone_alarm", "The phone's Clock app. action=alarm (hour 0-23, minute, label, days like [\"mon\",\"fri\"] to repeat), timer (seconds or minutes, label), show (open the alarm list).",
-            P.props("action" to P.s("alarm | timer | show", "alarm", "timer", "show"), "hour" to P.n("Hour"), "minute" to P.n("Minute"), "seconds" to P.n("Timer seconds"), "minutes" to P.n("Timer minutes"), "label" to P.s("Label"), "days" to P.arr("Repeat days: sun mon tue wed thu fri sat")),
+            "phone_alarm",
+            "The phone's alarms and timers. action=next: when the next alarm rings (read-only; use this for \"when is my alarm\" — Android lets apps read only the next alarm, never the whole list). " +
+                "action=alarm: SET a new alarm (hour 0-23, minute, label, days like [\"mon\",\"fri\"] to repeat) — only when the user asked for an alarm. " +
+                "action=timer: start a timer (seconds or minutes, label). action=show: open the Clock app's alarm list on screen (returns no data). " +
+                "action=dismiss: turn off the alarm at hour/minute (the Clock app may ask the user). There is no other action; never call this tool to test or probe it.",
+            P.props("action" to P.s("next | alarm | timer | show | dismiss", "next", "alarm", "timer", "show", "dismiss"), "hour" to P.n("Hour"), "minute" to P.n("Minute"), "seconds" to P.n("Timer seconds"), "minutes" to P.n("Timer minutes"), "label" to P.s("Label"), "days" to P.arr("Repeat days: sun mon tue wed thu fri sat")),
             listOf("action")
         ) { a, ctx ->
-            if (ctx.background) return@Tool "Alarms can only be set while yaver is open."
-            when (a.str("action")) {
-                "show" -> { Phone.launch(Intent(AlarmClock.ACTION_SHOW_ALARMS)); "Opened the alarm list." }
+            val act = a.str("action").lowercase()
+            when (act) {
+                "next", "list", "get", "read" -> {
+                    val n = Phone.nextAlarm()
+                    Y.t("Next alarm: ", "Sıradaki alarm: ") + n + if (act == "list") Y.t(" (Android shares only the next alarm with apps; action=show opens the full list for the user)", " (Android uygulamalara yalnızca sıradaki alarmı verir; tüm liste için action=show kullanıcıya listeyi açar)") else ""
+                }
+                "show" -> { if (ctx.background) return@Tool "This can only be done while yaver is open."; Phone.launch(Intent(AlarmClock.ACTION_SHOW_ALARMS)); "Opened the alarm list on the screen (no data comes back to yaver)." }
                 "timer" -> {
+                    if (ctx.background) return@Tool "Timers can only be started while yaver is open."
                     val s = a.int("seconds", 0) + a.int("minutes", 0) * 60
                     if (s <= 0) throw IllegalArgumentException("give seconds or minutes")
                     val i = Intent(AlarmClock.ACTION_SET_TIMER).putExtra(AlarmClock.EXTRA_LENGTH, s).putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                     if (a.str("label").isNotEmpty()) i.putExtra(AlarmClock.EXTRA_MESSAGE, a.str("label"))
                     Phone.launch(i); "Timer started: ${s / 60} min ${s % 60} s."
                 }
-                else -> {
+                "dismiss" -> {
+                    if (ctx.background) return@Tool "This can only be done while yaver is open."
                     val h = a.int("hour", -1); val m = a.int("minute", 0)
                     if (h !in 0..23) throw IllegalArgumentException("hour 0-23 is required")
+                    val i = Intent(AlarmClock.ACTION_DISMISS_ALARM).putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_TIME)
+                        .putExtra(AlarmClock.EXTRA_HOUR, h).putExtra(AlarmClock.EXTRA_MINUTES, m)
+                    Phone.launch(i); String.format(Locale.US, "Asked the Clock app to turn off the %02d:%02d alarm (it may ask the user to confirm).", h, m)
+                }
+                "alarm", "set" -> {
+                    if (ctx.background) return@Tool "Alarms can only be set while yaver is open."
+                    val h = a.int("hour", -1); val m = a.int("minute", 0)
+                    if (h !in 0..23) throw IllegalArgumentException("hour 0-23 is required")
+                    // a weak model once "probed" this tool and set 76 alarms: at most 3 alarms per turn, never the same time twice
+                    synchronized(alarmsThisTurn) {
+                        // the turn = everything after the user's last real message in this conversation
+                        val arr = ctx.convo.messages
+                        val turnStart = (arr.length() - 1 downTo 0).firstOrNull { k -> arr.optJSONObject(k)?.let { it.optString("role") == "user" && !it.optBoolean("harness") } == true } ?: 0
+                        val tk = "${ctx.convo.id}#$turnStart"
+                        val set = alarmsThisTurn.getOrPut(tk) { HashSet() }
+                        val hm = String.format(Locale.US, "%02d:%02d", h, m)
+                        if (hm in set) throw IllegalArgumentException("an alarm for $hm was already set in this task — not setting it again")
+                        if (set.size >= 3) throw IllegalArgumentException("3 alarms were already set in this task; ask the user before setting more")
+                        set.add(hm)
+                        if (alarmsThisTurn.size > 50) alarmsThisTurn.keys.take(25).forEach { alarmsThisTurn.remove(it) }
+                    }
                     val i = Intent(AlarmClock.ACTION_SET_ALARM).putExtra(AlarmClock.EXTRA_HOUR, h).putExtra(AlarmClock.EXTRA_MINUTES, m).putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                     if (a.str("label").isNotEmpty()) i.putExtra(AlarmClock.EXTRA_MESSAGE, a.str("label"))
                     val map = mapOf("sun" to 1, "mon" to 2, "tue" to 3, "wed" to 4, "thu" to 5, "fri" to 6, "sat" to 7, "paz" to 1, "pzt" to 2, "sal" to 3, "çar" to 4, "car" to 4, "per" to 5, "cum" to 6, "cmt" to 7)
                     val days = ArrayList(a.list("days").mapNotNull { map[it.lowercase().take(3)] })
                     if (days.isNotEmpty()) i.putIntegerArrayListExtra(AlarmClock.EXTRA_DAYS, days)
-                    Phone.launch(i); String.format(Locale.US, "Alarm set for %02d:%02d.", h, m)
+                    val before = Phone.nextAlarmAt()
+                    val expect = Phone.alarmFirstRing(h, m, days)
+                    Phone.launch(i)
+                    // the Clock app adds it a moment later; Android then updates the "next alarm"
+                    var after = before; var verdict = "no"
+                    for (k in 0 until 12) { Thread.sleep(250); after = Phone.nextAlarmAt(); verdict = Phone.alarmCheck(expect, before, after); if (verdict == "yes") break }
+                    val hm = String.format(Locale.US, "%02d:%02d", h, m)
+                    when (verdict) {
+                        "yes" -> "Alarm set for $hm and confirmed — next alarm: ${Phone.nextAlarm()}."
+                        "hidden" -> "Asked the Clock app to set an alarm for $hm. An earlier alarm rings first (${Phone.nextAlarm()}), so yaver cannot see the new one to confirm it — tell the user this honestly."
+                        else -> {
+                            synchronized(alarmsThisTurn) { alarmsThisTurn.values.forEach { it.remove(hm) } }
+                            throw IllegalStateException("the alarm for $hm was NOT set: the Clock app did not add it (next alarm is still ${Phone.nextAlarm()}). Do not retry; tell the user to set it in the Clock app.")
+                        }
+                    }
                 }
+                else -> throw IllegalArgumentException("unknown action \"$act\" — the only actions are next, alarm, timer, show, dismiss. Do not try other names.")
             }
         })
 

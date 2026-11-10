@@ -14,14 +14,23 @@ object Mail {
     @Volatile var status: String = ""
     @Volatile var lastError: String = ""
     @Volatile var needsSignIn: Boolean = false
-    private val lock = Any()
+    /** guards connect(); never waited on from the main thread — connecting waits for the main thread (the mail web view) */
+    private val lock = java.util.concurrent.locks.ReentrantLock()
+    /** bumped by reset(): a connect that started before a reset (old cookies, ended session) stops at the next step */
+    private val gen = java.util.concurrent.atomic.AtomicInteger()
 
     /** The same browser identity as the sign-in page, so gateways see one client. */
     val ua: String by lazy { try { WebSettings.getDefaultUserAgent(Y.app) } catch (e: Throwable) { Http.MOBILE_UA } }
 
     val connected: Boolean get() = ex != null
 
-    fun reset() { synchronized(lock) { ex = null } }
+    /**
+     * Forgets the connection. Lock-free on purpose: the sign-in page calls it on the main thread while a background
+     * connect may hold the lock and wait for the main thread — that deadlock froze the sign-in page ("not responding").
+     */
+    fun reset() { gen.incrementAndGet(); ex = null }
+
+    private fun isMain() = try { android.os.Looper.myLooper() == android.os.Looper.getMainLooper() } catch (_: Throwable) { false }
 
     fun originOf(u: String): String? = try { val x = URL(u.trim()); "${x.protocol}://${x.host}${if (x.port > 0 && x.port != x.defaultPort) ":" + x.port else ""}" } catch (e: Exception) { null }
 
@@ -34,8 +43,20 @@ object Mail {
     }
 
     fun connect(cancel: Cancel? = null): Exchange {
-        synchronized(lock) {
-            ex?.let { return it }
+        ex?.let { return it }
+        if (isMain()) throw MailException(Y.t("Mail is busy connecting — try again in a moment.", "Posta şu an bağlanıyor — biraz sonra yeniden deneyin."))
+        repeat(4) {
+            // wait for a connect already running (it may finish for us), but stay cancellable
+            while (!lock.tryLock(250, java.util.concurrent.TimeUnit.MILLISECONDS)) cancel?.check()
+            val got = try { ex ?: attempt(cancel, gen.get()) } finally { lock.unlock() }
+            if (got != null) return got
+        }
+        throw MailException(Y.t("The mail connection kept being reset — try again.", "Posta bağlantısı sürekli sıfırlandı — yeniden deneyin."))
+    }
+
+    /** One connect pass under the lock; null when a reset() came meanwhile (the caller starts over). */
+    private fun attempt(cancel: Cancel?, myGen: Int): Exchange? {
+        run {
             if (!Cfg.mailConfigured) throw MailException(Y.t("Company mail is not set up yet — add your Outlook web address in Settings → Mail.", "Kurum postası henüz ayarlanmadı — Ayarlar → Posta'ya Outlook web adresinizi girin."))
             val user = Cfg.mailUser
             val pass = Cfg.mailPass
@@ -53,6 +74,8 @@ object Mail {
             var signIn: LoginRequired? = null
             for ((key, make) in tries) {
                 cancel?.check()
+                // signed in again / settings changed meanwhile: these tries use the old session — start over fresh
+                if (gen.get() != myGen) { Diag.i("mail", "connect superseded by a reset — starting over"); return null }
                 try {
                     status = Y.t("Connecting…", "Bağlanılıyor…")
                     Diag.i("mail", "connect try $key")
@@ -61,6 +84,7 @@ object Mail {
                     val e = Exchange(t)
                     e.probe(cancel)
                     Cfg.mailMode = key
+                    if (gen.get() != myGen) { Diag.i("mail", "connected, but a reset came meanwhile — starting over"); return null }
                     ex = e
                     needsSignIn = false
                     status = t.label
@@ -79,6 +103,7 @@ object Mail {
                     errors.add("${key.substringBefore(':').uppercase()} ${try { URL(key.substringAfter(':')).host } catch (x: Exception) { "" }}: ${e.message}")
                 }
             }
+            if (gen.get() != myGen) { Diag.i("mail", "connect failed, but a reset came meanwhile — starting over"); return null }
             status = Y.t("Not connected", "Bağlı değil")
             signIn?.let { needsSignIn = true; lastError = it.message ?: ""; throw it }
             lastError = errors.joinToString(" · ")
@@ -119,6 +144,7 @@ object Mail {
     /** Called after a successful sign-in on the page. */
     fun signedIn() {
         needsSignIn = false
+        WebOwa.reset()   // the hidden mail page starts fresh with the new session's cookies
         Prefs.put("mail.signedInAt", System.currentTimeMillis().toString())
         try { MailKeepAlive.arm(Y.app) } catch (_: Throwable) {}
         Prefs.put("mail.loginNotified", "0")
